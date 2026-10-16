@@ -3,6 +3,7 @@
 
 import type { Backend, Calendar, CalendarEvent, EventInput } from "./types";
 import { addDays, now, toDateOnly } from "./dates";
+import { joinDrill, splitDrill } from "./drill";
 import { periodOf, type Goal, type GoalsFile, type Horizon } from "./goals";
 
 const calendars: Calendar[] = [
@@ -200,6 +201,64 @@ function demoGoals(): GoalsFile {
   };
 }
 
+/** A series-master PATCH applied to the mock's expanded instances. */
+async function applySeriesPatch(masterId: string, patch: any) {
+  const insts = events.filter((e) => e.recurring_event_id === masterId);
+  const first = [...insts].sort((a, b) => a.start.localeCompare(b.start))[0];
+  const firstDate = first && (first.all_day ? first.start : toDateOnly(new Date(first.start)));
+  // UNTIL truncation: drop instances starting after the boundary
+  const rr: string | undefined = patch.recurrence?.[0];
+  const until = rr?.match(/UNTIL=(\d{8}T\d{6}Z)/)?.[1];
+  if (until) {
+    const u = new Date(
+      `${until.slice(0, 4)}-${until.slice(4, 6)}-${until.slice(6, 8)}T${until.slice(9, 11)}:${until.slice(11, 13)}:${until.slice(13, 15)}Z`,
+    );
+    for (let j = events.length - 1; j >= 0; j--) {
+      if (events[j].recurring_event_id === masterId && new Date(events[j].start) > u) {
+        events.splice(j, 1);
+      }
+    }
+  }
+  for (const e of insts.filter((e) => events.includes(e))) {
+    if (patch.summary != null) e.summary = patch.summary;
+    if (patch.description !== undefined) e.description = patch.description;
+    if (patch.location !== undefined) e.location = patch.location;
+    if (patch.transparency !== undefined || patch.visibility !== undefined ||
+        patch.reminders !== undefined || patch.attendees !== undefined) {
+      e.raw = {
+        ...(e.raw ?? {}),
+        ...(patch.transparency !== undefined ? { transparency: patch.transparency } : {}),
+        ...(patch.visibility !== undefined ? { visibility: patch.visibility } : {}),
+        ...(patch.reminders !== undefined ? { reminders: patch.reminders } : {}),
+        ...(patch.attendees !== undefined ? { attendees: patch.attendees } : {}),
+      };
+    }
+    if (patch.start?.dateTime && patch.end?.dateTime && firstDate) {
+      const oldDate = e.all_day ? e.start : toDateOnly(new Date(e.start));
+      const dayOffset = Math.round((Date.parse(`${oldDate}T00:00:00Z`) -
+        Date.parse(`${firstDate}T00:00:00Z`)) / 86_400_000);
+      const t = new Date(patch.start.dateTime);
+      const te = new Date(patch.end.dateTime);
+      const dur = te.getTime() - t.getTime();
+      const d = addDays(t, dayOffset);
+      e.start = d.toISOString();
+      e.end = new Date(d.getTime() + dur).toISOString();
+      e.all_day = false;
+    } else if (patch.start?.date && patch.end?.date && firstDate) {
+      const oldDate = e.all_day ? e.start : toDateOnly(new Date(e.start));
+      const dayOffset = Math.round((Date.parse(`${oldDate}T00:00:00Z`) -
+        Date.parse(`${firstDate}T00:00:00Z`)) / 86_400_000);
+      const durationDays = Math.max(1, Math.round((Date.parse(`${patch.end.date}T00:00:00Z`) -
+        Date.parse(`${patch.start.date}T00:00:00Z`)) / 86_400_000));
+      const shifted = addDays(new Date(`${patch.start.date}T00:00:00`), dayOffset);
+      e.start = toDateOnly(shifted);
+      e.end = toDateOnly(addDays(shifted, durationDays));
+      e.all_day = true;
+    }
+  }
+  notifyDb();
+}
+
 export const mockBackend: Backend = {
   async authStatus() {
     return authed;
@@ -254,61 +313,28 @@ export const mockBackend: Backend = {
       status: e.status,
     }));
   },
-  async updateSeriesMaster(_calendarId, masterId, patch) {
-    const insts = events.filter((e) => e.recurring_event_id === masterId);
-    const first = [...insts].sort((a, b) => a.start.localeCompare(b.start))[0];
-    const firstDate = first && (first.all_day ? first.start : toDateOnly(new Date(first.start)));
-    // UNTIL truncation: drop instances starting after the boundary
-    const rr: string | undefined = patch.recurrence?.[0];
-    const until = rr?.match(/UNTIL=(\d{8}T\d{6}Z)/)?.[1];
-    if (until) {
-      const u = new Date(
-        `${until.slice(0, 4)}-${until.slice(4, 6)}-${until.slice(6, 8)}T${until.slice(9, 11)}:${until.slice(11, 13)}:${until.slice(13, 15)}Z`,
-      );
-      for (let j = events.length - 1; j >= 0; j--) {
-        if (events[j].recurring_event_id === masterId && new Date(events[j].start) > u) {
-          events.splice(j, 1);
-        }
-      }
+  async updateSeriesMaster(calendarId, masterId, patch, destinationId) {
+    await applySeriesPatch(masterId, patch);
+    if (destinationId && destinationId !== calendarId) {
+      await mockBackend.moveSeriesMaster(calendarId, masterId, destinationId);
     }
-    for (const e of insts.filter((e) => events.includes(e))) {
-      if (patch.summary != null) e.summary = patch.summary;
-      if (patch.description !== undefined) e.description = patch.description;
-      if (patch.location !== undefined) e.location = patch.location;
-      if (patch.transparency !== undefined || patch.visibility !== undefined ||
-          patch.reminders !== undefined || patch.attendees !== undefined) {
-        e.raw = {
-          ...(e.raw ?? {}),
-          ...(patch.transparency !== undefined ? { transparency: patch.transparency } : {}),
-          ...(patch.visibility !== undefined ? { visibility: patch.visibility } : {}),
-          ...(patch.reminders !== undefined ? { reminders: patch.reminders } : {}),
-          ...(patch.attendees !== undefined ? { attendees: patch.attendees } : {}),
-        };
-      }
-      if (patch.start?.dateTime && patch.end?.dateTime && firstDate) {
-        const oldDate = e.all_day ? e.start : toDateOnly(new Date(e.start));
-        const dayOffset = Math.round((Date.parse(`${oldDate}T00:00:00Z`) -
-          Date.parse(`${firstDate}T00:00:00Z`)) / 86_400_000);
-        const t = new Date(patch.start.dateTime);
-        const te = new Date(patch.end.dateTime);
-        const dur = te.getTime() - t.getTime();
-        const d = addDays(t, dayOffset);
-        e.start = d.toISOString();
-        e.end = new Date(d.getTime() + dur).toISOString();
-        e.all_day = false;
-      } else if (patch.start?.date && patch.end?.date && firstDate) {
-        const oldDate = e.all_day ? e.start : toDateOnly(new Date(e.start));
-        const dayOffset = Math.round((Date.parse(`${oldDate}T00:00:00Z`) -
-          Date.parse(`${firstDate}T00:00:00Z`)) / 86_400_000);
-        const durationDays = Math.max(1, Math.round((Date.parse(`${patch.end.date}T00:00:00Z`) -
-          Date.parse(`${patch.start.date}T00:00:00Z`)) / 86_400_000));
-        const shifted = addDays(new Date(`${patch.start.date}T00:00:00`), dayOffset);
-        e.start = toDateOnly(shifted);
-        e.end = toDateOnly(addDays(shifted, durationDays));
-        e.all_day = true;
-      }
-    }
+  },
+  async splitSeries(_calendarId, masterId, recurrence, input) {
+    await applySeriesPatch(masterId, { recurrence });
+    return mockBackend.createEvent(input);
+  },
+  async setEventNote(calendarId, eventId, note) {
+    const index = events.findIndex((e) => e.id === eventId && e.calendar_id === calendarId);
+    if (index < 0) throw new Error("event not found");
+    const ev = events[index];
+    const { body, drill: previous } = splitDrill(ev.description);
+    const clean = note?.split(/\s+/).join(" ").trim() || null;
+    const description = joinDrill(body, clean) || null;
+    if (description === (ev.description ?? null)) return previous;
+    // a fresh snapshot, like the native store
+    events.splice(index, 1, { ...ev, description });
     notifyDb();
+    return previous;
   },
   async moveSeriesMaster(_calendarId, masterId, destinationId) {
     for (const event of events.filter((e) => e.recurring_event_id === masterId)) {
@@ -350,9 +376,11 @@ export const mockBackend: Backend = {
     return ev.id;
   },
   async updateEvent(eventId, input) {
-    const ev = events.find((e) => e.id === eventId);
-    if (!ev) throw new Error("event not found");
-    Object.assign(ev, {
+    const index = events.findIndex((e) => e.id === eventId);
+    if (index < 0) throw new Error("event not found");
+    const ev = events[index];
+    const updated: CalendarEvent = {
+      ...ev,
       calendar_id: input.calendar_id,
       summary: input.summary,
       description: input.description ?? null,
@@ -360,8 +388,7 @@ export const mockBackend: Backend = {
       start: input.start,
       end: input.end,
       all_day: input.all_day,
-    });
-    ev.raw = {
+      raw: {
       ...(ev.raw ?? {}),
       attendees: (input.attendees ?? ev.raw?.attendees?.map((a: any) => a.email) ?? []).map(
         (e: any) => (typeof e === "string" ? { email: e, responseStatus: "needsAction" } : e),
@@ -372,7 +399,11 @@ export const mockBackend: Backend = {
         input.reminder_minutes != null
           ? { useDefault: false, overrides: [{ method: "popup", minutes: input.reminder_minutes }] }
           : (ev.raw?.reminders ?? { useDefault: true }),
+      },
     };
+    // Match the native backend: a db change returns fresh event snapshots.
+    // Mutating the old object masked stale editor-state bugs in browser E2E.
+    events.splice(index, 1, updated);
     notifyDb();
   },
   async deleteEvent(_calendarId, eventId) {
@@ -440,3 +471,7 @@ export const mockBackend: Backend = {
     return () => authListeners.delete(cb);
   },
 };
+
+// E2E handle (dev server only): lets a test arrange data the UI can't reach
+// directly, e.g. a note on one occurrence of a recurring series.
+if (import.meta.env.DEV) (window as unknown as { __mockBackend?: Backend }).__mockBackend = mockBackend;

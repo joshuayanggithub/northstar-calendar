@@ -12,6 +12,9 @@ export default defineConfig({
     trace: "retain-on-failure",
     reducedMotion: "reduce",
     colorScheme: "dark",
+    // the suite's times assume Eastern (e.g. "9 AM EDT is 10 PM Tokyo"); pin
+    // it so the same assertions hold on any host (the Linux box is Pacific)
+    timezoneId: "America/New_York",
   },
   projects: [
     { name: "chromium", use: { ...devices["Desktop Chrome"] } },

@@ -36,8 +36,10 @@ async function tauriBackend(): Promise<Backend> {
       invoke("get_series_master", { calendarId, masterId }),
     getSeriesInstances: (calendarId, masterId) =>
       invoke<any[]>("get_series_instances", { calendarId, masterId }),
-    updateSeriesMaster: (calendarId, masterId, patch) =>
-      invoke("update_series_master", { calendarId, masterId, patch }),
+    updateSeriesMaster: (calendarId, masterId, patch, destinationId) =>
+      invoke("update_series_master", { calendarId, masterId, patch, destinationId: destinationId ?? null }),
+    splitSeries: (calendarId, masterId, recurrence, input) =>
+      invoke<string>("split_series", { calendarId, masterId, recurrence, input }),
     moveSeriesMaster: (calendarId, masterId, destinationId) =>
       invoke("move_series_master", { calendarId, masterId, destinationId }),
     mdRead: (which) => invoke("md_read", { which }),
@@ -69,6 +71,8 @@ async function tauriBackend(): Promise<Backend> {
     updateEvent: (eventId, input, prevCalendarId) =>
       invoke("update_event", { eventId, input, prevCalendarId: prevCalendarId ?? null }),
     deleteEvent: (calendarId, eventId) => invoke("delete_event", { calendarId, eventId }),
+    setEventNote: (calendarId, eventId, note) =>
+      invoke<string | null>("set_event_note", { calendarId, eventId, note }),
     onDbChanged(cb) {
       const un = listen("db-changed", cb);
       return () => {

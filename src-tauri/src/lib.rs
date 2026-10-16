@@ -243,6 +243,17 @@ pub(crate) fn do_update_event(
             b["start"]["date"] = serde_json::Value::Null;
             b["end"]["date"] = serde_json::Value::Null;
         }
+        // Every caller sends the event's current description and location
+        // (the editor's fields, or the snapshot for moves), so None means
+        // "cleared". Leaving the key out of a PATCH keeps Google's old text,
+        // which the push response then wrote back over the local edit: an
+        // erased note (or location) reappeared a few seconds later.
+        if input.description.is_none() {
+            b["description"] = serde_json::Value::Null;
+        }
+        if input.location.is_none() {
+            b["location"] = serde_json::Value::Null;
+        }
         b
     };
     app_state
@@ -298,6 +309,70 @@ fn update_event(
     do_update_event(&app, &app_state, event_id, input, prev_calendar_id)
 }
 
+/// Set (None clears) the red-pen note on one event, or one occurrence of a
+/// recurring one, keeping the rest of its description. The new description
+/// is built from the STORED one inside the db lock and only `description` is
+/// patched, so an editor holding an older snapshot can neither resurrect an
+/// erased note nor write stale titles/times back. Returns the note it
+/// replaced, for undo.
+pub(crate) fn do_set_event_note(
+    app: &AppHandle,
+    app_state: &AppState,
+    calendar_id: String,
+    event_id: String,
+    note: Option<String>,
+) -> CmdResult<Option<String>> {
+    // one [DRILL] line: a pasted newline would split the note off the marker
+    let note = note
+        .map(|n| n.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|n| !n.is_empty());
+    let (changed, previous) = app_state
+        .db(|db| {
+            let Some(mut ev) = db.get_event(&calendar_id, &event_id)? else {
+                return Err(sync_core::CoreError::Other("event not found".into()));
+            };
+            let previous = classify::drill_line(ev.description.as_deref());
+            let body = classify::strip_drill(ev.description.as_deref().unwrap_or(""));
+            let next = match &note {
+                Some(n) if body.is_empty() => format!("{} {n}", classify::DRILL_MARK),
+                Some(n) => format!("{body}\n\n{} {n}", classify::DRILL_MARK),
+                None => body,
+            };
+            let next = (!next.is_empty()).then_some(next);
+            if next == ev.description {
+                return Ok((false, previous));
+            }
+            let base_etag = ev.etag.clone();
+            ev.description = next.clone();
+            db.upsert_event(&ev)?;
+            db.enqueue_op(
+                &calendar_id,
+                &event_id,
+                OpKind::Patch,
+                Some(&serde_json::json!({ "description": next })),
+                base_etag.as_deref(),
+            )?;
+            Ok((true, previous))
+        })
+        .map_err(err_str)?;
+    if changed {
+        let _ = app.emit("db-changed", ());
+        app_state.kick_sync(SyncKick::Now);
+    }
+    Ok(previous)
+}
+
+#[tauri::command]
+fn set_event_note(
+    app: AppHandle,
+    app_state: State<AppState>,
+    calendar_id: String,
+    event_id: String,
+    note: Option<String>,
+) -> CmdResult<Option<String>> {
+    do_set_event_note(&app, &app_state, calendar_id, event_id, note)
+}
+
 pub(crate) fn do_delete_event(
     app: &AppHandle,
     app_state: &AppState,
@@ -308,12 +383,18 @@ pub(crate) fn do_delete_event(
         .db(|db| {
             let base_etag = db.get_event(&calendar_id, &event_id)?.and_then(|e| e.etag);
             db.delete_event(&calendar_id, &event_id)?;
+            // Deleting a recurring master: only its expanded instances live
+            // locally, so take them off screen now. Waiting for the pull that
+            // reports them cancelled kept the series up for a full sync pass.
+            for inst in db.list_series_instances(&calendar_id, &event_id)? {
+                db.delete_event(&calendar_id, &inst.id)?;
+            }
             db.enqueue_op(&calendar_id, &event_id, OpKind::Delete, None, base_etag.as_deref())?;
             Ok(())
         })
         .map_err(err_str)?;
     let _ = app.emit("db-changed", ());
-    app_state.kick_sync(SyncKick::Now);
+    app_state.kick_sync(SyncKick::Calendars(vec![calendar_id]));
     Ok(())
 }
 
@@ -368,58 +449,187 @@ fn add_calendar(
     do_add_calendar(&app, &app_state, name_or_id, subscribe)
 }
 
-#[tauri::command]
-fn get_series_master(
-    app_state: State<AppState>,
-    calendar_id: String,
-    master_id: String,
-) -> CmdResult<serde_json::Value> {
-    let client = app_state.google_client().map_err(err_str)?;
-    client.get_event(&calendar_id, &master_id).map_err(err_str)
-}
-
-#[tauri::command]
-fn get_series_instances(
-    app_state: State<AppState>,
-    calendar_id: String,
-    master_id: String,
-) -> CmdResult<Vec<serde_json::Value>> {
-    let client = app_state.google_client().map_err(err_str)?;
-    client.list_series_instances(&calendar_id, &master_id).map_err(err_str)
-}
-
-#[tauri::command]
-fn update_series_master(
+/// Run Google round trips off the main thread. A plain (non-async) Tauri
+/// command runs ON the main thread, so each blocking HTTP call in one froze
+/// the whole window (scrolling, typing, the scope dialog) for as long as the
+/// request took, and a recurring edit made two to four of them in a row.
+async fn off_main<T: Send + 'static>(
     app: AppHandle,
-    app_state: State<AppState>,
-    calendar_id: String,
-    master_id: String,
-    patch: serde_json::Value,
-) -> CmdResult<()> {
-    let client = app_state.google_client().map_err(err_str)?;
-    client
-        .patch_event(&calendar_id, &master_id, &patch, None)
-        .map_err(err_str)?;
-    let _ = app.emit("db-changed", ());
-    app_state.kick_sync(SyncKick::Now);
+    f: impl FnOnce(&AppHandle, &AppState) -> CmdResult<T> + Send + 'static,
+) -> CmdResult<T> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        f(&app, &state)
+    })
+    .await
+    .map_err(err_str)?
+}
+
+/// `UNTIL=` of an RRULE as a comparable UTC instant (date-only = that day's end).
+fn rule_until(recurrence: &[String]) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
+    let rule = recurrence.iter().find(|r| r.starts_with("RRULE"))?;
+    let v = rule.split(';').find_map(|p| p.strip_prefix("UNTIL").map(|x| x.trim_start_matches([':', '='])))?;
+    if let Ok(t) = NaiveDateTime::parse_from_str(v, "%Y%m%dT%H%M%SZ") {
+        return Some(Utc.from_utc_datetime(&t));
+    }
+    let d = NaiveDate::parse_from_str(v, "%Y%m%d").ok()?;
+    Some(Utc.from_utc_datetime(&d.and_hms_opt(23, 59, 59)?))
+}
+
+/// When an instance was scheduled by its series (originalStartTime), in UTC.
+fn original_start(e: &Event) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::{NaiveDate, TimeZone, Utc};
+    let o = e.raw.as_ref().map(|r| &r["originalStartTime"]);
+    let dt = o.and_then(|o| o["dateTime"].as_str()).or((!e.all_day).then_some(e.start.as_str()));
+    if let Some(t) = dt.and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()) {
+        return Some(t.with_timezone(&Utc));
+    }
+    let d = o.and_then(|o| o["date"].as_str()).unwrap_or(&e.start);
+    let d = NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()?;
+    Some(Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0)?))
+}
+
+/// Mirror a series-master change onto the local instances right away, so the
+/// screen shows the result instead of the old series until a sync pass pulls
+/// Google's regenerated instances (which replace these rows in one step).
+fn apply_series_locally(
+    db: &sync_core::db::Db,
+    calendar_id: &str,
+    master_id: &str,
+    patch: &serde_json::Value,
+    destination: Option<&str>,
+) -> sync_core::Result<()> {
+    let until = patch["recurrence"].as_array().and_then(|r| {
+        rule_until(&r.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>())
+    });
+    for mut inst in db.list_series_instances(calendar_id, master_id)? {
+        if let (Some(until), Some(at)) = (until, original_start(&inst)) {
+            if at > until {
+                db.delete_event(calendar_id, &inst.id)?;
+                continue;
+            }
+        }
+        let mut changed = false;
+        if let Some(v) = patch["summary"].as_str() {
+            inst.summary = v.to_string();
+            changed = true;
+        }
+        for (key, field) in [("description", &mut inst.description), ("location", &mut inst.location)] {
+            if let Some(v) = patch.get(key) {
+                *field = v.as_str().map(String::from);
+                changed = true;
+            }
+        }
+        if let Some(dest) = destination {
+            db.delete_event(calendar_id, &inst.id)?;
+            inst.calendar_id = dest.to_string();
+            changed = true;
+        }
+        if changed {
+            db.upsert_event(&inst)?;
+        }
+    }
     Ok(())
 }
 
 #[tauri::command]
-fn move_series_master(
+async fn get_series_master(
     app: AppHandle,
-    app_state: State<AppState>,
+    calendar_id: String,
+    master_id: String,
+) -> CmdResult<serde_json::Value> {
+    off_main(app, move |_, st| {
+        st.google_client().map_err(err_str)?.get_event(&calendar_id, &master_id).map_err(err_str)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn get_series_instances(
+    app: AppHandle,
+    calendar_id: String,
+    master_id: String,
+) -> CmdResult<Vec<serde_json::Value>> {
+    off_main(app, move |_, st| {
+        st.google_client()
+            .map_err(err_str)?
+            .list_series_instances(&calendar_id, &master_id)
+            .map_err(err_str)
+    })
+    .await
+}
+
+/// Patch a recurring master and/or move it to another calendar, as ONE step:
+/// both Google calls run under the sync gate, so no pass can pull the series
+/// with the patch applied but the move not yet (instances gone from the old
+/// calendar, not yet in the new one).
+#[tauri::command]
+async fn update_series_master(
+    app: AppHandle,
+    calendar_id: String,
+    master_id: String,
+    patch: serde_json::Value,
+    destination_id: Option<String>,
+) -> CmdResult<()> {
+    off_main(app, move |app, st| {
+        let destination = destination_id.filter(|d| *d != calendar_id);
+        let client = st.google_client().map_err(err_str)?;
+        let _gate = st.sync_gate.lock().unwrap_or_else(|p| p.into_inner());
+        if patch.as_object().map_or(false, |o| !o.is_empty()) {
+            client.patch_event(&calendar_id, &master_id, &patch, None).map_err(err_str)?;
+        }
+        if let Some(dest) = &destination {
+            client.move_event(&calendar_id, &master_id, dest).map_err(err_str)?;
+        }
+        st.db(|db| db.in_transaction(|| apply_series_locally(db, &calendar_id, &master_id, &patch, destination.as_deref())))
+            .map_err(err_str)?;
+        let _ = app.emit("db-changed", ());
+        st.kick_sync(SyncKick::Calendars([Some(calendar_id), destination].into_iter().flatten().collect()));
+        Ok(())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn move_series_master(
+    app: AppHandle,
     calendar_id: String,
     master_id: String,
     destination_id: String,
 ) -> CmdResult<()> {
-    let client = app_state.google_client().map_err(err_str)?;
-    client
-        .move_event(&calendar_id, &master_id, &destination_id)
-        .map_err(err_str)?;
-    let _ = app.emit("db-changed", ());
-    app_state.kick_sync(SyncKick::Now);
-    Ok(())
+    update_series_master(app, calendar_id, master_id, serde_json::json!({}), Some(destination_id)).await
+}
+
+/// "This and following": end the old series before this occurrence and start
+/// a new one here, as ONE step. Done as two separate calls, the sync pass
+/// kicked by the first pulled the old series' cancelled tail before the new
+/// series existed, so the rest of the series vanished from view until the
+/// next pass brought it back. The truncate goes to Google under the sync
+/// gate; the new series is created locally (a placeholder for this
+/// occurrence) and queued, so the next pass pushes it and pulls both changes
+/// together. Returns the new series' id.
+#[tauri::command]
+async fn split_series(
+    app: AppHandle,
+    calendar_id: String,
+    master_id: String,
+    recurrence: Vec<String>,
+    input: EventInput,
+) -> CmdResult<String> {
+    off_main(app, move |app, st| {
+        let patch = serde_json::json!({ "recurrence": recurrence });
+        let client = st.google_client().map_err(err_str)?;
+        let _gate = st.sync_gate.lock().unwrap_or_else(|p| p.into_inner());
+        client.patch_event(&calendar_id, &master_id, &patch, None).map_err(err_str)?;
+        st.db(|db| db.in_transaction(|| apply_series_locally(db, &calendar_id, &master_id, &patch, None)))
+            .map_err(err_str)?;
+        let target = input.calendar_id.clone();
+        let id = do_create_event(app, st, input)?;
+        st.kick_sync(SyncKick::Calendars(if target == calendar_id { vec![target] } else { vec![calendar_id, target] }));
+        Ok(id)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -502,12 +712,14 @@ pub fn run() {
             list_events,
             create_event,
             update_event,
+            set_event_note,
             delete_event,
             add_calendar,
             get_series_master,
             get_series_instances,
             update_series_master,
             move_series_master,
+            split_series,
             md_read,
             md_write,
             goals_read,
@@ -518,4 +730,80 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod series_tests {
+    use super::*;
+    use serde_json::json;
+    use sync_core::db::Db;
+
+    fn instance(id: &str, start: &str) -> Event {
+        Event {
+            id: id.into(),
+            calendar_id: "cal".into(),
+            etag: Some("\"e\"".into()),
+            summary: "Standup".into(),
+            description: Some("[DRILL] occurrence note".into()),
+            location: None,
+            start: start.into(),
+            end: start.replace("T09", "T10"),
+            all_day: false,
+            timezone: None,
+            status: "confirmed".into(),
+            recurrence: None,
+            recurring_event_id: Some("m".into()),
+            conference_url: None,
+            updated: None,
+            raw: Some(json!({ "originalStartTime": { "dateTime": start } })),
+        }
+    }
+
+    fn series() -> Db {
+        let db = Db::open_in_memory().unwrap();
+        for (id, start) in [
+            ("m_1", "2026-10-12T09:00:00-07:00"),
+            ("m_2", "2026-10-13T09:00:00-07:00"),
+            ("m_3", "2026-10-14T09:00:00-07:00"),
+        ] {
+            db.upsert_event(&instance(id, start)).unwrap();
+        }
+        db
+    }
+
+    fn ids(db: &Db, cal: &str) -> Vec<String> {
+        let mut v: Vec<_> = db.list_series_instances(cal, "m").unwrap().into_iter().map(|e| e.id).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn until_parses_both_rfc5545_forms() {
+        let t = rule_until(&["RRULE:FREQ=DAILY;UNTIL=20261013T155959Z".into()]).unwrap();
+        assert_eq!(t.to_rfc3339(), "2026-10-13T15:59:59+00:00");
+        let d = rule_until(&["RRULE:FREQ=DAILY;UNTIL=20261013".into()]).unwrap();
+        assert_eq!(d.to_rfc3339(), "2026-10-13T23:59:59+00:00");
+        assert!(rule_until(&["RRULE:FREQ=DAILY;COUNT=3".into()]).is_none());
+    }
+
+    #[test]
+    fn truncating_a_series_drops_the_tail_locally_at_once() {
+        // "this and following" from the 13th: UNTIL is one second before it
+        let db = series();
+        let patch = json!({ "recurrence": ["RRULE:FREQ=DAILY;UNTIL=20261013T155959Z"] });
+        apply_series_locally(&db, "cal", "m", &patch, None).unwrap();
+        assert_eq!(ids(&db, "cal"), vec!["m_1"]);
+    }
+
+    #[test]
+    fn a_series_move_and_rename_show_before_any_sync() {
+        let db = series();
+        apply_series_locally(&db, "cal", "m", &json!({ "summary": "Daily sync" }), Some("work")).unwrap();
+        assert!(ids(&db, "cal").is_empty(), "instances left behind in the old calendar");
+        let moved = db.list_series_instances("work", "m").unwrap();
+        assert_eq!(moved.len(), 3);
+        assert!(moved.iter().all(|e| e.summary == "Daily sync"));
+        // fields the patch doesn't name are left alone (the occurrence's note)
+        assert!(moved.iter().all(|e| e.description.as_deref() == Some("[DRILL] occurrence note")));
+    }
 }

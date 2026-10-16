@@ -5,6 +5,7 @@
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use sync_core::db::Db;
 use sync_core::google::{CalendarApi, EventsPage};
 use sync_core::models::*;
@@ -20,6 +21,10 @@ struct FakeApi {
     changed: RefCell<Vec<String>>,
     expire_sync_token: RefCell<bool>,
     fail_event_ids: RefCell<Vec<String>>, // push failures for specific ids (500)
+    fail_patch_once: RefCell<Vec<String>>, // next patch of these ids fails (500)
+    /// runs inside every events.list call: lets a test look at the local
+    /// store mid-download, the way a UI refetch would
+    on_list: RefCell<Option<Box<dyn Fn()>>>,
 }
 
 impl FakeApi {
@@ -62,6 +67,9 @@ impl CalendarApi for FakeApi {
         sync_token: Option<&str>,
         _page_token: Option<&str>,
     ) -> Result<EventsPage> {
+        if let Some(f) = self.on_list.borrow().as_ref() {
+            f();
+        }
         if sync_token.is_some() && *self.expire_sync_token.borrow() {
             *self.expire_sync_token.borrow_mut() = false;
             return Err(CoreError::Api { status: 410, body: "gone".into() });
@@ -94,11 +102,31 @@ impl CalendarApi for FakeApi {
         ev["etag"] = json!(self.next_etag());
         ev["status"] = json!("confirmed");
         self.events.borrow_mut().insert(id.clone(), ev.clone());
-        self.changed.borrow_mut().push(id);
+        if body["recurrence"].is_array() {
+            // singleEvents=true: the feed carries two expanded instances,
+            // never the master itself
+            for n in 1..=2 {
+                let iid = format!("{id}_{n}");
+                let mut inst = event_body(&iid, body["summary"].as_str().unwrap_or(""));
+                inst["recurringEventId"] = json!(id);
+                inst["etag"] = json!(self.next_etag());
+                self.events.borrow_mut().insert(iid.clone(), inst);
+                self.changed.borrow_mut().push(iid);
+            }
+        } else {
+            self.changed.borrow_mut().push(id);
+        }
         Ok(ev)
     }
 
     fn patch_event(&self, _c: &str, event_id: &str, body: &Value, etag: Option<&str>) -> Result<Value> {
+        {
+            let mut once = self.fail_patch_once.borrow_mut();
+            if let Some(i) = once.iter().position(|x| x == event_id) {
+                once.remove(i);
+                return Err(CoreError::Api { status: 500, body: "transient".into() });
+            }
+        }
         let mut events = self.events.borrow_mut();
         let ev = events
             .get_mut(event_id)
@@ -325,4 +353,122 @@ fn remote_delete_removes_local_event() {
 
     engine.sync_once().unwrap();
     assert!(db.get_event("cal", &id).unwrap().is_none());
+}
+
+/// Local edit helper mirroring the app layer: optimistic row + patch op whose
+/// If-Match is the etag the edit was made against.
+fn local_patch(db: &Db, id: &str, patch: Value) {
+    let ev = db.get_event("cal", id).unwrap().unwrap();
+    db.enqueue_op("cal", id, OpKind::Patch, Some(&patch), ev.etag.as_deref())
+        .unwrap();
+}
+
+#[test]
+fn second_queued_edit_to_one_event_is_not_lost() {
+    // A note written and then erased before the next sync: both ops carry the
+    // etag from before the first one. The first push changes the etag, so the
+    // second must not 412 against our own write and be dropped remote-wins.
+    let (db, api) = setup();
+    let id = generate_event_id();
+    local_create(&db, &id, "deep work");
+    let engine = SyncEngine::new(&db, &api);
+    engine.sync_once().unwrap();
+
+    local_patch(&db, &id, json!({"description": "[DRILL] Focus."}));
+    local_patch(&db, &id, json!({"description": null}));
+    let r = engine.sync_once().unwrap();
+    assert_eq!(r.conflicts, 0, "our own first edit 412'd our second");
+    assert!(api.events.borrow()[&id]["description"].is_null(), "the erase never reached Google");
+    assert!(db.get_event("cal", &id).unwrap().unwrap().description.is_none(), "the note came back locally");
+    assert!(db.list_pending_ops().unwrap().is_empty());
+}
+
+#[test]
+fn delete_queued_after_an_edit_still_deletes() {
+    let (db, api) = setup();
+    let id = generate_event_id();
+    local_create(&db, &id, "to go");
+    let engine = SyncEngine::new(&db, &api);
+    engine.sync_once().unwrap();
+
+    local_patch(&db, &id, json!({"summary": "renamed"}));
+    let etag = db.get_event("cal", &id).unwrap().unwrap().etag;
+    db.delete_event("cal", &id).unwrap();
+    db.enqueue_op("cal", &id, OpKind::Delete, None, etag.as_deref()).unwrap();
+    engine.sync_once().unwrap();
+    assert!(!api.events.borrow().contains_key(&id), "the delete lost to our own rename");
+    assert!(db.get_event("cal", &id).unwrap().is_none(), "the deleted event came back");
+}
+
+#[test]
+fn a_failed_edit_is_not_overtaken_by_a_later_edit_to_the_same_event() {
+    let (db, api) = setup();
+    let id = generate_event_id();
+    local_create(&db, &id, "v1");
+    let engine = SyncEngine::new(&db, &api);
+    engine.sync_once().unwrap();
+
+    api.fail_patch_once.borrow_mut().push(id.clone());
+    local_patch(&db, &id, json!({"summary": "v2"}));
+    local_patch(&db, &id, json!({"summary": "v3"}));
+    engine.sync_once().unwrap();
+    // v3 must wait for v2, or v2's retry would land after it
+    assert_eq!(api.remote_summary(&id), "v1");
+    engine.sync_once().unwrap();
+    assert_eq!(api.remote_summary(&id), "v3", "edits applied out of order");
+    assert!(db.list_pending_ops().unwrap().is_empty());
+}
+
+#[test]
+fn a_pushed_series_swaps_its_placeholder_for_instances_in_one_step() {
+    let db = Rc::new(Db::open_in_memory().unwrap());
+    let api = FakeApi::default();
+    let id = generate_event_id();
+    local_create(&db, &id, "weekly review");
+    // the queued insert is a recurring master
+    let op = db.list_pending_ops().unwrap().remove(0);
+    db.remove_op(op.id).unwrap();
+    let mut body = event_body(&id, "weekly review");
+    body["recurrence"] = json!(["RRULE:FREQ=WEEKLY"]);
+    db.enqueue_op("cal", &id, OpKind::Insert, Some(&body), None).unwrap();
+
+    let during = Rc::new(RefCell::new(Vec::new()));
+    {
+        let (db, during, id) = (db.clone(), during.clone(), id.clone());
+        *api.on_list.borrow_mut() = Some(Box::new(move || {
+            during.borrow_mut().push(db.get_event("cal", &id).unwrap().is_some());
+        }));
+    }
+    SyncEngine::new(&db, &api).sync_once().unwrap();
+    assert!(
+        during.borrow().iter().all(|&shown| shown),
+        "the edited occurrence vanished between the push and the pull of its instances"
+    );
+    assert!(db.get_event("cal", &id).unwrap().is_none(), "placeholder left behind");
+    assert_eq!(db.list_series_instances("cal", &id).unwrap().len(), 2);
+}
+
+#[test]
+fn expired_token_keeps_the_calendar_until_the_new_copy_is_in() {
+    let db = Rc::new(Db::open_in_memory().unwrap());
+    let api = FakeApi::default();
+    let id = generate_event_id();
+    api.insert_event("cal", &event_body(&id, "stays put")).unwrap();
+    let engine = SyncEngine::new(&db, &api);
+    engine.sync_once().unwrap();
+
+    let during = Rc::new(RefCell::new(Vec::new()));
+    {
+        let (db, during, id) = (db.clone(), during.clone(), id.clone());
+        *api.on_list.borrow_mut() = Some(Box::new(move || {
+            during.borrow_mut().push(db.get_event("cal", &id).unwrap().is_some());
+        }));
+    }
+    *api.expire_sync_token.borrow_mut() = true;
+    engine.sync_once().unwrap();
+    assert!(
+        during.borrow().iter().all(|&shown| shown),
+        "the calendar sat empty while the full resync downloaded"
+    );
+    assert!(db.get_event("cal", &id).unwrap().is_some());
 }

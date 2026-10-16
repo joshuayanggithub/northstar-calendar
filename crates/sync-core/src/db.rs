@@ -195,6 +195,26 @@ impl Db {
         Ok(())
     }
 
+    /// Run `f` as one transaction: readers on other connections see all of
+    /// its writes or none of them.
+    pub fn in_transaction<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let tx = self.conn.unchecked_transaction()?;
+        let out = f()?;
+        tx.commit()?;
+        Ok(out)
+    }
+
+    /// Local instances of one recurring series (singleEvents rows).
+    pub fn list_series_instances(&self, calendar_id: &str, master_id: &str) -> Result<Vec<Event>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, calendar_id, etag, summary, description, location, start, end, all_day,
+                    timezone, status, recurrence, recurring_event_id, conference_url, updated, raw
+             FROM events WHERE calendar_id=?1 AND recurring_event_id=?2",
+        )?;
+        let rows = stmt.query_map(params![calendar_id, master_id], row_to_event)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     pub fn delete_events_for_calendar(&self, calendar_id: &str) -> Result<()> {
         self.conn.execute("DELETE FROM events WHERE calendar_id=?1", params![calendar_id])?;
         Ok(())
@@ -290,6 +310,18 @@ impl Db {
         self.conn.execute(
             "DELETE FROM pending_ops WHERE calendar_id=?1 AND event_id=?2",
             params![calendar_id, event_id],
+        )?;
+        Ok(())
+    }
+
+    /// After one of our ops for an event lands, the event's etag is the one
+    /// our own write produced. Queued ops for that event were made on top of
+    /// that write, so their If-Match moves forward with it (ops sent without
+    /// one stay unconditional).
+    pub fn rebase_pending_ops(&self, event_id: &str, etag: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE pending_ops SET base_etag=?2 WHERE event_id=?1 AND base_etag IS NOT NULL",
+            params![event_id, etag],
         )?;
         Ok(())
     }

@@ -75,8 +75,13 @@ export interface Backend {
   getSeriesMaster(calendarId: string, masterId: string): Promise<any>;
   /** Expanded Google instances, including cancellations, for COUNT splits. */
   getSeriesInstances(calendarId: string, masterId: string): Promise<any[]>;
-  /** Live PATCH on a series master; sync pulls the updated instances. */
-  updateSeriesMaster(calendarId: string, masterId: string, patch: any): Promise<void>;
+  /** PATCH a series master and, with destinationId, move it to that
+   *  calendar: one step, applied to the local instances right away. */
+  updateSeriesMaster(calendarId: string, masterId: string, patch: any, destinationId?: string): Promise<void>;
+  /** "This and following": end the series before this occurrence (the
+   *  truncated recurrence) and start a new series from `input`, as one step.
+   *  Resolves to the new series' id. */
+  splitSeries(calendarId: string, masterId: string, recurrence: string[], input: EventInput): Promise<string>;
   /** Move a recurring master and its instances to another calendar. */
   moveSeriesMaster(calendarId: string, masterId: string, destinationId: string): Promise<void>;
   /** Goals (daily / weekly / long-term), kept by the app: lib/goals.ts */
@@ -94,6 +99,10 @@ export interface Backend {
   createEvent(input: EventInput): Promise<string>;
   updateEvent(eventId: string, input: EventInput, prevCalendarId?: string): Promise<void>;
   deleteEvent(calendarId: string, eventId: string): Promise<void>;
+  /** Set (null clears) one event's red-pen note, read-modify-write on the
+   *  stored description; only the description changes. Resolves to the
+   *  note it replaced. */
+  setEventNote(calendarId: string, eventId: string, note: string | null): Promise<string | null>;
   /** Subscribe to data-changed notifications; returns unsubscribe. */
   onDbChanged(cb: () => void): () => void;
   onAuthChanged(cb: (authed: boolean) => void): () => void;

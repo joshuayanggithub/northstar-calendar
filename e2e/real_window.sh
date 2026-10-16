@@ -1,5 +1,5 @@
 #!/bin/bash
-# Real-window E2E against the live dev app's WKWebView, via the in-app W3C
+# Real-window E2E against the live dev app's native webview, via the in-app W3C
 # WebDriver endpoint (tauri-plugin-webdriver, debug builds only, :4445).
 #
 # What the plugin gives us natively: sessions, element find/rect/text,
@@ -9,7 +9,7 @@
 # dispatched PointerEvents instead.
 set -euo pipefail
 WD=http://127.0.0.1:4445
-OUT=${1:-/tmp/claude/real-window}
+OUT=${1:-${TMPDIR:-/tmp}/northstar-calendar/real-window}
 mkdir -p "$OUT"
 
 fail() { echo "FAIL: $1"; exit 1; }

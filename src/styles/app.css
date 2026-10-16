@@ -3043,7 +3043,8 @@ h3.review-h {
 }
 
 .margin-note:hover,
-.margin-note.dragging {
+.margin-note.dragging,
+.margin-note:focus-visible {
   outline: 1px dashed color-mix(in srgb, var(--ink) 45%, transparent);
   outline-offset: 1px;
 }

@@ -2,6 +2,8 @@
 
 ## Prereqs
 - Rust (stable, via rustup), Node 20+
+- Linux (Debian/Ubuntu): `npm run setup:e2e:linux` once. It installs the
+  WebKitGTK 4.1 / GTK / Xvfb packages Tauri needs (sudo) and builds the app.
 - `.oauth.local.json` at the repo root (gitignored) with `client_id` / `client_secret`
   from your own Google Cloud project (Desktop OAuth client).
 
@@ -15,6 +17,15 @@
 - `npm run test:rust` — sync-engine unit tests (conflicts, echo suppression, 410, 409).
 - `npm run test:e2e` — Playwright against the mock-backend UI.
   (Browsers are vendored into node_modules via PLAYWRIGHT_BROWSERS_PATH=0.)
+
+## Real-window E2E (macOS and Linux)
+`npm run test:e2e:app` starts the debug app on a sandboxed database with
+Google sync off (`e2e/sandbox_app.sh`: macOS snapshots the live DB, Linux
+seeds `crates/sync-core/examples/seed_e2e.rs` and runs under a private Xvfb).
+It then runs `e2e/real_window.sh` and `e2e/native_regressions.py` against the
+in-app WebDriver, and stops the app. On Linux, `CAL_E2E_DISPLAY=$DISPLAY`
+puts the window on an existing display (e.g. SSH X forwarding) instead of
+Xvfb. Linux data/logs: `~/.local/share/com.joshuayang.calendar-app/`.
 
 ## Debugging the real app
 - Right-click → Inspect in a debug build opens Safari Web Inspector.

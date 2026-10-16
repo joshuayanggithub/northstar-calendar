@@ -170,6 +170,9 @@ export function EventPanel(props: {
   state: PanelState;
   actions: EventActions;
   onClose: () => void;
+  /** the open event as currently stored (fresher than state.event, which
+   *  is the snapshot it was opened with); null when it isn't loaded */
+  liveEvent?: CalendarEvent | null;
 }) {
   const { state, calendars } = props;
   const [title, setTitle] = useState("");
@@ -207,6 +210,8 @@ export function EventPanel(props: {
   const goalOptions = useMemo(() => goals.file.goals.map((g) => g.text), [goals.file]);
   const [error, setError] = useState<string | null>(null);
   const dateRef = useRef<HTMLInputElement | null>(null);
+  const defaultCalendarId =
+    calendars.find((c) => c.is_primary)?.id ?? calendars[0]?.id ?? "";
 
   useEffect(() => {
     setError(null);
@@ -255,7 +260,7 @@ export function EventPanel(props: {
       setStartTime(format(d.start, "HH:mm"));
       setEndTime(format(d.end, "HH:mm"));
       setAllDay(d.allDay);
-      setCalendarId(calendars.find((c) => c.is_primary)?.id ?? calendars[0]?.id ?? "");
+      setCalendarId(defaultCalendarId);
       setLocation("");
       setLocCoords(null);
       locPicked.current = null;
@@ -266,7 +271,22 @@ export function EventPanel(props: {
       setVisibility("default");
       setReminderMin(null);
     }
-  }, [state, calendars]);
+  // Not `calendars`: every db change (a note saved, a sync pass) refetches
+  // the list as a new array, and resetting on that put the opened snapshot
+  // back into every field: the erased note reappeared and the panel flashed.
+  }, [state, defaultCalendarId]);
+
+  // The note saves on its own (here, Delete on its margin note, or the
+  // supervisor), unlike the other fields, which are a draft until Save. So
+  // show the stored note: a stale copy here was written back by the next
+  // Save, re-adding a note that had been erased.
+  const live = state.mode === "view" ? props.liveEvent : null;
+  const liveDrill = live ? cleanDrill(splitDrill(live.description).drill, live.summary) : undefined;
+  const liveDrillRef = useRef(liveDrill);
+  liveDrillRef.current = liveDrill;
+  useEffect(() => {
+    if (liveDrill !== undefined) setDrill(liveDrill);
+  }, [liveDrill]);
 
   const readOnly =
     state.mode === "view" &&
@@ -831,7 +851,10 @@ export function EventPanel(props: {
           ended={eventDates(state.event).end.getTime() < now().getTime()}
           onCommit={(n) => {
             setDrill(n);
-            void props.actions.setNote(state.event, n);
+            void props.actions.setNote(state.event, n).catch((cause) => {
+              setDrill(liveDrillRef.current ?? null);
+              setError(cause instanceof Error ? cause.message : String(cause));
+            });
           }}
         />
       )}

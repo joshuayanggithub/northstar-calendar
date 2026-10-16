@@ -240,8 +240,16 @@ fn data_file(app: &AppHandle, name: &str) -> Option<std::path::PathBuf> {
     crate::state::data_dir(app).ok().map(|d| d.join(name))
 }
 
+/// the note text on an event, if any (its [DRILL] line)
+pub(crate) fn drill_line(desc: Option<&str>) -> Option<String> {
+    desc?
+        .lines()
+        .find(|l| l.trim_start().starts_with(DRILL_MARK))
+        .map(|l| l.trim_start()[DRILL_MARK.len()..].trim().to_string())
+}
+
 /// a description without its note lines, the rest as written
-fn strip_drill(desc: &str) -> String {
+pub(crate) fn strip_drill(desc: &str) -> String {
     desc.lines()
         .filter(|l| !l.trim_start().starts_with(DRILL_MARK))
         .collect::<Vec<_>>()
@@ -350,6 +358,12 @@ pub fn get_goal_classifications(app: AppHandle) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drill_line_reads_the_note() {
+        assert_eq!(drill_line(Some("body\n\n[DRILL] Ship it.")).as_deref(), Some("Ship it."));
+        assert_eq!(drill_line(Some("no note")), None);
+    }
 
     #[test]
     fn retiring_takes_only_the_note_line() {

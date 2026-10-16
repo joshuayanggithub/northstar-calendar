@@ -23,7 +23,7 @@ import { calendarEditable } from "../lib/types";
 import type { Calendar, CalendarEvent, EventInput } from "../lib/types";
 import { ScopeDialog, type PendingScope, type Scope } from "./ScopeDialog";
 import { dismissToast, onToast, recordUndo, showToast, undoLast } from "../lib/undo";
-import { joinDrill, splitDrill } from "../lib/drill";
+import { splitDrill } from "../lib/drill";
 import { setAutoGoals } from "../lib/stars";
 import { reconKey, setRecon, subscribeRecon, unreconciled } from "../lib/recon";
 import { TopBar } from "./TopBar";
@@ -157,7 +157,9 @@ export default function App() {
     }
   }, [seamStyle]);
   const [toast, setToast] = useState<{ label: string; canUndo: boolean } | null>(null);
-  const [pendingScope, setPendingScope] = useState<(PendingScope & { master?: any }) | null>(null);
+  const [pendingScope, setPendingScope] = useState<
+    (PendingScope & { master?: any; masterP?: Promise<any> }) | null
+  >(null);
   const [reconMode, setReconMode] = useState<{ queue: CalendarEvent[]; idx: number } | null>(null);
   const [spotlight, setSpotlight] = useState(false);
   const [, reconTickApp] = useState(0);
@@ -227,6 +229,26 @@ export default function App() {
   const events = useEvents(backend, fetchStart, fetchEnd);
   const visible = useVisibleEvents(events, calendars);
 
+  /** Open the scope dialog for a recurring event at once and fetch its
+   *  series master behind it. The fetch is a Google round trip; awaiting it
+   *  before showing the dialog made every recurring edit feel stuck. */
+  const askScope = useCallback(
+    (p: PendingScope) => {
+      if (!backend || !p.event.recurring_event_id) return;
+      const masterP: Promise<any> = backend
+        .getSeriesMaster(p.event.calendar_id, p.event.recurring_event_id)
+        .catch(() => null); // fall back: only per-instance changes
+      setPendingScope({ ...p, masterP });
+      void masterP.then((master) => {
+        const rrule = master?.recurrence?.some((r: string) => r.startsWith("RRULE"));
+        setPendingScope((cur) =>
+          cur?.masterP === masterP ? { ...cur, master, canSplit: cur.canSplit && !!rrule } : cur,
+        );
+      });
+    },
+    [backend],
+  );
+
   // ---- actions with undo ----
   const calOf = useCallback(
     (id: string): Calendar | undefined => calendars.find((c) => c.id === id),
@@ -254,24 +276,10 @@ export default function App() {
           return;
         }
         if (ev.recurring_event_id) {
-          // recurring: ask for scope before touching anything
-          let master: any = null;
-          try {
-            master = await backend.getSeriesMaster(ev.calendar_id, ev.recurring_event_id);
-          } catch {
-            /* fall back: only per-instance edits */
-          }
-          const rrule: string | undefined = master?.recurrence?.find((r: string) =>
-            r.startsWith("RRULE"),
-          );
-          setPendingScope({
-            kind: "edit",
-            event: ev,
-            input,
-            label,
-            master,
-            canSplit: !!rrule && !input.all_day && !ev.all_day,
-          });
+          // recurring: ask for scope before touching anything. The dialog
+          // opens now; the series master (a Google round trip) loads behind
+          // it and is awaited only when a scope is picked.
+          askScope({ kind: "edit", event: ev, input, label, canSplit: !input.all_day && !ev.all_day });
           return;
         }
         const prev = inputOf(ev);
@@ -288,21 +296,7 @@ export default function App() {
           return;
         }
         if (ev.recurring_event_id) {
-          let master: any = null;
-          try {
-            master = await backend.getSeriesMaster(ev.calendar_id, ev.recurring_event_id);
-          } catch {
-            /* ignore */
-          }
-          const rrule: string | undefined = master?.recurrence?.find((r: string) =>
-            r.startsWith("RRULE"),
-          );
-          setPendingScope({
-            kind: "delete",
-            event: ev,
-            master,
-            canSplit: !!rrule,
-          });
+          askScope({ kind: "delete", event: ev, canSplit: true });
           return;
         }
         const snapshot = inputOf(ev);
@@ -342,12 +336,20 @@ export default function App() {
           showToast(`“${ev.summary}” is on a read-only calendar`, false);
           return;
         }
-        const prev = inputOf(ev);
-        const description = joinDrill(splitDrill(ev.description).body, note) || null;
-        if (description === (ev.description || null)) return;
-        await backend.updateEvent(ev.id, { ...prev, description }, ev.calendar_id);
+        // The backend rewrites only the note, on the description it has
+        // stored. Building a whole EventInput from `ev` here wrote back
+        // whatever snapshot the caller held: an editor opened before the
+        // last note change re-added an erased note, or reverted the title.
+        let previous: string | null;
+        try {
+          previous = await backend.setEventNote(ev.calendar_id, ev.id, note);
+        } catch (error) {
+          showToast(`Couldn't ${note ? "save" : "remove"} note`, false);
+          throw error;
+        }
+        if ((previous ?? null) === (note ?? null)) return;
         recordUndo(note ? "Note saved" : "Note removed", async () => {
-          await backend.updateEvent(ev.id, prev, ev.calendar_id);
+          await backend.setEventNote(ev.calendar_id, ev.id, previous);
         });
       },
       async removeSeries(ev) {
@@ -377,7 +379,17 @@ export default function App() {
         });
       },
     }),
-    [backend, calendars, isReadOnly],
+    [backend, calendars, isReadOnly, askScope],
+  );
+
+  /** the open event as currently stored (the panel's own copy is the
+   *  snapshot it was opened with) */
+  const panelLive = useMemo(
+    () =>
+      panel.mode === "view"
+        ? events.find((e) => e.id === panel.event.id && e.calendar_id === panel.event.calendar_id) ?? null
+        : null,
+    [panel, events],
   );
 
   // ---- bulk operations over the multi-selection (per-instance semantics) ----
@@ -470,14 +482,15 @@ export default function App() {
       if (!p || !backend) return;
       const ev = p.event;
       const masterId = ev.recurring_event_id!;
+      const master = p.masterP ? await p.masterP : (p.master ?? null);
       const selectedOriginal = ev.raw?.originalStartTime?.dateTime ??
         ev.raw?.originalStartTime?.date ?? ev.start;
-      const masterOriginal = p.master?.start?.dateTime ?? p.master?.start?.date;
+      const masterOriginal = master?.start?.dateTime ?? master?.start?.date;
       const firstOccurrence = !!masterOriginal &&
         (ev.all_day ? selectedOriginal === masterOriginal :
           Date.parse(selectedOriginal) === Date.parse(masterOriginal));
       const effectiveScope = scope === "following" && firstOccurrence ? "all" : scope;
-      const rrule: string | undefined = p.master?.recurrence?.find((r: string) =>
+      const rrule: string | undefined = master?.recurrence?.find((r: string) =>
         r.startsWith("RRULE"),
       );
       const untilOf = (boundaryIso: string) => {
@@ -522,11 +535,17 @@ export default function App() {
             await backend.updateEvent(ev.id, prev, input.calendar_id);
           });
         } else if (effectiveScope === "all") {
-          const patch: any = {
-            summary: input.summary,
-            description: input.description ?? null,
-            location: input.location ?? null,
-          };
+          // Only what the person changed goes to the whole series, and never
+          // this occurrence's red-pen note: notes belong to one occurrence,
+          // and sending the description as-is copied the note onto every
+          // instance of the series.
+          const patch: any = {};
+          const bodyOf = (d: string | null | undefined) => splitDrill(d).body;
+          if (input.summary !== ev.summary) patch.summary = input.summary;
+          if ((input.location ?? null) !== (ev.location ?? null)) patch.location = input.location ?? null;
+          if (bodyOf(input.description) !== bodyOf(ev.description)) {
+            patch.description = bodyOf(input.description) || null;
+          }
           if (input.transparency != null &&
               input.transparency !== (ev.raw?.transparency ?? "opaque")) {
             patch.transparency = input.transparency;
@@ -557,8 +576,8 @@ export default function App() {
               ? input.start !== ev.start || input.end !== ev.end
               : new Date(input.start).getTime() !== new Date(ev.start).getTime() ||
                 new Date(input.end).getTime() !== new Date(ev.end).getTime());
-          const masterStart = p.master?.start?.dateTime;
-          const masterStartDate = p.master?.start?.date;
+          const masterStart = master?.start?.dateTime;
+          const masterStartDate = master?.start?.date;
           const masterDate = masterStartDate ?? (masterStart ? toDateOnly(new Date(masterStart)) : null);
           if (timesChanged && masterDate) {
             const selectedDate = ev.all_day ? ev.start : toDateOnly(new Date(ev.start));
@@ -574,7 +593,7 @@ export default function App() {
                 dateTime: null, timeZone: null };
             } else {
               const tz =
-                p.master?.start?.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+                master?.start?.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
               const t = new Date(input.start);
               const dur = new Date(input.end).getTime() - t.getTime();
               const ns = new Date(`${newMasterDate}T00:00:00`);
@@ -583,10 +602,14 @@ export default function App() {
               patch.end = { dateTime: toLocalISO(new Date(ns.getTime() + dur)), timeZone: tz, date: null };
             }
           }
-          await backend.updateSeriesMaster(ev.calendar_id, masterId, patch);
-          if (input.calendar_id !== ev.calendar_id) {
-            await backend.moveSeriesMaster(ev.calendar_id, masterId, input.calendar_id);
-          }
+          // patch + calendar move as one backend step (a sync pass between
+          // them showed the series gone from both calendars)
+          await backend.updateSeriesMaster(
+            ev.calendar_id,
+            masterId,
+            patch,
+            input.calendar_id !== ev.calendar_id ? input.calendar_id : undefined,
+          );
           showToast(`Updated all “${ev.summary}” events`, false);
         } else if (rrule) {
           // split: truncate the old series, start a new one at this instance
@@ -609,10 +632,15 @@ export default function App() {
             if (remaining < 1) throw new Error("no occurrences remain after this event");
             nextRule = rrule.replace(/COUNT=\d+/, `COUNT=${remaining}`);
           }
-          await backend.updateSeriesMaster(ev.calendar_id, masterId, {
-            recurrence: [truncateRule(rrule, selectedOriginal)],
+          // truncate + new series as one backend step: done as two calls,
+          // a sync pass between them pulled the old series' cancelled tail
+          // before the new series existed, and the rest of the series
+          // vanished from view until the next pass.
+          await backend.splitSeries(ev.calendar_id, masterId, [truncateRule(rrule, selectedOriginal)], {
+            ...input,
+            description: splitDrill(input.description).body || null,
+            recurrence: [nextRule],
           });
-          await backend.createEvent({ ...input, recurrence: [nextRule] });
           showToast(`Updated “${input.summary}” and following`, false);
         }
         setPanel({ mode: "closed" });
@@ -630,6 +658,17 @@ export default function App() {
     },
     [view],
   );
+
+  // stable, so the memoized sidebar skips the re-render on every swipe step
+  const pickDate = useCallback(
+    (d: Date) => {
+      setPanDays(0);
+      setAnchor(d);
+      if (view === "month") setView("week");
+    },
+    [view],
+  );
+  const openReview = useCallback(() => setView("review"), []);
 
   const toggleWeekends = useCallback(() => {
     if (view === "week") {
@@ -1081,12 +1120,8 @@ export default function App() {
           anchor={anchor}
           authed={authed}
           events={visible}
-          onPickDate={(d) => {
-            setPanDays(0);
-            setAnchor(d);
-            if (view === "month") setView("week");
-          }}
-          onOpenReview={() => setView("review")}
+          onPickDate={pickDate}
+          onOpenReview={openReview}
         />
         <div className="main">
           <TopBar
@@ -1164,6 +1199,7 @@ export default function App() {
         <EventPanel
           backend={backend}
           calendars={calendars}
+          liveEvent={panelLive}
           state={panel}
           actions={actions}
           onClose={() => setPanel({ mode: "closed" })}

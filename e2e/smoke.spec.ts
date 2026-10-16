@@ -696,6 +696,77 @@ test("gesture: partial horizontal scroll stays put and resumes without springbac
   expect(Math.abs((await first.boundingBox())!.x - (moved - 40))).toBeLessThan(2);
 });
 
+test("gesture: a wheel burst uses cached geometry and one transform paint per frame", async ({ page }) => {
+  await open(page);
+  const result = await page.evaluate(async () => {
+    const grid = document.querySelector<HTMLElement>("[data-testid=week-grid]")!;
+    const clip = document.querySelector<HTMLElement>(".day-clip")!;
+    const strips = [...document.querySelectorAll<HTMLElement>(".pan-strip")];
+    let layoutReads = 0;
+    let styleWrites = 0;
+    const rect = clip.getBoundingClientRect.bind(clip);
+    clip.getBoundingClientRect = () => {
+      layoutReads++;
+      return rect();
+    };
+    const observers = strips.map((strip) => {
+      const observer = new MutationObserver((records) => {
+        styleWrites += records.filter((record) => record.attributeName === "style").length;
+      });
+      observer.observe(strip, { attributes: true, attributeFilter: ["style"] });
+      return observer;
+    });
+    for (let i = 0; i < 50; i++) {
+      grid.dispatchEvent(new WheelEvent("wheel", {
+        deltaX: 1,
+        deltaY: 0,
+        bubbles: true,
+        cancelable: true,
+      }));
+    }
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    observers.forEach((observer) => observer.disconnect());
+    return { layoutReads, styleWrites };
+  });
+  expect(result.layoutReads).toBe(0);
+  expect(result.styleWrites).toBeLessThanOrEqual(3);
+});
+
+test("gesture: a swipe never paints the old days pulled back a column", async ({ page }) => {
+  // At every day boundary the offset used to drop by a whole column before
+  // React rendered the shifted days, so one frame showed the previous days
+  // jumped back under the pointer: the swipe's jitter.
+  await open(page);
+  await page.evaluate(() => {
+    const w = window as any;
+    w.__swipe = [];
+    const head = document.querySelector(".day-headers .pan-strip") as HTMLElement;
+    const colW = () => (document.querySelector(".day-clip") as HTMLElement).clientWidth /
+      document.querySelectorAll(".day-head").length;
+    const pos = () => {
+      const dnum = Number(head.querySelector(".day-head .dnum")!.textContent);
+      const m = /-\s*(-?[\d.]+)px/.exec(head.style.transform);
+      return dnum + (m ? Number(m[1]) : 0) / colW();
+    };
+    w.__swipe.push(pos());
+    new MutationObserver(() => w.__swipe.push(pos())).observe(
+      document.querySelector("[data-testid=week-grid]")!,
+      { childList: true, subtree: true, attributes: true, attributeFilter: ["style"], characterData: true },
+    );
+  });
+  const box = (await page.getByTestId("week-grid").boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  for (let i = 0; i < 40; i++) {
+    await page.mouse.wheel(14, 0);
+    await page.waitForTimeout(8);
+  }
+  await page.waitForTimeout(300);
+  const samples: number[] = await page.evaluate(() => (window as any).__swipe);
+  const backward = samples.slice(1).filter((x, i) => x - samples[i] < -0.02);
+  expect(samples[samples.length - 1] - samples[0]).toBeGreaterThan(2);
+  expect(backward).toEqual([]);
+});
+
 test("gesture: showing weekends keeps the current first visible day", async ({ page }) => {
   await open(page);
   await page.keyboard.press("ControlOrMeta+Shift+e");
@@ -1424,6 +1495,48 @@ test("recurring: moving a later timed occurrence with 'all events' shifts the se
   await expect(page.getByTestId("day-col-6").locator(".chip-timed", { hasText: "Shift series" })).toHaveCount(1);
 });
 
+test("recurring: 'all events' never copies one occurrence's note onto the series", async ({ page }) => {
+  await open(page);
+  await page.getByTestId("week-grid").evaluate((el) => (el.scrollTop = 4 * 48));
+  // the plain (non C-shape) occurrence gets a note of its own
+  const plain = page.locator(".chip-timed:not(.chip-cfull)").filter({ has: page.locator(".chip-title", { hasText: /^Sleep$/ }) });
+  const key = (await plain.getAttribute("data-ek"))!;
+  await page.evaluate(async (k) => {
+    const cut = k.lastIndexOf("/");
+    await (window as any).__mockBackend.setEventNote(k.slice(0, cut), k.slice(cut + 1), "Only this night.");
+  }, key);
+  await plain.click();
+  const panel = page.getByTestId("event-panel");
+  await expect(panel.getByTestId("panel-drill")).toContainText("Only this night.");
+  await panel.locator(".panel-title").fill("Sleep (renamed)");
+  await panel.getByRole("button", { name: /Save/ }).click();
+  await page.getByTestId("scope-dialog").getByTestId("scope-all").click();
+  await expect(page.getByTestId("toast")).toContainText("Updated all");
+  const descriptions: (string | null)[] = await page.evaluate(async () => {
+    const all = await (window as any).__mockBackend.listEvents("2026-10-01", "2026-11-01");
+    return all.filter((e: any) => e.recurring_event_id === "sleep-master").map((e: any) => e.description);
+  });
+  expect(descriptions.filter((d) => d?.includes("Only this night."))).toHaveLength(1);
+});
+
+test("recurring: the scope dialog opens before the series master has loaded", async ({ page }) => {
+  await open(page);
+  await page.getByTestId("week-grid").evaluate((el) => (el.scrollTop = 4 * 48));
+  // a slow Google round trip for the master
+  await page.evaluate(() => {
+    const b = (window as any).__mockBackend;
+    const get = b.getSeriesMaster;
+    b.getSeriesMaster = (...a: unknown[]) => new Promise((r) => setTimeout(() => r(get(...a)), 1500));
+  });
+  const sleep = page.locator(".chip-timed:not(.chip-cfull)").filter({ has: page.locator(".chip-title", { hasText: /^Sleep$/ }) });
+  await sleep.click();
+  await page.getByTestId("event-panel").locator(".panel-title").fill("Sleep (later)");
+  await page.getByTestId("event-panel").getByRole("button", { name: /Save/ }).click();
+  await expect(page.getByTestId("scope-dialog")).toBeVisible({ timeout: 500 });
+  await page.getByTestId("scope-dialog").getByTestId("scope-all").click();
+  await expect(page.getByTestId("toast")).toContainText("Updated all", { timeout: 4000 });
+});
+
 test("recurring: delete 'this and following' truncates the series", async ({ page }) => {
   await open(page);
   // the two recurring Sleep instances render as a C-shape (Fri) + a chip (Sat)
@@ -2139,6 +2252,22 @@ test("drill: an ended event without a note can get one for reflection", async ({
   await page.keyboard.press("Escape");
   await page.locator(".chip-timed", { hasText: "Standup" }).click();
   await expect(panel.getByTestId("drill-add")).toHaveCount(0);
+});
+
+test("drill: a note added and erased in the same open editor is actually removed", async ({ page }) => {
+  await open(page);
+  const run = page.locator(".chip-timed", { hasText: "Morning run" });
+  await run.click();
+  const panel = page.getByTestId("event-panel");
+  await panel.getByTestId("drill-add").click();
+  await panel.getByTestId("drill-input").fill("Temporary reflection.");
+  await panel.getByTestId("drill-input").press("Enter");
+  await expect(page.getByTestId("margin-note").filter({ hasText: "Temporary reflection" })).toHaveCount(1);
+
+  await panel.getByTestId("drill-erase").click();
+  await expect(panel.getByTestId("panel-drill")).toHaveCount(0);
+  await expect(page.getByTestId("margin-note").filter({ hasText: "Temporary reflection" })).toHaveCount(0);
+  await expect(run).toHaveCount(1);
 });
 
 test("notes: a note is written in the margin and splits in the editor", async ({ page }) => {
