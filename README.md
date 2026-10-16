@@ -14,7 +14,7 @@ It's pretty common that you get lazy and forget to delete events that didn't hap
 
 Annotations are used in literature to critique writing, so why not apply this to your life? Let's imagine you printed your calendar this week and annotated your calendar do determine how well you accomplished your goals / what went wrong? 
 
-<img src="docs/media/annotations.png" width="720" alt="A week with red handwritten notes in the free space around the events, with arrows to the events they critique">
+<img src="docs/media/annotations.png" width="860" alt="A week with red handwritten notes in the free space around the events, with arrows to the events they critique">
 
 ### 3. Focus score / Highlighted Events / Goal dashboard
 
