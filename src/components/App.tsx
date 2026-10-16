@@ -5,10 +5,12 @@ import {
   addWeeks,
   eventDates,
   now,
+  shiftWallClock,
   startOfDay,
   toDateOnly,
   toLocalISO,
   weekDays,
+  type WallShift,
 } from "../lib/dates";
 import { useRef } from "react";
 import {
@@ -229,6 +231,25 @@ export default function App() {
   const events = useEvents(backend, fetchStart, fetchEnd);
   const visible = useVisibleEvents(events, calendars);
 
+  // the selection follows its events: a move, an edit or a sync replaces the
+  // event objects, and copy / duplicate / a second group drag must use the
+  // current times, not the ones from when it was selected
+  useEffect(() => {
+    setSelected((sel) => {
+      if (!sel.length) return sel;
+      let changed = false;
+      const next = sel.map((s) => {
+        const cur = visible.find((e) => e.id === s.id && e.calendar_id === s.calendar_id);
+        if (cur && cur !== s) {
+          changed = true;
+          return cur;
+        }
+        return s;
+      });
+      return changed ? next : sel;
+    });
+  }, [visible]);
+
   /** Open the scope dialog for a recurring event at once and fetch its
    *  series master behind it. The fetch is a Google round trip; awaiting it
    *  before showing the dialog made every recurring edit feel stuck. */
@@ -447,10 +468,13 @@ export default function App() {
     [backend, calendars, isReadOnly],
   );
 
-  /** Group drag: shift every selected timed, editable event by the same delta.
-   *  Recurring instances move as "this event" (no per-event dialogs in bulk). */
+  /** Group drag: every selected timed, editable event moves by the dragged
+   *  event's shift on the wall clock (whole days, then minutes), so each
+   *  keeps its own time of day across a daylight-saving change. Recurring
+   *  instances move as "this event" (no per-event dialogs in bulk). The
+   *  selection stays, so the group can be dragged again. */
   const moveSelected = useCallback(
-    async (deltaMs: number) => {
+    async (shift: WallShift) => {
       if (!backend) return;
       const movable = selected.filter((e) => !isReadOnly(e) && !e.all_day);
       if (movable.length === 0) return;
@@ -460,16 +484,19 @@ export default function App() {
           const { start, end } = eventDates(e);
           const input = {
             ...inputOf(e),
-            start: toLocalISO(new Date(start.getTime() + deltaMs)),
-            end: toLocalISO(new Date(end.getTime() + deltaMs)),
+            start: toLocalISO(shiftWallClock(start, shift)),
+            end: toLocalISO(shiftWallClock(end, shift)),
           };
           return backend.updateEvent(e.id, input, e.calendar_id);
         }),
       );
-      setSelected([]);
-      recordUndo(`Moved ${movable.length} events`, async () => {
-        await Promise.all(prevs.map(([e, prev]) => backend.updateEvent(e.id, prev, e.calendar_id)));
-      });
+      const left = selected.length - movable.length;
+      recordUndo(
+        `Moved ${movable.length} events` + (left ? ` (${left} read-only or all-day stayed)` : ""),
+        async () => {
+          await Promise.all(prevs.map(([e, prev]) => backend.updateEvent(e.id, prev, e.calendar_id)));
+        },
+      );
     },
     [backend, selected, isReadOnly],
   );

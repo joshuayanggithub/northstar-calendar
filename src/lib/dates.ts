@@ -51,6 +51,25 @@ export function monthGrid(d: Date): Date[][] {
   return weeks;
 }
 
+/** a move measured on the wall clock: whole calendar days, then minutes */
+export type WallShift = { days: number; minutes: number };
+
+/** the shift that takes `from` to `to`, on the wall clock */
+export function wallShiftBetween(from: Date, to: Date): WallShift {
+  const days = Math.round((startOfDay(to).getTime() - startOfDay(from).getTime()) / 86_400_000);
+  return { days, minutes: minutesOfDay(to) - minutesOfDay(from) };
+}
+
+/** `d` moved by a wall-clock shift: 9:00 stays 9:00 on the new day, even
+ *  across a daylight-saving change (a fixed number of ms would land an hour
+ *  off); minutes past midnight roll into the next day */
+export function shiftWallClock(d: Date, s: WallShift): Date {
+  const x = startOfDay(d);
+  x.setDate(x.getDate() + s.days);
+  x.setHours(0, minutesOfDay(d) + s.minutes, d.getSeconds(), d.getMilliseconds());
+  return x;
+}
+
 export function minutesOfDay(d: Date): number {
   return d.getHours() * 60 + d.getMinutes();
 }

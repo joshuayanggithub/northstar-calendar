@@ -12,9 +12,12 @@ import {
   isSameDay,
   minutesOfDay,
   now,
+  shiftWallClock,
   startOfDay,
   toLocalISO,
   format,
+  wallShiftBetween,
+  type WallShift,
 } from "../lib/dates";
 import { jointClipPath, jointPathD, packDayWithSleeves, SLEEVE_LANE_WIDTH } from "../lib/layout";
 import { blockBandPx } from "../lib/chipText";
@@ -94,7 +97,7 @@ export function WeekView(props: {
   onToggleSelect: (e: CalendarEvent) => void;
   onClipboard?: (e: CalendarEvent, cut: boolean) => void;
   onSelectMany: (evs: CalendarEvent[]) => void;
-  onMoveSelected: (deltaMs: number) => void;
+  onMoveSelected: (shift: WallShift) => void;
   panelOpen: boolean;
   hourPx?: number;
   secondaryTz?: string | null;
@@ -528,12 +531,9 @@ export function WeekView(props: {
         selectedKeys.has(keyOf(d.event)) &&
         !d.event.all_day
       ) {
-        // group move: everyone shifts by the dragged event's delta
-        const { start } = eventDates(d.event);
-        const newStartMin = snap(d.curMin - (d.grabOffsetMin ?? 0));
-        const newStart = atWallClock(days[d.curDayIndex], newStartMin);
-        const deltaMs = newStart.getTime() - start.getTime();
-        if (deltaMs !== 0) props.onMoveSelected(deltaMs);
+        // group move: everyone shifts by the dragged event's wall-clock move
+        const shift = groupShiftOf(d);
+        if (shift && (shift.days !== 0 || shift.minutes !== 0)) props.onMoveSelected(shift);
       } else if (d.kind === "move" && d.event && d.moved && d.allDayDropDay != null) {
         // dropped on the all-day lane: convert to a one-day all-day event
         const day = startOfDay(days[d.allDayDropDay]);
@@ -810,6 +810,40 @@ export function WeekView(props: {
     () => new Set(props.selected.map(keyOf)),
     [props.selected],
   );
+
+  /** A selected event dragged while others are selected moves them all: the
+   *  wall-clock shift of the dragged one (null: not a group move) */
+  function groupShiftOf(d: DragState | null): WallShift | null {
+    if (!d || d.kind !== "move" || !d.event || !d.moved || d.duplicate || d.allDayDropDay != null) return null;
+    if (d.event.all_day || props.selected.length < 2 || !selectedKeys.has(keyOf(d.event))) return null;
+    const { start } = eventDates(d.event);
+    return wallShiftBetween(start, atWallClock(days[d.curDayIndex], snap(d.curMin - (d.grabOffsetMin ?? 0))));
+  }
+  /** while a group is dragged: the others' landing spots (ghosts, by day
+   *  column) and which events are on the move (dimmed in place) */
+  const groupDrag = useMemo(() => {
+    const shift = groupShiftOf(drag);
+    if (!shift || !drag?.event) return null;
+    const moving = new Set<string>();
+    const ghosts = new Map<number, { key: string; title: string; color: string; startMin: number; endMin: number }[]>();
+    for (const sel of props.selected) {
+      const k = keyOf(sel);
+      if (k === keyOf(drag.event)) continue;
+      const e = timed.find((x) => keyOf(x) === k) ?? sel; // the current copy
+      if (e.all_day || !editableCal(e.calendar_id)) continue;
+      moving.add(k);
+      const { start, end } = eventDates(e);
+      const s = shiftWallClock(start, shift);
+      const di = days.findIndex((dd) => isSameDay(dd, s));
+      if (di < 0) continue;
+      const startMin = minutesOfDay(s);
+      const endMin = Math.min(DAY_MIN, startMin + Math.max(15, (end.getTime() - start.getTime()) / 60000));
+      if (!ghosts.has(di)) ghosts.set(di, []);
+      ghosts.get(di)!.push({ key: k, title: e.summary, color: colorOf(calendars, e.calendar_id), startMin, endMin });
+    }
+    return { moving, ghosts };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drag, props.selected, timed, days, calendars]);
   const selectedKey = props.selected.length === 1 ? keyOf(props.selected[0]) : null;
 
   // keep the keyboard-selected event visible (n/b cycling)
@@ -1120,6 +1154,7 @@ export function WeekView(props: {
                   const recon = reconState(e, calendars, nowDate);
                   const isPast = ended(e, nowDate);
                   const common =
+                    (groupDrag?.moving.has(keyOf(e)) ? " dragging" : "") +
                     (isPast ? " past" : "") +
                     (recon === "unsettled" ? " unsettled" : "") +
                     (recon === "canceled" ? " canceled" : "") +
@@ -1271,7 +1306,7 @@ export function WeekView(props: {
                         (clipPath ? " jointed" : "") +
                         ((st0) => (st0 ? (st0.kind === "manual" ? " starred" : " starred-auto") : ""))(starState(starKey(e))) +
                         (height < 16 ? " chip-xs" : "") +
-                        (beingMoved ? " dragging" : "") +
+                        (beingMoved || groupDrag?.moving.has(keyOf(e)) ? " dragging" : "") +
                         (isPast ? " past" : "") +
                         (recon === "unsettled" ? " unsettled" : "") +
                         (recon === "canceled" ? " canceled" : "") +
@@ -1349,6 +1384,32 @@ export function WeekView(props: {
                   );
                 })}
 
+                {live &&
+                  groupDrag?.ghosts.get(di)?.map((g) => (
+                    <div
+                      key={"group-" + g.key}
+                      className="chip chip-ghost"
+                      data-testid="group-ghost"
+                      data-ek={g.key}
+                      style={{
+                        ...chipStyle(g.color),
+                        top: g.startMin * pxPerMin,
+                        height: Math.max((g.endMin - g.startMin) * pxPerMin, 17),
+                        left: 0,
+                        width: "calc(100% - 2px)",
+                      }}
+                    >
+                      <span className="chip-title">{g.title}</span>
+                      {(g.endMin - g.startMin) * pxPerMin >= 28 && (
+                        <span className="chip-time">
+                          {fmtChipRange(
+                            new Date(2000, 0, 1, Math.floor(g.startMin / 60), g.startMin % 60),
+                            new Date(2000, 0, 1, Math.floor(g.endMin / 60) % 24, g.endMin % 60),
+                          )}
+                        </span>
+                      )}
+                    </div>
+                  ))}
                 {isDragTarget && drag && (
                   <GhostChip
                     drag={drag}
