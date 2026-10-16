@@ -1,34 +1,34 @@
 # Main
 northstar is a mac dekstop calendar app that centers around features maximizing your north star: long-term goals and productivity! the most popular calendar (gcal, notion) apps are 1. basic clunky - lacking basic UI/UX features that help when scheduling lots of events 2. lack true features that enable long-term planning and reflection of goals. 
 
-![northstar in ten seconds: a made-up week; an unconfirmed event is reconciled with ✓, Saturday is planned (a writing block forms a rabbet joint with a swim and a C-shape around a call), and three quick tasks collapse into one clustered list](docs/media/northstar.gif)
+<img src="docs/media/northstar.gif" width="640" alt="northstar in ten seconds: a made-up week; an unconfirmed event is reconciled with ✓, Saturday is planned (a writing block forms a rabbet joint with a swim and a C-shape around a call), and three quick tasks collapse into one clustered list">
 
 # Productivity add-ons
-1. Reconcile Events
+### 1. Reconcile Events
 
 It's pretty common that you get lazy and forget to delete events that didn't happen -  by default, events are now dotted lines (didn't happen) and you have to manually "reconcile" events to mark events that happened or didn't.
 
-   ![Yesterday in day view: the events are still dotted (unconfirmed); hovering one shows ✓ and ✕; the reminder at the bottom reads "Yesterday: 6 unconfirmed events" with Confirm all / Review](docs/media/reconcile.png)
+<img src="docs/media/reconcile.png" width="420" alt="Yesterday in day view: the events are still dotted (unconfirmed); hovering one shows ✓ and ✕; the reminder at the bottom reads &quot;Yesterday: 6 unconfirmed events&quot; with Confirm all / Review">
 
-3. Annotations for reflection
+### 2. Annotations for reflection
 
 Annotations are used in literature to critique writing, so why not apply this to your life? Let's imagine you printed your calendar this week and annotated your calendar do determine how well you accomplished your goals / what went wrong? 
 
-![A week with red handwritten notes in the free space around the events, with arrows to the events they critique](docs/media/annotations.png)
+<img src="docs/media/annotations.png" width="560" alt="A week with red handwritten notes in the free space around the events, with arrows to the events they critique">
 
-3. Focus score / Highlighted Events / Goal dashboard
-4. 
+### 3. Focus score / Highlighted Events / Goal dashboard
+
 Some cool small features that help [prime](https://en.wikipedia.org/wiki/Priming_%28psychology%29) oneself to be more self-critical and evaluative of their goals? are a focus score that ranks deep work and. highlighting goal-driven events with pretty ui animations, and goal dashboard.  
 
-![Three columns: the focus score's breakdown for a day; a goal-work event with its gold light running along the outline; the goal dashboard with daily, weekly and long-term goals](docs/media/focus-goals.png)
+<img src="docs/media/focus-goals.png" width="560" alt="Three columns: the focus score's breakdown for a day; a goal-work event with its gold light running along the outline; the goal dashboard with daily, weekly and long-term goals">
 
 # UI/UX Improvements
-1. Overlapped Events
+### 1. Overlapped Events
 
 In google calendar its really hard to read overlapped events. Its a really simple fix of ensuring that overlapped events never add horizontal whitespace or random innents and clustering small-length events together in a more readable format.
 
-![northstar: C-shape invariance, rabbet joint, clustered view](docs/media/overlaps.png)
-![The same events laid out the way Google Calendar does: side-by-side columns with cut-off titles](docs/media/overlaps-gcal.png)
+<img src="docs/media/overlaps.png" width="520" alt="northstar: C-shape invariance, rabbet joint, clustered view">
+<img src="docs/media/overlaps-gcal.png" width="520" alt="The same events laid out the way Google Calendar does: side-by-side columns with cut-off titles">
   
 # Implementation
 northstar is a [Tauri 2](https://tauri.app/) app: a Rust core and a React + TypeScript interface in the system's WebKit view. It is local-first. Events live in a local SQLite database and sync both ways with Google Calendar; the goal classification and the annotations come from a local model (via [Ollama](https://ollama.com/)), so nothing else leaves the machine.
