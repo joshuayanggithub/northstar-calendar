@@ -1,0 +1,409 @@
+// The supervisor's red-pen notes as margin annotations over the week.
+// This layer reads where the chips and their text actually landed, hands
+// that to lib/marginNotes.ts to place every note in the free space around
+// them, and draws the arrows. A note can be dragged to adjust it; the spot
+// is remembered relative to its event (lib/notePins.ts). Double-clicking a
+// moved note gives it back to the placer.
+
+import { Fragment, useLayoutEffect, useRef, useState } from "react";
+import { cleanDrill, splitDrill } from "../lib/drill";
+import { rgbToOklab } from "../lib/color";
+import {
+  leaderGeom,
+  lineH,
+  NOTE_PADX,
+  noteWords,
+  placeNotes,
+  type Field,
+  type NotePlace,
+  type NoteSpec,
+  type Rect,
+} from "../lib/marginNotes";
+import { notePin, setNotePin, subscribeNotePins } from "../lib/notePins";
+import PlaceWorker from "../lib/marginNotes.worker?worker";
+import type { CalendarEvent } from "../lib/types";
+
+/** the note hand; keep in step with .margin-note in app.css */
+const FONT = '12px "Bradley Hand", "Marker Felt", "Segoe Print", cursive';
+let ctx: CanvasRenderingContext2D | null = null;
+const widths = new Map<string, number>();
+function measure(s: string): number {
+  let w = widths.get(s);
+  if (w === undefined) {
+    ctx ??= document.createElement("canvas").getContext("2d");
+    if (!ctx) return s.length * 6;
+    ctx.font = FONT;
+    w = ctx.measureText(s).width;
+    widths.set(s, w);
+  }
+  return w;
+}
+
+/** "rgb(…)" / "color(srgb …)" → 0–1 channels */
+function parseColor(c: string): [number, number, number] | null {
+  const n = c.match(/-?[\d.]+/g)?.map(Number);
+  if (!n || n.length < 3) return null;
+  return c.startsWith("color(") ? [n[0], n[1], n[2]] : [n[0] / 255, n[1] / 255, n[2] / 255];
+}
+
+/** a minus everything in cut (all axis-aligned) */
+function subtract(a: Rect[], cut: Rect): Rect[] {
+  const out: Rect[] = [];
+  for (const r of a) {
+    if (cut.x1 <= r.x0 || cut.x0 >= r.x1 || cut.y1 <= r.y0 || cut.y0 >= r.y1) {
+      out.push(r);
+      continue;
+    }
+    if (cut.y0 > r.y0) out.push({ ...r, y1: cut.y0 });
+    if (cut.y1 < r.y1) out.push({ ...r, y0: cut.y1 });
+    const y0 = Math.max(r.y0, cut.y0);
+    const y1 = Math.min(r.y1, cut.y1);
+    if (cut.x0 > r.x0) out.push({ x0: r.x0, x1: cut.x0, y0, y1 });
+    if (cut.x1 < r.x1) out.push({ x0: cut.x1, x1: r.x1, y0, y1 });
+  }
+  return out;
+}
+
+const union = (rs: Rect[]): Rect | null =>
+  rs.length
+    ? {
+        x0: Math.min(...rs.map((r) => r.x0)),
+        y0: Math.min(...rs.map((r) => r.y0)),
+        x1: Math.max(...rs.map((r) => r.x1)),
+        y1: Math.max(...rs.map((r) => r.y1)),
+      }
+    : null;
+
+type Placed = { places: NotePlace[]; anchors: Map<string, Rect>; colW: number };
+const EMPTY: Placed = { places: [], anchors: new Map(), colW: 1 };
+
+/** one placement worker for the app; null where workers aren't available */
+let worker: Worker | null | undefined;
+function placer(): Worker | null {
+  if (worker === undefined) {
+    try {
+      worker = new PlaceWorker();
+    } catch {
+      worker = null;
+    }
+  }
+  return worker;
+}
+
+export function MarginNotes(props: {
+  /** the strip holding the day columns (lib: WeekView .day-cols) */
+  stripRef: React.RefObject<HTMLDivElement | null>;
+  days: number;
+  /** columns in the strip, overscan included */
+  extN: number;
+  events: CalendarEvent[];
+  /** changes whenever the chips may have moved */
+  layoutKey: unknown;
+  pxPerMin: number;
+  keyOf: (e: CalendarEvent) => string;
+  onSelect: (e: CalendarEvent) => void;
+}) {
+  const layerRef = useRef<HTMLDivElement>(null);
+  const [placed, setPlaced] = useState<Placed>(EMPTY);
+  /** the measured page last sent off, and the latest request number */
+  const lastRef = useRef<{ page: string; notes: string; seq: number }>({ page: "", notes: "", seq: 0 });
+  const [drag, setDrag] = useState<{ key: string; dx: number; dy: number } | null>(null);
+  const [pinTick, bumpPins] = useState(0);
+  useLayoutEffect(() => subscribeNotePins(() => bumpPins((n) => n + 1)), []);
+  const [fontTick, bumpFont] = useState(0);
+  useLayoutEffect(() => {
+    let live = true;
+    document.fonts?.ready.then(() => {
+      if (!live) return;
+      widths.clear();
+      bumpFont((n) => n + 1);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const notesOf = new Map<string, { e: CalendarEvent; text: string }>();
+  for (const e of props.events) {
+    const t = cleanDrill(splitDrill(e.description).drill, e.summary);
+    if (t) notesOf.set(props.keyOf(e), { e, text: t });
+  }
+  const noteSig = [...notesOf].map(([k, v]) => k + "\u0001" + v.text).join("\u0002");
+
+  useLayoutEffect(() => {
+    const layer = layerRef.current;
+    const strip = props.stripRef.current;
+    if (!layer || !strip) return;
+    const L = layer.getBoundingClientRect();
+    if (L.width < 10 || L.height < 10 || !notesOf.size) {
+      lastRef.current.page = "";
+      if (placed.places.length) setPlaced(EMPTY);
+      return;
+    }
+    const rel = (r: DOMRect | Rect): Rect =>
+      "left" in r
+        ? { x0: r.left - L.left, y0: r.top - L.top, x1: r.right - L.left, y1: r.bottom - L.top }
+        : r;
+    const colEls = [...strip.querySelectorAll<HTMLElement>("[data-testid^=day-col-]")];
+    const cols = colEls
+      .map((el) => ({ el, ...rel(el.getBoundingClientRect()) }))
+      .sort((a, b) => a.x0 - b.x0);
+    const colW = cols.length ? (cols[cols.length - 1].x1 - cols[0].x0) / cols.length : L.width;
+    const ink = getComputedStyle(layer).color;
+    const inkLab = (() => {
+      const c = parseColor(ink);
+      return c ? rgbToOklab(...c) : null;
+    })();
+
+    const text: Rect[] = [];
+    const fills: Field["fills"] = [];
+    const titles: Field["titles"] = [];
+    const chips: { key: string; col: number; z: number; r: Rect; el: HTMLElement }[] = [];
+    /** visible ink of a text element: its line boxes, inside the element */
+    const inkOf = (el: HTMLElement): Rect[] => {
+      const box = el.getBoundingClientRect();
+      const rg = document.createRange();
+      rg.selectNodeContents(el);
+      const out: Rect[] = [];
+      for (const r of rg.getClientRects()) {
+        const x0 = Math.max(r.left, box.left);
+        const x1 = Math.min(r.right, box.right);
+        const y0 = Math.max(r.top, box.top);
+        const y1 = Math.min(r.bottom, box.bottom);
+        if (x1 - x0 > 0.5 && y1 - y0 > 0.5) out.push({ x0: x0 - L.left, y0: y0 - L.top, x1: x1 - L.left, y1: y1 - L.top });
+      }
+      return out;
+    };
+    cols.forEach((c, ci) => {
+      for (const el of c.el.querySelectorAll<HTMLElement>(".chip-timed, .cluster-block")) {
+        const r = rel(el.getBoundingClientRect());
+        const z = Number(el.style.zIndex) || 0;
+        const bg = parseColor(getComputedStyle(el).backgroundColor);
+        let poorFill = false;
+        if (bg && inkLab) {
+          const b = rgbToOklab(...bg);
+          poorFill = Math.hypot(b[0] - inkLab[0], b[1] - inkLab[1], b[2] - inkLab[2]) < 0.22;
+        }
+        fills.push({ r, poor: poorFill });
+        if (el.classList.contains("cluster-block")) {
+          text.push(r);
+          for (const row of el.querySelectorAll<HTMLElement>("[data-ek]")) {
+            const rr = rel(row.getBoundingClientRect());
+            chips.push({ key: row.dataset.ek!, col: ci, z: z + 0.5, r: rr, el: row });
+            titles.push({ key: row.dataset.ek!, r: rr });
+          }
+          continue;
+        }
+        for (const t of el.querySelectorAll<HTMLElement>(".chip-abs, .chip-join, .chip-title")) text.push(...inkOf(t));
+        const key = el.dataset.ek;
+        if (!key) continue;
+        chips.push({ key, col: ci, z, r, el });
+        const head = union(
+          [...el.querySelectorAll<HTMLElement>(".chip-title, .chip-line, .chip-time")].flatMap((t) => inkOf(t)),
+        );
+        titles.push({ key, r: head ?? r });
+      }
+    });
+
+    const anchors = new Map<string, Rect>();
+    const specs: NoteSpec[] = [];
+    for (const [key, { text: note }] of notesOf) {
+      const chip = chips.find((c) => c.key === key && titles.some((t) => t.key === key));
+      if (!chip) continue;
+      const anchor = titles.find((t) => t.key === key && t.r.x0 >= chip.r.x0 - 1 && t.r.x1 <= chip.r.x1 + 1)?.r ?? chip.r;
+      // the part of the event no later-painted event covers
+      let own: Rect[] = [chip.r];
+      for (const o of chips) if (o.col === chip.col && o.z > chip.z && o.key !== key) own = subtract(own, o.r);
+      const pin = notePin(key);
+      anchors.set(key, anchor);
+      specs.push({
+        key,
+        words: noteWords(note),
+        anchor,
+        own,
+        col: chip.col,
+        pin: pin && {
+          x: anchor.x0 + pin.dxCol * colW,
+          y: anchor.y0 + pin.dyMin * props.pxPerMin,
+          w: pin.w,
+          angle: pin.angle,
+          scale: pin.scale ?? 1,
+        },
+      });
+    }
+    const field: Field = {
+      w: L.width,
+      h: L.height,
+      cols: cols.map((c) => ({ x0: c.x0, x1: c.x1 })),
+      text,
+      fills,
+      titles,
+    };
+    // nothing moved: keep what is on the page
+    const r1 = (r: Rect) => `${Math.round(r.x0)},${Math.round(r.y0)},${Math.round(r.x1)},${Math.round(r.y1)}`;
+    const page = `${Math.round(field.w)}x${Math.round(field.h)}|${text.map(r1).join(";")}|${fills.map((f) => r1(f.r) + (f.poor ? "!" : "")).join(";")}`;
+    const notesSig = JSON.stringify(specs.map((sp) => [sp.key, r1(sp.anchor), sp.words, sp.pin]));
+    const last = lastRef.current;
+    if (page === last.page && notesSig === last.notes) return;
+    // the page itself changed (another week, a zoom): old notes would point
+    // at the wrong things, so they go until the new spots are in
+    if (page !== last.page && placed.places.length) setPlaced(EMPTY);
+    last.page = page;
+    last.notes = notesSig;
+    const seq = ++last.seq;
+    layer.dataset.pending = "1";
+    const w: Record<string, number> = { " ": measure(" ") };
+    for (const sp of specs) for (const wd of sp.words) w[wd.t] = measure(wd.t);
+    if (import.meta.env.DEV) {
+      (window as unknown as { __marginInput?: unknown }).__marginInput = { field, specs, widths: w };
+    }
+    const done = (places: NotePlace[], ms: number) => {
+      if (seq !== lastRef.current.seq) return; // a newer page is on its way
+      if (layerRef.current) layerRef.current.dataset.pending = "0";
+      (window as unknown as { __marginMs?: number }).__marginMs = ms;
+      setPlaced({ places, anchors, colW });
+    };
+    const wk = placer();
+    if (wk) {
+      const t0 = performance.now();
+      const onMsg = (ev: MessageEvent<{ seq: number; places: NotePlace[] }>) => {
+        if (ev.data.seq !== seq) return;
+        wk.removeEventListener("message", onMsg);
+        done(ev.data.places, performance.now() - t0);
+      };
+      wk.addEventListener("message", onMsg);
+      wk.postMessage({ seq, field, specs, widths: w });
+    } else {
+      const t0 = performance.now();
+      done(placeNotes(field, specs, (x) => w[x] ?? measure(x)), performance.now() - t0);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.layoutKey, props.days, props.pxPerMin, noteSig, pinTick, fontTick]);
+
+  const startDrag = (pe: React.PointerEvent<HTMLDivElement>, p: NotePlace) => {
+    if (pe.button !== 0) return;
+    pe.stopPropagation();
+    pe.preventDefault();
+    const el = pe.currentTarget;
+    el.setPointerCapture(pe.pointerId);
+    const sx = pe.clientX;
+    const sy = pe.clientY;
+    let moved = false;
+    const move = (e: PointerEvent) => {
+      const dx = e.clientX - sx;
+      const dy = e.clientY - sy;
+      if (!moved && Math.hypot(dx, dy) < 3) return;
+      moved = true;
+      setDrag({ key: p.key, dx, dy });
+    };
+    const end = (e: PointerEvent) => {
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", end);
+      el.removeEventListener("pointercancel", end);
+      setDrag(null);
+      if (e.type === "pointercancel") return;
+      const a = placed.anchors.get(p.key);
+      if (moved && a) {
+        const dx = e.clientX - sx;
+        const dy = e.clientY - sy;
+        setPlaced((cur) => ({
+          ...cur,
+          places: cur.places.map((q) =>
+            q.key === p.key
+              ? {
+                  ...q,
+                  x: q.x + dx,
+                  y: q.y + dy,
+                  box: { x0: q.box.x0 + dx, y0: q.box.y0 + dy, x1: q.box.x1 + dx, y1: q.box.y1 + dy },
+                  inside: false,
+                  pinned: true,
+                }
+              : q,
+          ),
+        }));
+        setNotePin(p.key, {
+          dxCol: (p.x + e.clientX - sx - a.x0) / placed.colW,
+          dyMin: (p.y + e.clientY - sy - a.y0) / props.pxPerMin,
+          w: p.w - 1 - 2 * NOTE_PADX,
+          angle: p.angle,
+          scale: p.scale,
+        });
+      } else if (!moved) {
+        const n = notesOf.get(p.key);
+        if (n) props.onSelect(n.e);
+      }
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", end);
+    el.addEventListener("pointercancel", end);
+  };
+
+  const pct = 100 / props.extN;
+  return (
+    <div
+      className="margin-notes"
+      ref={layerRef}
+      style={{ left: `${pct}%`, width: `${pct * props.days}%` }}
+      data-testid="margin-notes"
+    >
+      <svg className="mn-leaders" aria-hidden>
+        {placed.places.map((p) => {
+          const a = placed.anchors.get(p.key);
+          if (!a || p.inside) return null;
+          const d = drag?.key === p.key ? drag : null;
+          const box = d ? { x0: p.box.x0 + d.dx, y0: p.box.y0 + d.dy, x1: p.box.x1 + d.dx, y1: p.box.y1 + d.dy } : p.box;
+          const g = leaderGeom(box, a, p.bend);
+          if (!g) return null;
+          const f = (q: [number, number]) => `${q[0].toFixed(1)},${q[1].toFixed(1)}`;
+          return (
+            <g key={p.key} data-testid="margin-leader" data-ek={p.key} className={d ? "dragging" : undefined}>
+              <path d={`M${f(g.s)} Q${f(g.c)} ${f(g.e)}`} />
+              <path d={`M${f(g.head[0])} L${f(g.head[1])} L${f(g.head[2])}`} />
+            </g>
+          );
+        })}
+      </svg>
+      {placed.places.map((p) => {
+        const d = drag?.key === p.key ? drag : null;
+        return (
+          <div
+            key={p.key}
+            className={"margin-note" + (p.pinned ? " pinned" : "") + (d ? " dragging" : "") + (p.forced ? " forced" : "")}
+            data-testid="margin-note"
+            data-ek={p.key}
+            data-inside={p.inside ? 1 : 0}
+            title={p.pinned ? "Drag to move · double-click to let it find its own spot" : "Drag to move"}
+            style={{
+              left: p.x + (d?.dx ?? 0),
+              top: p.y + (d?.dy ?? 0),
+              width: p.w,
+              height: p.h,
+              fontSize: p.scale === 1 ? undefined : `${(12 * p.scale).toFixed(2)}px`,
+              lineHeight: p.scale === 1 ? undefined : `${lineH(p.scale)}px`,
+              transform: p.angle ? `rotate(${p.angle}deg)` : undefined,
+            }}
+            onPointerDown={(pe) => startDrag(pe, p)}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              setNotePin(p.key, null);
+            }}
+          >
+            {p.lines.map((ln, i) => (
+              // each line exactly the height the placer reserved for it
+              <div className="mn-line" key={i} style={{ height: lineH(p.scale) }}>
+                {ln.map((w, j) => (
+                  <Fragment key={j}>
+                    {j ? " " : ""}
+                    {w.em ? <u>{w.t}</u> : w.t}
+                  </Fragment>
+                ))}
+                {/* a real space between lines, so copied text reads right */}
+                {i < p.lines.length - 1 && <span className="mn-gap"> </span>}
+              </div>
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
+}

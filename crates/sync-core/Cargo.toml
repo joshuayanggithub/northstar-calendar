@@ -1,0 +1,21 @@
+[package]
+name = "sync-core"
+version = "0.1.0"
+edition = "2021"
+description = "Platform-agnostic Google Calendar sync engine: SQLite store, OAuth PKCE, incremental sync"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
+ureq = { version = "2.10", features = ["json"] }
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"

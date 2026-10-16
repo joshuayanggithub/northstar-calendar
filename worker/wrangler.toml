@@ -1,0 +1,17 @@
+name = "calendar-booking"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+# KV namespace holding booking-link rules (slug -> rules JSON).
+# Create with: wrangler kv namespace create BOOKING_RULES
+# then paste the generated id below before deploying.
+[[kv_namespaces]]
+binding = "BOOKING_RULES"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# Secrets (set with `wrangler secret put <NAME>`):
+#   GOOGLE_CLIENT_ID      – same desktop OAuth client as the app
+#   GOOGLE_CLIENT_SECRET
+#   GOOGLE_REFRESH_TOKEN  – reuse the app's token:
+#       wrangler secret put GOOGLE_REFRESH_TOKEN < "$HOME/Library/Application Support/com.joshuayang.calendar-app/google_refresh.token"
+#   ADMIN_TOKEN           – any long random string; authorizes rule management

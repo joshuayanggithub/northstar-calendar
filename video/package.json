@@ -1,0 +1,33 @@
+{
+  "name": "northstar-video",
+  "version": "1.0.0",
+  "description": "The README's 10-second clip of northstar (Remotion). Stills come from ../docs/media (scripts/readme in the app).",
+  "repository": {},
+  "license": "UNLICENSED",
+  "private": true,
+  "dependencies": {
+    "@remotion/cli": "4.0.535",
+    "@remotion/google-fonts": "4.0.535",
+    "@remotion/transitions": "4.0.535",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "remotion": "4.0.535"
+  },
+  "devDependencies": {
+    "@remotion/eslint-config-flat": "4.0.535",
+    "@types/react": "19.2.7",
+    "@types/web": "0.0.166",
+    "eslint": "9.39.5",
+    "prettier": "3.8.1",
+    "typescript": "5.9.3"
+  },
+  "scripts": {
+    "dev": "remotion studio",
+    "build": "remotion bundle",
+    "upgrade": "remotion upgrade",
+    "lint": "eslint src && tsc",
+    "media": "mkdir -p public && cp ../docs/media/frames/week.png ../docs/media/frames/reconcile.png ../docs/media/frames/focus.png ../docs/media/frames/compare.png ../docs/media/annotations.png public/",
+    "render": "npm run media && remotion render src/index.ts Northstar ../docs/media/northstar.mp4 && npm run gif",
+    "gif": "ffmpeg -hide_banner -loglevel error -y -i ../docs/media/northstar.mp4 -vf \"fps=10,scale=720:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128:stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle\" ../docs/media/northstar.gif"
+  }
+}

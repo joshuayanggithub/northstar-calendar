@@ -1,0 +1,17 @@
+{
+  "source": "Measured from live Notion Calendar DOM + screenshots (dark theme), 2026-10-14",
+  "priority": "PRIMARY UI reference per user preference; Google Calendar is the feature reference",
+  "bodyFont": "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif",
+  "hourLabel": { "fontSize": "10px", "fontWeight": "400", "color": "rgb(109,107,107)" },
+  "eventChipText": { "fontSize": "11px", "fontWeight": "500", "lineHeight": "13px", "tintedPerCalendar": true },
+  "notes": [
+    "Chips: tinted translucent background of the calendar color with SAME-HUE lighter text (e.g. olive bg + rgb(241,255,197) text), 3-4px radius, ~1px vertical gap, saturated 2-3px left edge on some chips.",
+    "Overall: dark #191919-ish canvas, extremely dense; hour labels tiny (10px) in a narrow left gutter.",
+    "Sidebar: mini-month at top, account email as section header, calendars with 10px color dots, eye icon to toggle visibility.",
+    "Top bar: view switcher dropdown (Week/Month) + Today button + chevrons, right-side panel with shortcuts/search.",
+    "Day headers: 'Sun 11' inline format; today's number in a red/accent rounded badge.",
+    "Month view: rows list '4 AM Sleep'-style time-prefixed entries with 'N more' overflow; weekend columns same width.",
+    "Right panel shows contextual shortcuts; command menu is Cmd+K.",
+    "Re-verify exact chip bg alphas by zooming screenshots during build; DOM climb hit column containers."
+  ]
+}

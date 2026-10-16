@@ -1,0 +1,15 @@
+{
+  "source": "Measured from live Google Calendar DOM (week view), 2026-10-14, dark theme",
+  "bodyFont": "\"Google Sans Text\", \"Google Sans\", Helvetica, Arial, sans-serif",
+  "hourLabel": { "fontSize": "11px", "color": "rgb(68,71,70) [note: dark-theme sampled]", "fontFamily": "\"Google Sans\", Roboto, Arial, sans-serif" },
+  "dayNumberToday": { "fontSize": "25px", "fontWeight": "400" },
+  "eventChip": { "borderRadius": "6px", "titleFontSize": "12px", "titleFontWeight": "500", "titleLineHeight": "15px", "solidCalendarColorBg": true },
+  "hourRowHeight": "48px",
+  "notes": [
+    "Hour rows are 48px; half-hour line is implicit (only hour gridlines drawn).",
+    "Event chips: solid calendar color, white 12px/500 text, 6px radius, ~4-6px inner padding, 1px gap between adjacent chips.",
+    "Hour labels 11px, right-aligned in a ~56px gutter, vertically centered on the gridline.",
+    "Day headers: 3-letter uppercase weekday (11px) over a large day number; today's number sits in a filled circle.",
+    "Re-measure in light theme before styling the light palette; colors above were sampled in dark mode."
+  ]
+}

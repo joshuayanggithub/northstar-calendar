@@ -1,0 +1,62 @@
+/* Design tokens, built to design/references/notion-tokens.json measurements.
+   Notion Calendar is the UI reference: dense, dark-first, tinted chips. */
+:root {
+  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Helvetica Neue",
+    Helvetica, Arial, sans-serif;
+
+  /* light theme */
+  --bg: #ffffff;
+  --bg-panel: #fbfbfa;
+  --bg-hover: rgba(0, 0, 0, 0.045);
+  --bg-active: rgba(0, 0, 0, 0.08);
+  --fg: #1f1f1f;
+  --fg-secondary: #6f6e69;
+  --fg-faint: #9b9a97;
+  --border: rgba(0, 0, 0, 0.09);
+  --gridline: rgba(0, 0, 0, 0.055);
+  --gridline-half: rgba(0, 0, 0, 0.028);
+  --accent: #e5484d; /* today badge / time needle, Notion-style red */
+  /* goal work: the gold ring and its travelling shine */
+  --goal: #c99512;
+  --goal-shine: #ffd84d;
+  --focus: #4f8cff;
+  --shadow-popover: 0 8px 30px rgba(0, 0, 0, 0.16), 0 0 0 1px rgba(0, 0, 0, 0.06);
+  --chip-tint: 55%;
+  --slab-tint-drop: 3%; /* quiet-slab delta; light bg needs most of the tint */
+  --chip-text-mix: 38%; /* calendar color mixed toward fg for chip text */
+  --scrim: rgba(255, 255, 255, 0.6);
+
+  /* metrics (measured) */
+  --hour-h: 48px;
+  --gutter-w: 46px;
+  --allday-h: 24px;
+  --chip-radius: 4px;
+  --chip-fs: 11px;
+  --chip-lh: 13px;
+  --hour-label-fs: 10px;
+  --sidebar-w: 232px;
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --goal: #e2b93b;
+    --goal-shine: #fff1b8;
+    --bg: #191919;
+    --bg-panel: #202020;
+    --bg-hover: rgba(255, 255, 255, 0.055);
+    --bg-active: rgba(255, 255, 255, 0.1);
+    --fg: #e8e8e6;
+    --fg-secondary: #9b9a97;
+    --fg-faint: #6d6b6b;
+    --border: rgba(255, 255, 255, 0.094);
+    --gridline: rgba(255, 255, 255, 0.07);
+    --gridline-half: rgba(255, 255, 255, 0.035);
+    --shadow-popover: 0 8px 30px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.08);
+    --chip-tint: 60%;
+    --slab-tint-drop: 10%;
+    --chip-text-mix: 55%; /* toward white in dark mode */
+    --scrim: rgba(0, 0, 0, 0.4);
+  }
+}

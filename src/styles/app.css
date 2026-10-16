@@ -1,0 +1,3275 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font-family: inherit;
+  color: inherit;
+}
+
+.app {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ---------- sidebar ---------- */
+.sidebar {
+  width: var(--sidebar-w);
+  min-width: 190px;
+  border-right: 1px solid var(--border);
+  background: var(--bg-panel);
+  padding: 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+}
+
+.mini-month {
+  user-select: none;
+}
+
+.mini-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 4px 6px;
+}
+
+.mini-title {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.mini-nav button {
+  background: none;
+  border: 0;
+  font-size: 14px;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  padding: 0 5px;
+  border-radius: 4px;
+}
+
+.mini-nav button:hover {
+  background: var(--bg-hover);
+}
+
+.mini-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 1px;
+}
+
+.mini-dow {
+  text-align: center;
+  font-size: 9px;
+  color: var(--fg-faint);
+  padding: 2px 0;
+}
+
+.mini-day {
+  border: 0;
+  background: none;
+  font-size: 10.5px;
+  padding: 3px 0;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--fg);
+}
+
+.mini-day.out {
+  color: var(--fg-faint);
+}
+
+.mini-day:hover {
+  background: var(--bg-hover);
+}
+
+.mini-day.selected {
+  background: var(--bg-active);
+}
+
+.mini-day.today {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.sidebar-label {
+  font-size: 11px;
+  color: var(--fg-secondary);
+  padding: 0 6px 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cal-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.cal-row,
+.goal-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  background: none;
+  padding: 4px 6px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 12.5px;
+  text-align: left;
+}
+
+.cal-row:hover,
+.goal-row:hover {
+  background: var(--bg-hover);
+}
+
+.cal-row.hidden-cal {
+  opacity: 0.4;
+}
+
+.cal-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex: none;
+}
+
+.cal-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.cal-default {
+  font-size: 10px;
+  color: var(--fg-faint);
+}
+
+.cal-eye,
+.goal-del {
+  font-size: 10px;
+  color: var(--fg-secondary);
+  margin-left: auto;
+  opacity: 0;
+  flex: none;
+}
+
+.cal-row:hover .cal-eye,
+.goal-row:hover .goal-del {
+  opacity: 1;
+}
+
+.cal-row.hidden-cal .cal-eye {
+  opacity: 1;
+}
+
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-right: 2px;
+}
+
+.cal-add {
+  border: 0;
+  background: none;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  font-size: 13px;
+  border-radius: 4px;
+  padding: 0 5px;
+}
+
+.cal-add:hover {
+  background: var(--bg-hover);
+}
+
+.cal-add-form {
+  padding: 2px 4px 8px;
+}
+
+.cal-add-form input {
+  width: 100%;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 12px;
+  outline: none;
+}
+
+.cal-add-form input:focus {
+  border-color: var(--focus);
+}
+
+.cal-add-hint {
+  font-size: 10px;
+  color: var(--fg-faint);
+  padding: 4px 2px 0;
+}
+
+.cal-add-err {
+  font-size: 11px;
+  color: #e5484d;
+  padding-top: 4px;
+}
+
+.cal-empty {
+  color: var(--fg-faint);
+  padding: 4px 6px;
+}
+
+.mock-badge {
+  margin-top: auto;
+  font-size: 10px;
+  color: var(--fg-faint);
+  border: 1px dashed var(--border);
+  border-radius: 5px;
+  padding: 3px 8px;
+  text-align: center;
+}
+
+/* ---------- main / topbar ---------- */
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  gap: 10px;
+}
+
+.topbar-title {
+  font-size: 17px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.btn:hover {
+  background: var(--bg-hover);
+}
+
+.btn-ghost {
+  border-color: transparent;
+  background: none;
+  color: var(--fg-secondary);
+}
+
+.btn-accent {
+  background: var(--focus);
+  border-color: var(--focus);
+  color: #fff;
+}
+
+.btn-danger {
+  color: #e5484d;
+  border-color: rgba(229, 72, 77, 0.4);
+  background: none;
+}
+
+.view-switch {
+  display: flex;
+  background: var(--bg-hover);
+  border-radius: 7px;
+  padding: 2px;
+}
+
+.view-tab {
+  border: 0;
+  background: none;
+  padding: 4px 10px;
+  border-radius: 5px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--fg-secondary);
+}
+
+.view-tab.active {
+  background: var(--bg);
+  color: var(--fg);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.chevrons {
+  display: flex;
+}
+
+.chevrons .btn {
+  font-size: 16px;
+  padding: 2px 8px;
+}
+
+/* ---------- week grid ---------- */
+.weekview {
+  flex: 1;
+  overflow-y: auto;
+  position: relative;
+  border-top: 1px solid var(--border);
+  /* grid is drag-first UI: never let drags start text selection */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.day-headers {
+  display: grid;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.day-head {
+  padding: 6px 8px;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  border-left: 1px solid var(--gridline);
+}
+
+.day-head .dow {
+  font-size: 11px;
+  color: var(--fg-secondary);
+}
+
+.day-head .dnum {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.day-head.today .dnum {
+  background: var(--accent);
+  color: #fff;
+  border-radius: 5px;
+  padding: 0 5px;
+}
+
+@media (max-width: 900px) {
+  .day-head {
+    padding: 6px 4px;
+    gap: 3px;
+  }
+
+  .day-head .dow {
+    font-size: 10px;
+  }
+
+  .day-head .dnum {
+    font-size: 12px;
+  }
+
+  .day-head .score-wrap {
+    margin-left: auto;
+  }
+
+  .day-head .day-score {
+    font-size: 8px;
+    padding: 0 3px;
+  }
+}
+
+@media (max-width: 680px) {
+  .day-head .score-wrap {
+    display: none;
+  }
+}
+
+.allday-row {
+  display: grid;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  position: sticky;
+  top: 31px;
+  z-index: 4;
+}
+
+.allday-label {
+  font-size: 9px;
+  color: var(--fg-faint);
+  text-align: right;
+  padding: 4px 6px;
+}
+
+.allday-cell {
+  border-left: 1px solid var(--gridline);
+  padding: 2px 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-height: var(--allday-h);
+}
+
+.chip-allday {
+  position: static !important;
+  width: auto !important;
+  height: 17px;
+  text-align: left;
+  border: 0;
+  cursor: pointer;
+}
+
+/* grid body */
+.grid-body {
+  position: relative;
+  display: flex;
+}
+
+.gutter {
+  width: var(--gutter-w);
+  flex: none;
+  position: relative;
+}
+
+.hour-label {
+  position: absolute;
+  right: 6px;
+  transform: translateY(-50%);
+  font-size: var(--hour-label-fs);
+  color: var(--fg-faint);
+  user-select: none;
+}
+
+.gridlines {
+  position: absolute;
+  left: var(--gutter-w);
+  right: 0;
+  top: 0;
+  bottom: 0;
+  pointer-events: none;
+}
+
+.hline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 1px solid var(--gridline);
+}
+
+.day-cols {
+  flex: 1;
+  display: grid;
+  position: relative;
+}
+
+.day-col {
+  position: relative;
+  /* chips carry their paint order as z-index; keep it local to the column */
+  isolation: isolate;
+  border-left: 1px solid var(--gridline);
+  cursor: default;
+}
+
+.day-col.today {
+  background: color-mix(in srgb, var(--accent) 2.5%, transparent);
+}
+
+/* ---------- chips ---------- */
+.chip {
+  --cal: #8a8a8a;
+  position: absolute;
+  background: color-mix(in srgb, var(--cal) var(--chip-tint), var(--bg));
+  color: color-mix(in srgb, var(--cal) var(--chip-text-mix), var(--fg));
+  border-radius: var(--chip-radius);
+  font-size: var(--chip-fs);
+  line-height: var(--chip-lh);
+  font-weight: 500;
+  padding: 2px 6px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  /* Notion: chips keep the default arrow (desktop convention); only the
+     resize zone advertises itself */
+  cursor: default;
+  user-select: none;
+}
+
+/* no accent bar: the body color itself carries the calendar identity */
+
+.chip:hover {
+  background: color-mix(in srgb, var(--cal) calc(var(--chip-tint) + 8%), var(--bg));
+}
+
+/* The joint path rounds both the outer and inset corners itself. A second
+   border-radius clip on the box leaves a hairline hole where partners meet. */
+.chip-timed.jointed {
+  border-radius: 0;
+}
+
+.chip-title {
+  /* Notion anatomy: titles wrap in tall chips and clamp with an ellipsis;
+     the per-chip line budget arrives as an inline -webkit-line-clamp */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  line-height: 15px;
+  word-break: break-word;
+}
+
+/* short chips: one line, title then start time inline (Notion) */
+.chip-line {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.chip-line .chip-title {
+  flex: 0 1 auto;
+  white-space: nowrap;
+  display: block;
+}
+
+.chip-time-inline {
+  flex: none;
+  font-size: 10.5px;
+  opacity: 0.72;
+  white-space: nowrap;
+}
+
+.agenda-loc {
+  color: var(--fg-faint);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+.chip-loc {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10.5px;
+  opacity: 0.75;
+}
+
+.chip-time {
+  font-weight: 400;
+  opacity: 0.75;
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* timed-event text is placed piece by piece inside the event's visible
+   shape (lib/labelPlace.ts); offsets are from the box's top-left corner */
+.chip .chip-abs {
+  position: absolute;
+  margin: 0;
+}
+
+.chip-title.chip-abs {
+  max-height: none;
+}
+
+.chip-title.chip-abs.whole {
+  display: block;
+  overflow: hidden;
+}
+
+
+.chip-line.chip-abs {
+  height: 15px;
+  align-items: center;
+}
+
+.chip-line.chip-abs > * {
+  line-height: 15px;
+}
+
+.chip-time.chip-abs {
+  line-height: 11px;
+}
+
+/* a trailing time riding inside a title line must not grow the line box:
+   its smaller font would otherwise add a pixel */
+.chip-title .chip-time-inline {
+  line-height: 12px;
+}
+
+/* turned sideways in a narrow strip (a C-shape's spine), read bottom-up */
+.chip-time-v {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  width: 12px;
+  line-height: 12px !important;
+  text-align: left;
+}
+
+.chip-xs .chip-line.chip-abs {
+  height: 11px;
+}
+
+.chip-xs .chip-line.chip-abs > * {
+  line-height: 11px;
+}
+
+.chip-join {
+  font-size: 10px;
+  color: inherit;
+  text-decoration: underline;
+  margin-top: 1px;
+}
+
+.chip-resize {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 6px;
+  cursor: row-resize;
+}
+
+.chip.dragging {
+  opacity: 0.35;
+}
+
+.chip-ghost {
+  background: color-mix(in srgb, var(--cal) calc(var(--chip-tint) + 10%), var(--bg));
+  color: color-mix(in srgb, var(--cal) var(--chip-text-mix), var(--fg));
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+  z-index: 5000;
+  pointer-events: none;
+}
+
+.now-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 2px solid var(--accent);
+  z-index: 4000;
+  pointer-events: none;
+}
+
+.now-dot {
+  position: absolute;
+  left: -4px;
+  top: -5px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* ---------- month ---------- */
+.monthview {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+  min-height: 0;
+}
+
+.month-dow-row {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  font-size: 11px;
+  color: var(--fg-secondary);
+  padding: 4px 0;
+  text-align: center;
+  border-bottom: 1px solid var(--border);
+}
+
+.month-weeks {
+  flex: 1;
+  display: grid;
+  min-height: 0;
+}
+
+.month-week {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  border-bottom: 1px solid var(--gridline);
+  min-height: 0;
+}
+
+.month-cell {
+  border-left: 1px solid var(--gridline);
+  padding: 2px 3px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.month-cell.out {
+  color: var(--fg-faint);
+  background: color-mix(in srgb, var(--bg-panel) 55%, var(--bg));
+}
+
+.month-dnum {
+  border: 0;
+  background: none;
+  align-self: flex-end;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: inherit;
+}
+
+.month-dnum:hover {
+  background: var(--bg-hover);
+}
+
+.month-cell.today .month-dnum {
+  background: var(--accent);
+  color: #fff;
+}
+
+.month-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow: hidden;
+}
+
+.mchip {
+  /* Notion month rows: tinted mini-pill, capsule notch, muted time then a
+     calendar-colored title */
+  --cal: #8a8a8a;
+  position: relative;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  border: 0;
+  background: color-mix(in srgb, var(--cal) calc(var(--chip-tint) - 4%), var(--bg));
+  font-size: 10.5px;
+  line-height: 16px;
+  padding: 0 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: color-mix(in srgb, var(--cal) var(--chip-text-mix), var(--fg));
+  overflow: hidden;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.mchip:hover {
+  background: color-mix(in srgb, var(--cal) calc(var(--chip-tint) + 4%), var(--bg));
+}
+
+
+
+.mchip-allday {
+  background: color-mix(in srgb, var(--cal) var(--chip-tint), var(--bg));
+  color: color-mix(in srgb, var(--cal) var(--chip-text-mix), var(--fg));
+  font-weight: 500;
+}
+
+.mchip-allday::before {
+  display: none;
+}
+
+.mchip-time {
+  color: var(--fg-faint);
+  flex: none;
+}
+
+.mchip-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mchip-more {
+  font-weight: 500;
+  border: 0;
+  background: none;
+  font-size: 10px;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  text-align: left;
+  padding: 0 3px;
+}
+
+/* ---------- agenda / list ---------- */
+.agendaview {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 24px 40px;
+  border-top: 1px solid var(--border);
+  max-width: 720px;
+}
+
+.agenda-day {
+  font-size: 12px;
+  color: var(--fg-secondary);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 5px;
+  margin: 18px 0 4px;
+  font-weight: 600;
+}
+
+.agendaview ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.agenda-row {
+  --cal: #8a8a8a;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: 0;
+  background: none;
+  padding: 5px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  text-align: left;
+}
+
+.agenda-row:hover {
+  background: var(--bg-hover);
+}
+
+.agenda-bar {
+  width: 4px;
+  height: 18px;
+  border-radius: 2px;
+  background: var(--cal);
+  flex: none;
+}
+
+.agenda-time {
+  color: var(--fg-secondary);
+  width: 150px;
+  flex: none;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.agenda-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agenda-join {
+  font-size: 11px;
+  color: var(--focus);
+  border: 1px solid color-mix(in srgb, var(--focus) 50%, transparent);
+  border-radius: 5px;
+  padding: 1px 7px;
+  text-decoration: none;
+}
+
+.agenda-empty {
+  color: var(--fg-faint);
+  margin-top: 40px;
+}
+
+/* ---------- panel / overlays ---------- */
+.panel-scrim,
+.qc-scrim,
+.cmdk-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+}
+
+.panel-scrim {
+  background: transparent;
+}
+
+.event-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 60;
+  width: 316px;
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+  box-shadow: -12px 0 32px rgba(0, 0, 0, 0.18);
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  animation: panel-in 0.16s ease-out;
+}
+
+@keyframes panel-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+/* quick create */
+.qc-scrim {
+  background: var(--scrim);
+  display: flex;
+  justify-content: center;
+}
+
+.quick-create {
+  margin-top: 16vh;
+  width: min(560px, 90vw);
+  height: fit-content;
+  background: var(--bg);
+  border-radius: 12px;
+  box-shadow: var(--shadow-popover);
+  padding: 6px;
+}
+
+.quick-create input {
+  width: 100%;
+  border: 0;
+  background: none;
+  font-size: 16px;
+  padding: 10px 12px;
+  color: var(--fg);
+  outline: none;
+}
+
+.qc-preview {
+  padding: 6px 12px 10px;
+  font-size: 12.5px;
+  color: var(--fg-secondary);
+}
+
+.qc-error {
+  padding: 0 12px 10px;
+  font-size: 12px;
+  color: #e5484d;
+}
+
+/* command menu */
+.cmdk-scrim {
+  background: var(--scrim);
+  display: flex;
+  justify-content: center;
+}
+
+.cmdk {
+  margin-top: 14vh;
+  width: min(580px, 90vw);
+  height: fit-content;
+  max-height: 60vh;
+  background: var(--bg);
+  border-radius: 12px;
+  box-shadow: var(--shadow-popover);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.cmdk [cmdk-input] {
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: none;
+  font-size: 15px;
+  padding: 14px 16px;
+  color: var(--fg);
+  outline: none;
+  font-family: inherit;
+}
+
+.cmdk [cmdk-list] {
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.cmdk [cmdk-group-heading] {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-faint);
+  padding: 8px 10px 3px;
+}
+
+.cmdk [cmdk-item] {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.cmdk [cmdk-item][data-selected="true"] {
+  background: var(--bg-hover);
+}
+
+.cmdk [cmdk-empty] {
+  padding: 16px;
+  color: var(--fg-faint);
+  font-size: 13px;
+}
+
+.cmdk-sub {
+  margin-left: auto;
+  color: var(--fg-faint);
+  font-size: 11.5px;
+}
+
+/* responsive discipline (mobile-consciousness) */
+@media (max-width: 700px) {
+  .sidebar {
+    display: none;
+  }
+  .event-panel {
+    left: 10px;
+    right: 10px;
+    width: auto;
+  }
+  .agenda-time {
+    width: 108px;
+  }
+}
+
+/* ---------- UX parity additions (Notion/Google ground truth) ---------- */
+
+/* sidebar toggle (`) */
+.app.sidebar-hidden .sidebar {
+  display: none;
+}
+
+/* past events (Notion): the calendar's hue stays, a bit darker, and the
+   text dims — never a gray-out, never transparency (layered events would
+   show through each other) */
+.chip.past {
+  background: color-mix(in srgb, var(--cal) calc(var(--chip-tint) * 0.78), var(--bg));
+  color: color-mix(in srgb, var(--cal) 28%, var(--fg-secondary));
+}
+
+.chip-timed.chip-cfull.past {
+  background: color-mix(in srgb, var(--cal) calc((var(--chip-tint) - var(--slab-tint-drop)) * 0.78), var(--bg));
+}
+
+.chip.past:hover,
+.chip.past.selected,
+.chip-timed.chip-cfull.past:hover,
+.chip-timed.chip-cfull.past.selected {
+  background: color-mix(in srgb, var(--cal) calc(var(--chip-tint) * 0.92), var(--bg));
+  color: color-mix(in srgb, var(--cal) var(--chip-text-mix), var(--fg));
+}
+
+/* selection ring */
+.chip.selected {
+  background: color-mix(in srgb, var(--cal) calc(var(--chip-tint) + 16%), var(--bg));
+  z-index: 4;
+}
+
+/* Notion hover: a subtle background shift only — no drop shadow, no z-index
+   pop (chips are full width under the layering model, nothing to lift above) */
+
+/* now indicator: red time pill in the gutter + line across all columns */
+.now-pill {
+  position: absolute;
+  right: 3px;
+  transform: translateY(-50%);
+  background: var(--accent);
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 600;
+  padding: 1.5px 5px;
+  border-radius: 4px;
+  z-index: 4;
+  font-variant-numeric: tabular-nums;
+}
+
+.now-line-global {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  z-index: 2;
+  pointer-events: none;
+}
+
+/* draft chip stays visible while the create panel is open */
+.chip-draft {
+  pointer-events: none;
+  z-index: 5001;
+}
+
+/* context menu */
+.ctx-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+}
+
+.ctx-menu {
+  position: fixed;
+  min-width: 168px;
+  background: var(--bg);
+  border-radius: 10px;
+  box-shadow: var(--shadow-popover);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+}
+
+.ctx-menu button {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  border: 0;
+  background: none;
+  text-align: left;
+  font-size: 13px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.ctx-menu button:hover {
+  background: var(--bg-hover);
+}
+
+.ctx-menu kbd {
+  font-family: inherit;
+  font-size: 10.5px;
+  color: var(--fg-faint);
+}
+
+.ctx-menu .ctx-danger {
+  color: #e5484d;
+}
+
+/* undo toast (bottom-left, Google style) */
+.toast {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--fg);
+  color: var(--bg);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 13px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.3);
+  max-width: 420px;
+}
+
+.toast-undo {
+  border: 0;
+  background: none;
+  color: var(--focus);
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 13px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.toast-undo kbd {
+  font-size: 10px;
+  opacity: 0.7;
+  font-family: inherit;
+}
+
+.toast-close {
+  border: 0;
+  background: none;
+  color: inherit;
+  opacity: 0.6;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.allday-more {
+  font-size: 10px;
+  color: var(--fg-faint);
+  padding: 1px 4px;
+}
+
+/* Google-style spanning bars for multi-day all-day events in month view */
+.month-week {
+  position: relative;
+}
+
+.month-bar {
+  --cal: #8a8a8a;
+  position: absolute;
+  height: 15px;
+  z-index: 2;
+  border: 0;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--cal) var(--chip-tint), var(--bg));
+  color: color-mix(in srgb, var(--cal) var(--chip-text-mix), var(--fg));
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 15px;
+  text-align: left;
+  padding: 0 6px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.month-bar:hover {
+  background: color-mix(in srgb, var(--cal) calc(var(--chip-tint) + 8%), var(--bg));
+}
+
+.month-bar.cont-left {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  box-shadow: none;
+}
+
+.month-bar.cont-right {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.hour-label-2 {
+  right: auto;
+  left: 4px;
+  opacity: 0.6;
+}
+
+.allday-cell.drop {
+  background: color-mix(in srgb, var(--focus) 14%, transparent);
+  border-radius: 4px;
+}
+
+/* read-only calendars (subscribed feeds etc.) */
+.chip.readonly {
+  cursor: default;
+}
+
+/* recurring edit scope dialog */
+.scope-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 95;
+  background: var(--scrim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.scope-dialog {
+  width: min(340px, 90vw);
+  background: var(--bg);
+  border-radius: 12px;
+  box-shadow: var(--shadow-popover);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.scope-dialog h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.scope-sub {
+  margin: 0 0 8px;
+  font-size: 12.5px;
+  color: var(--fg-secondary);
+}
+
+.scope-opt {
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--fg);
+  border-radius: 8px;
+  padding: 9px 12px;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.scope-opt:hover:not(:disabled) {
+  border-color: var(--focus);
+}
+
+.scope-opt:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.scope-cancel {
+  border: 0;
+  background: none;
+  color: var(--fg-secondary);
+  padding: 8px;
+  cursor: pointer;
+  font-size: 12.5px;
+}
+
+.marquee {
+  position: absolute;
+  z-index: 8;
+  background: color-mix(in srgb, var(--focus) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--focus) 55%, transparent);
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+.view-days {
+  border: 0;
+  background: none;
+  color: var(--fg-secondary);
+  font-size: 12px;
+  padding: 4px 4px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.view-days.active {
+  background: var(--bg);
+  color: var(--fg);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .event-panel {
+    animation: none;
+  }
+}
+
+
+/* ================= docked event editor (single source of truth) ========== */
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: none;
+}
+
+.panel-kind {
+  font-size: 11.5px;
+  color: var(--fg-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.panel-close {
+  border: 0;
+  background: none;
+  color: var(--fg-faint);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 4px 6px;
+  border-radius: 5px;
+}
+
+.panel-close:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.panel-title {
+  flex: none;
+  width: 100%;
+  border: 0;
+  background: none;
+  font-size: 18px;
+  font-weight: 650;
+  color: var(--fg);
+  outline: none;
+  padding: 2px 0 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-title::placeholder {
+  color: var(--fg-faint);
+}
+
+.panel-section {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  flex: none;
+}
+
+.panel-icon {
+  width: 18px;
+  flex: none;
+  color: var(--fg-faint);
+  padding-top: 4px;
+  display: flex;
+  justify-content: center;
+}
+
+.panel-icon svg {
+  width: 15px;
+  height: 15px;
+}
+
+.panel-section-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.panel-times {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 14px;
+}
+
+.panel-times input[type="time"] {
+  border: 0;
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  font-size: 14px;
+  width: 102px;
+  padding: 2px 0;
+  border-radius: 5px;
+}
+
+.panel-times input[type="time"]:hover:not(:disabled),
+.panel-date:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.panel-times input::-webkit-calendar-picker-indicator {
+  display: none;
+}
+
+.panel-arrow {
+  color: var(--fg-faint);
+  padding: 0 2px;
+}
+
+.panel-dur {
+  margin-left: auto;
+  color: var(--fg-faint);
+  font-size: 11.5px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.all-day-label {
+  color: var(--fg);
+}
+
+.panel-date {
+  border: 0;
+  background: none;
+  color: var(--fg-secondary);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 2px 0;
+  width: 160px;
+  border-radius: 5px;
+}
+
+.panel-date::-webkit-calendar-picker-indicator {
+  opacity: 0.4;
+}
+
+.panel-link-row {
+  display: flex;
+  gap: 12px;
+  padding-top: 4px;
+}
+
+.panel-link {
+  border: 0;
+  background: var(--bg-hover);
+  color: var(--fg-secondary);
+  font-size: 11.5px;
+  cursor: pointer;
+  padding: 3px 9px;
+  border-radius: 20px;
+}
+
+.panel-link:hover:not(:disabled) {
+  background: var(--bg-active);
+}
+
+.panel-link.on {
+  background: color-mix(in srgb, var(--focus) 22%, transparent);
+  color: var(--focus);
+}
+
+.panel-meet {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+  color: var(--fg-secondary);
+  padding-top: 3px;
+  cursor: pointer;
+}
+
+.panel-muted {
+  color: var(--fg-faint);
+  font-size: 13px;
+  padding-top: 3px;
+}
+
+.panel-join {
+  background: var(--focus);
+  color: #fff;
+  text-align: center;
+  border-radius: 7px;
+  padding: 7px;
+  text-decoration: none;
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.panel-plain {
+  flex: none;
+  border: 0;
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  font-size: 13.5px;
+  outline: none;
+  width: 100%;
+  padding: 3px 0;
+}
+
+.panel-plain::placeholder {
+  color: var(--fg-faint);
+}
+
+.panel-divider {
+  flex: none;
+  border-top: 1px solid var(--border);
+}
+
+.panel-desc {
+  resize: none;
+  min-height: 60px;
+}
+
+.panel-cal {
+  border: 0;
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  font-size: 13.5px;
+  width: 100%;
+  padding: 1px 0;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.panel-cal-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
+  gap: 8px;
+}
+
+.panel-cal-picker {
+  position: relative;
+  width: 100%;
+}
+
+.panel-cal-chevron {
+  color: var(--fg-faint);
+  font-size: 15px;
+  line-height: 1;
+}
+
+.panel-cal-menu {
+  position: absolute;
+  z-index: 90;
+  top: calc(100% + 5px);
+  left: -4px;
+  right: -4px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised, var(--bg));
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2);
+}
+
+.panel-cal-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  padding: 6px 7px;
+  cursor: pointer;
+}
+
+.panel-cal-option:hover,
+.panel-cal-option:focus-visible,
+.panel-cal-option[aria-selected="true"] {
+  background: var(--bg-hover);
+}
+
+.panel-cal-option-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  flex: none;
+}
+
+.panel-cal-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  flex: none;
+  margin: 6px 4px 0 3px;
+}
+
+.panel-nextday {
+  font-size: 10px;
+  color: var(--fg-secondary);
+  background: var(--bg-hover);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.panel-readonly {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--fg-secondary);
+  background: var(--bg-hover);
+  border-radius: 6px;
+  padding: 6px 9px;
+}
+
+.panel-error {
+  flex: none;
+  color: #e5484d;
+  font-size: 12px;
+}
+
+.panel-spacer {
+  flex: 1;
+}
+
+.panel-footer {
+  flex: none;
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.panel-footer kbd {
+  font-family: inherit;
+  font-size: 10px;
+  opacity: 0.7;
+  margin-left: 4px;
+}
+
+/* panel: header actions, attendees, inline selects, pretty date */
+.panel-head {
+  position: relative;
+}
+
+.panel-head-actions {
+  display: flex;
+  gap: 2px;
+}
+
+.panel-menu {
+  position: absolute;
+  top: 28px;
+  right: 0;
+  z-index: 5;
+  min-width: 150px;
+  background: var(--bg);
+  border-radius: 9px;
+  box-shadow: var(--shadow-popover);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-menu button {
+  border: 0;
+  background: none;
+  color: var(--fg);
+  text-align: left;
+  font-size: 13px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.panel-menu button:hover {
+  background: var(--bg-hover);
+}
+
+.panel-date-pretty {
+  border: 0;
+  background: none;
+  color: var(--fg-secondary);
+  font-size: 12.5px;
+  text-align: left;
+  padding: 2px 0;
+  cursor: pointer;
+  border-radius: 5px;
+  width: fit-content;
+}
+
+.panel-date-pretty:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.panel-link.static {
+  cursor: default;
+  opacity: 0.8;
+}
+
+.panel-repeat,
+.panel-inline-select {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  font-family: inherit;
+}
+
+.panel-attendees {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding-top: 2px;
+}
+
+.panel-attendee {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  background: var(--bg-hover);
+  border-radius: 20px;
+  padding: 2px 8px;
+  color: var(--fg-secondary);
+}
+
+.panel-attendee button {
+  border: 0;
+  background: none;
+  color: var(--fg-faint);
+  cursor: pointer;
+  font-size: 9px;
+  padding: 0;
+}
+
+.panel-attendee.rsvp-accepted {
+  color: #2fbf71;
+}
+
+.panel-attendee.rsvp-declined {
+  color: #e5484d;
+  text-decoration: line-through;
+}
+
+/* background sleeves: long container events as slim left-edge bands */
+/* ---------- goals chevron + weekly review ---------- */
+
+
+
+.goals-chevron {
+  font-size: 9px;
+  color: var(--fg-faint);
+  transition: transform 0.12s ease;
+}
+
+.goals-chevron.closed {
+  transform: rotate(-90deg);
+}
+
+
+
+
+
+
+
+.cfull-label {
+  position: absolute;
+  inset: 0;
+}
+
+.review-hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 10px 0;
+}
+
+
+.md-wikilink {
+  color: var(--accent-soft, #7aa2f7);
+  cursor: default;
+}
+
+.md-link {
+  color: var(--accent-soft, #7aa2f7);
+  text-decoration: none;
+}
+
+.md-link:hover {
+  text-decoration: underline;
+}
+
+
+
+.review-task .done {
+  color: var(--fg-faint);
+  text-decoration: line-through;
+}
+
+.reviewview {
+  flex: 1;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  padding: 20px 28px 40px;
+  max-width: 680px;
+  display: flex;
+  flex-direction: column;
+}
+
+.review-doc {
+  flex: 1;
+}
+
+.review-h {
+  margin: 18px 0 6px;
+}
+
+h1.review-h {
+  font-size: 20px;
+}
+
+h2.review-h {
+  font-size: 15px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+}
+
+h3.review-h {
+  font-size: 13.5px;
+  color: var(--fg-secondary);
+}
+
+.review-task {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 13.5px;
+  padding: 2px 0;
+  cursor: pointer;
+}
+
+.review-bullet,
+.review-p {
+  font-size: 13.5px;
+  margin: 2px 0;
+  color: var(--fg);
+}
+
+.review-gap {
+  height: 8px;
+}
+
+.review-compose {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.review-compose textarea {
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--fg);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+  resize: vertical;
+}
+
+.review-compose .btn {
+  align-self: flex-end;
+}
+
+/* ---------- insights ---------- */
+.insightsview {
+  flex: 1;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  padding: 20px 28px 40px;
+}
+
+.ins-grid {
+  max-width: 760px;
+  display: flex;
+  flex-direction: column;
+}
+
+.ins-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 11px 4px;
+  border-bottom: 1px solid var(--gridline);
+}
+
+.ins-label {
+  width: 120px;
+  flex: none;
+  font-size: 12px;
+  color: var(--fg-secondary);
+  font-weight: 600;
+}
+
+.ins-big {
+  font-size: 19px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  min-width: 64px;
+}
+
+.ins-delta {
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.ins-delta.good {
+  color: #2fbf71;
+}
+
+.ins-delta.bad {
+  color: #e5484d;
+}
+
+.ins-delta.flat {
+  color: var(--fg-faint);
+}
+
+.ins-note {
+  font-size: 12px;
+  color: var(--fg-secondary);
+}
+
+.ins-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1;
+}
+
+.ins-chip {
+  background: var(--bg-hover);
+  border-radius: 20px;
+  padding: 2px 9px;
+  font-size: 11.5px;
+}
+
+.ins-heat {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 6px;
+}
+
+.ins-cell {
+  width: 10px;
+  height: 14px;
+  border-radius: 2px;
+  background: #2fbf71;
+  display: inline-block;
+}
+
+.ins-bar {
+  flex: 1;
+  display: flex;
+  height: 14px;
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--bg-hover);
+  min-width: 160px;
+}
+
+.ins-report .btn {
+  margin-left: auto;
+}
+
+/* C-shape container segments: full-width pieces connected by the spine */
+.chip-cfull {
+  padding: 2px 5px 2px 7px;
+  overflow: hidden;
+  /* quieter than a normal chip so same-color children stay distinct on top */
+  background: color-mix(in srgb, var(--cal) calc(var(--chip-tint) - var(--slab-tint-drop)), var(--bg));
+}
+
+/* a container is one shape: never elevate or z-pop it over its children */
+.chip-timed.chip-cfull:hover {
+  z-index: auto;
+  box-shadow: none;
+}
+
+.chip-cfull:hover {
+  background: color-mix(in srgb, var(--cal) calc(var(--chip-tint) - 2%), var(--bg));
+}
+
+.chip-timed.chip-cfull.selected {
+  z-index: auto;
+  box-shadow: none;
+}
+
+.chip-timed.chip-cfull.selected:hover {
+  z-index: auto;
+  box-shadow: none;
+}
+
+.chip-cfull.selected {
+  background: color-mix(in srgb, var(--cal) calc(var(--chip-tint) + 6%), var(--bg));
+}
+
+/* a hairline of day background around regular chips keeps children legible
+   over a same-color container */
+.chip-timed:not(.chip-cfull) {
+  box-shadow: 0 0 0 1px var(--bg);
+}
+
+.chip-timed:not(.chip-cfull):hover {
+  box-shadow: 0 0 0 1px var(--bg);
+}
+
+.chip-timed.selected:not(.chip-cfull) {
+  box-shadow: 0 0 0 1px var(--bg);
+}
+
+/* ---------- location autocomplete + map preview ---------- */
+.loc-body {
+  position: relative;
+}
+
+.loc-pop {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: -4px;
+  right: -4px;
+  z-index: 80;
+  background: var(--bg-raised, var(--bg));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+  padding: 3px;
+}
+
+.loc-opt {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  width: 100%;
+  padding: 5px 8px;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+}
+
+.loc-opt.active {
+  background: var(--bg-hover);
+}
+
+.loc-name {
+  font-size: 12.5px;
+  color: var(--fg);
+}
+
+.loc-detail {
+  font-size: 11px;
+  color: var(--fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.loc-preview {
+  margin-top: 6px;
+}
+
+.loc-preview iframe {
+  width: 100%;
+  height: 110px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: block;
+  filter: saturate(0.85);
+}
+
+@media (prefers-color-scheme: dark) {
+  .loc-preview iframe {
+    filter: invert(0.88) hue-rotate(180deg) saturate(0.7) brightness(0.95);
+  }
+}
+
+.loc-gmaps {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--accent-soft, #7aa2f7);
+  text-decoration: none;
+}
+
+.loc-gmaps:hover {
+  text-decoration: underline;
+}
+
+
+@media (prefers-color-scheme: light) {
+  .chip-timed.chip-cfull,
+  .chip-timed.chip-cfull:hover,
+  .chip-timed.chip-cfull.selected,
+  .chip-timed.chip-cfull.selected:hover {
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cal) 28%, transparent);
+  }
+}
+
+/* ---------- Notion-style time dropdown ---------- */
+.timefield {
+  position: relative;
+  display: inline-flex;
+}
+
+.time-pop {
+  position: absolute;
+  top: calc(100% + 3px);
+  left: 0;
+  z-index: 90;
+  width: 150px;
+  max-height: 212px;
+  overflow-y: auto;
+  background: var(--bg-raised, var(--bg));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  padding: 3px;
+}
+
+.time-opt {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 8px;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12.5px;
+  color: var(--fg);
+  text-align: left;
+}
+
+.time-opt:hover,
+.time-opt.active {
+  background: var(--bg-hover);
+}
+
+.time-opt-sub {
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+
+
+/* Notion: weekend columns carry a barely-there wash */
+.day-col.weekend,
+.month-cell.weekend {
+  background: color-mix(in srgb, var(--fg) 2.5%, transparent);
+}
+
+
+/* chips below ~16px (card-stack floor, deep zoom-out): compact text tier so
+   nothing ever renders sliced */
+.chip-xs {
+  padding: 1px 4px 1px 7px;
+  font-size: 9.5px;
+  line-height: 11px;
+}
+
+.chip-xs .chip-title,
+.chip-xs .chip-line .chip-title {
+  line-height: 11px;
+  font-size: 9.5px;
+}
+
+.chip-xs .chip-time-inline {
+  font-size: 9px;
+}
+
+.chip-xs .cfull-label {
+  line-height: 11px;
+}
+
+
+/* timezone abbreviation atop the time gutter (Notion) */
+.gutter-tz {
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding: 0 6px 2px 0;
+  font-size: 9.5px;
+  color: var(--fg-faint);
+  letter-spacing: 0.02em;
+}
+
+.all-day-label .allday-end {
+  margin-left: 10px;
+  font-size: 12px;
+}
+
+
+/* calendar list split: My calendars / Other calendars (Google) */
+.cal-group-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  font-size: 11px;
+  color: var(--fg-secondary);
+  font-weight: 600;
+  margin: 7px 0 2px;
+  background: none;
+  border: none;
+  padding: 0 4px;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+}
+
+.cal-group-head:hover {
+  color: var(--fg);
+}
+
+.cal-group-count {
+  margin-left: auto;
+  color: var(--fg-faint);
+  font-weight: 400;
+}
+
+/* ---------- single view dropdown (Notion) ---------- */
+.view-menu {
+  position: relative;
+}
+
+.view-menu-btn {
+  min-width: 86px;
+  justify-content: space-between;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.view-menu-caret {
+  font-size: 9px;
+  color: var(--fg-faint);
+}
+
+.view-menu-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 85;
+  min-width: 185px;
+  background: var(--bg-raised, var(--bg));
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  padding: 4px;
+}
+
+.view-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 5px 8px;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12.5px;
+  color: var(--fg);
+  text-align: left;
+}
+
+.view-menu-row:hover {
+  background: var(--bg-hover);
+}
+
+.view-menu-row kbd,
+.view-menu-sub {
+  margin-left: auto;
+  color: var(--fg-faint);
+  font-size: 11px;
+  font-family: inherit;
+}
+
+.view-menu-check {
+  width: 12px;
+  flex: none;
+  color: var(--fg-secondary);
+}
+
+.view-menu-day {
+  padding-left: 22px;
+}
+
+/* goals section: highlighted card so it stands out from the calendar lists */
+/* goals: the same section / group / row anatomy as the calendar lists */
+.sidebar-head-actions {
+  display: flex;
+  gap: 2px;
+}
+
+.goal-row {
+  cursor: default;
+  color: var(--fg);
+}
+
+/* the tick sits where a calendar's color dot does */
+.goal-tick {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border-radius: 3px;
+  border: 1.25px solid var(--fg-faint);
+  background: none;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--bg);
+  cursor: pointer;
+}
+
+.goal-tick:hover {
+  border-color: var(--fg-secondary);
+}
+
+.goal-row.done .goal-tick {
+  background: var(--fg-secondary);
+  border-color: var(--fg-secondary);
+}
+
+.goal-row.done .goal-text {
+  color: var(--fg-faint);
+  text-decoration: line-through;
+}
+
+.goal-del {
+  border: 0;
+  background: none;
+  padding: 0 2px;
+  cursor: pointer;
+}
+
+.goal-edit {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--focus);
+  background: var(--bg);
+  color: var(--fg);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 12.5px;
+  outline: none;
+}
+
+.goal-empty {
+  color: var(--fg-faint);
+  font-size: 12px;
+}
+
+.goal-horizons {
+  display: flex;
+  gap: 4px;
+  padding: 5px 2px 0;
+}
+
+.goal-horizon {
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--fg-secondary);
+  border-radius: 10px;
+  padding: 1px 8px;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.goal-horizon.on {
+  background: var(--bg-active);
+  color: var(--fg);
+  border-color: transparent;
+}
+
+/* day-header focus score (insights dayScore; today = so far) */
+.day-score {
+  margin-left: 5px;
+  font-size: 9.5px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 8px;
+  line-height: 13px;
+}
+
+.day-score.good {
+  color: #2e9e5b;
+  background: color-mix(in srgb, #2e9e5b 14%, transparent);
+}
+
+.day-score.mid {
+  color: #b58a2a;
+  background: color-mix(in srgb, #b58a2a 14%, transparent);
+}
+
+.day-score.low {
+  color: #c25555;
+  background: color-mix(in srgb, #c25555 14%, transparent);
+}
+
+/* ---------- goal work: a running gold light and a bold title ----------
+   A short light (white-hot core at the front of a gold tail, with a blurred
+   glow) runs once around the event's outline at constant speed (~2.4s),
+   then rests (~7.6s); WeekView offsets each event's start. --per is the
+   outline length, so the run covers exactly one lap. */
+.goal-ring {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.goal-ring.auto {
+  opacity: 0.85;
+}
+
+.goal-run {
+  fill: none;
+  stroke-linecap: round;
+  opacity: 0;
+  animation: goal-run 10s linear infinite;
+}
+
+.goal-run.tail {
+  stroke: #e9b52f;
+  stroke-width: 4px;
+  stroke-dasharray: 26px 9999px;
+}
+
+/* the white-hot core sits at the front of the tail */
+.goal-run.core {
+  stroke: #fffbea;
+  stroke-width: 5px;
+  stroke-dasharray: 0 15px 11px 9999px;
+}
+
+.goal-run.glow {
+  stroke: #ffd75e;
+  stroke-width: 10px;
+  stroke-dasharray: 0 6px 20px 9999px;
+  filter: url(#goal-glow);
+}
+
+@keyframes goal-run {
+  0% {
+    stroke-dashoffset: 0;
+    opacity: 0;
+  }
+  2% {
+    opacity: 1;
+  }
+  22% {
+    opacity: 1;
+  }
+  24% {
+    stroke-dashoffset: calc(var(--per) * -1);
+    opacity: 0;
+  }
+  100% {
+    stroke-dashoffset: calc(var(--per) * -1);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .goal-run {
+    display: none;
+  }
+}
+
+.chip-timed.starred .chip-title,
+.chip-timed.starred-auto .chip-title,
+.cluster-row.starred .cluster-title,
+.cluster-row.starred-auto .cluster-title,
+.mchip.starred .mchip-title,
+.mchip.starred-auto .mchip-title,
+.agenda-row.starred .agenda-title,
+.agenda-row.starred-auto .agenda-title {
+  font-weight: 600;
+}
+
+/* rows and pills are too small for the shine: a gold-tinted bold title */
+.cluster-row.starred .cluster-title,
+.cluster-row.starred-auto .cluster-title,
+.mchip.starred .mchip-title,
+.mchip.starred-auto .mchip-title {
+  color: color-mix(in srgb, var(--goal) 55%, var(--fg));
+}
+
+.agenda-row.starred .agenda-bar {
+  background: var(--goal);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--goal) 70%, transparent);
+}
+
+.agenda-row.starred-auto .agenda-bar {
+  background: color-mix(in srgb, var(--goal) 65%, var(--cal));
+}
+
+.panel-star-icon {
+  color: #e2b93b;
+}
+
+.panel-goal {
+  width: 100%;
+}
+
+.goal-star-count {
+  margin-left: auto;
+  flex: none;
+  font-size: 10px;
+  color: #b8962f;
+  background: color-mix(in srgb, #e2b93b 14%, transparent);
+  border-radius: 7px;
+  padding: 0 5px;
+  line-height: 15px;
+}
+
+/* ---------- cluster block: a run of small events merged into one card ---------- */
+.cluster-block {
+  position: absolute;
+  border-radius: var(--chip-radius);
+  z-index: 1;
+  background: color-mix(in srgb, var(--fg) 7%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--fg) 14%, transparent);
+  padding: 2px 3px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  cursor: default;
+}
+
+.cluster-block::before {
+  display: none; /* rows carry their own calendar dots */
+}
+
+.cluster-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  border: none;
+  background: none;
+  padding: 0 3px;
+  font-family: inherit;
+  font-size: 10.5px;
+  line-height: 15px;
+  color: var(--fg);
+  cursor: pointer;
+  border-radius: 4px;
+  text-align: left;
+  min-height: 15px;
+}
+
+.cluster-row:hover,
+.cluster-row.selected {
+  background: color-mix(in srgb, var(--fg) 9%, transparent);
+}
+
+.cluster-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 2px;
+  flex: none;
+}
+
+.cluster-time {
+  color: var(--fg-faint);
+  font-size: 9.5px;
+  flex: none;
+}
+
+.cluster-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* day-score hover breakdown */
+.score-wrap {
+  position: relative;
+  display: inline-flex;
+  margin-left: 5px;
+}
+
+.score-wrap .day-score {
+  margin-left: 0;
+}
+
+/* focus-score explanation: fixed so the header strip's clip can't cut it */
+.score-pop {
+  position: fixed;
+  z-index: 300;
+  background: var(--bg-raised, var(--bg));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-weight: 400;
+  text-align: left;
+  pointer-events: none;
+}
+
+.score-pop-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.score-pop-reason {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--fg);
+  margin-bottom: 4px;
+}
+
+.score-part {
+  display: grid;
+  grid-template-columns: 56px 1fr 30px;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--fg-secondary);
+  margin-top: 2px;
+}
+
+.score-part b {
+  color: var(--fg);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.sp-bar {
+  height: 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+  overflow: hidden;
+}
+
+.sp-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: #2e9e5b;
+}
+
+.sp-bar.sleep i {
+  background: #5b7fd4;
+}
+
+.sp-bar.restraint i {
+  background: #c98a2b;
+}
+
+.score-part-note {
+  font-size: 10.5px;
+  color: var(--fg-secondary);
+  padding-left: 64px;
+  line-height: 1.35;
+}
+
+.score-pop-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--fg-secondary);
+}
+
+.score-how {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--fg-faint);
+}
+
+.score-how sup {
+  font-size: 7.5px;
+  line-height: 0;
+}
+
+.sp-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  flex: none;
+}
+
+.sp-prod { background: #2e9e5b; }
+.sp-dist { background: #c25555; }
+.sp-other { background: #8a8a8a; }
+.sp-sleep { background: #5b7fd4; }
+
+.sp-meta {
+  color: var(--fg-faint);
+  font-size: 10.5px;
+  margin-top: 2px;
+}
+
+/* ---------- pixel panning strips ---------- */
+.pan-clip {
+  position: relative;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.pan-strip {
+  will-change: transform;
+  transform: translateX(0);
+}
+
+.day-clip {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+.day-head-x {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 6px 8px 5px;
+  opacity: 0.8;
+}
+
+.day-head-x .dow {
+  font-size: 11px;
+  color: var(--fg-secondary);
+}
+
+.day-head-x .dnum {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.allday-slot {
+  min-width: 0;
+  display: flex;
+}
+
+.allday-slot > .allday-cell {
+  flex: 1;
+  min-width: 0;
+}
+
+
+.goal-star-auto {
+  margin-left: 4px;
+  opacity: 0.7;
+  font-weight: 400;
+}
+
+/* ---------- reconciliation ---------- */
+/* ended but unconfirmed: stays saturated and visibly "not landed" */
+.chip-timed.unsettled,
+.cluster-row.unsettled {
+  outline: 1.5px dashed color-mix(in srgb, var(--fg) 45%, transparent);
+  outline-offset: -1.5px;
+}
+
+.chip-timed.canceled .chip-title,
+.cluster-row.canceled .cluster-title {
+  text-decoration: line-through;
+  opacity: 0.75;
+}
+
+/* canceled: still its calendar's hue, a step dimmer than the past */
+.chip-timed.canceled,
+.chip-timed.chip-cfull.canceled {
+  background: color-mix(in srgb, var(--cal) calc(var(--chip-tint) * 0.5), var(--bg));
+  color: color-mix(in srgb, var(--cal) 20%, var(--fg-faint));
+}
+
+/* confirmed events are just normal past events — no decoration */
+
+/* floating pills: morning sweep + reconcile mode (no layout impact) */
+.recon-pill {
+  position: fixed;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg-raised, var(--bg));
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.4);
+  padding: 9px 14px;
+  font-size: 12.5px;
+  color: var(--fg);
+  max-width: 620px;
+}
+
+.recon-pill .btn {
+  padding: 3px 9px;
+}
+
+.recon-keys {
+  display: flex;
+  gap: 8px;
+  color: var(--fg-faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.recon-keys b {
+  color: var(--fg-secondary);
+  font-weight: 600;
+}
+
+.recon-count {
+  color: var(--fg-faint);
+  font-size: 11px;
+}
+
+/* the supervisor's red pen: notes written over the printed week, wherever
+   there is room, with an arrow to their event (components/MarginNotes.tsx).
+   Never clipped: lines are pre-wrapped by the placer. A halo in the page
+   color keeps the ink readable over event bodies. */
+.margin-notes {
+  --ink: #ff4d4f;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 40;
+  pointer-events: none;
+  color: var(--ink);
+}
+
+.mn-leaders {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.mn-leaders path {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.9;
+  filter: drop-shadow(0 0 1px var(--bg));
+}
+
+.margin-note {
+  position: absolute;
+  box-sizing: border-box;
+  /* lib/marginNotes NOTE_PADY / NOTE_PADX */
+  padding: 3px 3px;
+  font-family: "Bradley Hand", "Marker Felt", "Segoe Print", cursive;
+  font-size: 12px;
+  line-height: 14px;
+  font-weight: 400;
+  color: var(--ink);
+  text-shadow:
+    0 0 2px var(--bg),
+    0 0 2px var(--bg),
+    0 0 3px var(--bg);
+  white-space: pre;
+  overflow: visible;
+  pointer-events: auto;
+  cursor: grab;
+  user-select: none;
+  transform-origin: 50% 50%;
+}
+
+.margin-note .mn-gap {
+  font-size: 0;
+  line-height: 0;
+  vertical-align: top;
+}
+
+.margin-note u {
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.margin-note.dragging {
+  cursor: grabbing;
+  z-index: 2;
+}
+
+.margin-note:hover,
+.margin-note.dragging {
+  outline: 1px dashed color-mix(in srgb, var(--ink) 45%, transparent);
+  outline-offset: 1px;
+}
+
+@media (prefers-color-scheme: light) {
+  .margin-notes {
+    --ink: #d0211c;
+  }
+}
+
+.panel-drill {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 2px 0 8px;
+  padding: 7px 10px;
+  border: 1px dashed color-mix(in srgb, #e03131 45%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, #e03131 6%, transparent);
+}
+
+.panel-drill .drill-text,
+.panel-drill .drill-input {
+  flex: 1;
+  min-width: 0;
+  font-family: "Bradley Hand", "Marker Felt", "Segoe Print", cursive;
+  font-size: 14px;
+  line-height: 1.3;
+  color: #e03131;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+}
+
+.panel-drill .drill-text {
+  transform: rotate(-1.2deg);
+  cursor: text;
+}
+
+.panel-drill .drill-text:disabled {
+  cursor: default;
+}
+
+/* editing straightens the line so the caret tracks the text */
+.panel-drill .drill-input {
+  resize: none;
+  overflow: hidden;
+  outline: none;
+}
+
+.panel-drill .drill-input::placeholder {
+  color: color-mix(in srgb, #e03131 45%, transparent);
+}
+
+.panel-drill.editing {
+  border-style: solid;
+  background: color-mix(in srgb, #e03131 9%, transparent);
+}
+
+.drill-erase {
+  margin-left: auto;
+  flex: none;
+  background: none;
+  border: none;
+  color: var(--fg-faint);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.drill-hint {
+  flex: none;
+  align-self: center;
+  font-size: 10px;
+  color: var(--fg-faint);
+}
+
+.drill-add {
+  align-self: flex-start;
+  margin: 0 0 8px;
+  padding: 3px 8px;
+  border: 1px dashed color-mix(in srgb, #e03131 35%, transparent);
+  border-radius: 6px;
+  background: none;
+  color: color-mix(in srgb, #e03131 75%, var(--fg-secondary));
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.drill-add:hover {
+  background: color-mix(in srgb, #e03131 7%, transparent);
+}
+
+/* ---------- spotlight lens: dim everything that isn't goal work ---------- */
+.spotlight-goals .chip-timed:not(.starred):not(.starred-auto),
+.spotlight-goals .cluster-block,
+.spotlight-goals .chip-allday {
+  opacity: 0.18;
+  filter: saturate(0.3);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .chip-timed,
+  .cluster-block,
+  .chip-allday {
+    transition: opacity 0.25s ease;
+  }
+}
+
+.spotlight-goals .chip-timed.starred,
+.spotlight-goals .chip-timed.starred-auto {
+  opacity: 1;
+  filter: none;
+}
+
+.spotlight-btn.active {
+  color: #e2b93b;
+  background: color-mix(in srgb, #e2b93b 14%, transparent);
+}
+
+/* ---------- recon hover quick-actions: real buttons, not just keys ---------- */
+.recon-actions {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: none;
+  gap: 3px;
+  z-index: 5;
+}
+
+.chip-timed.unsettled:hover .recon-actions {
+  display: flex;
+}
+
+.recon-actions button {
+  border: none;
+  border-radius: 5px;
+  width: 20px;
+  height: 18px;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  background: color-mix(in srgb, var(--bg) 85%, transparent);
+  color: var(--fg);
+}
+
+.recon-actions .ra-yes:hover {
+  background: #2e9e5b;
+  color: #fff;
+}
+
+.recon-actions .ra-no:hover {
+  background: #c25555;
+  color: #fff;
+}
+
+
+/* panel reconcile row */
+.panel-recon-body {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.recon-seg {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--fg) 3%, var(--bg));
+}
+
+.recon-seg-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  background: none;
+  font-family: inherit;
+  font-size: 11.5px;
+  color: var(--fg-secondary);
+  padding: 6px 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  border-right: 1px solid var(--border);
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.recon-seg-btn:last-child {
+  border-right: none;
+}
+
+.recon-seg-btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.recon-seg-ic {
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+.recon-seg-btn.yes.active {
+  background: color-mix(in srgb, #2e9e5b 24%, var(--bg));
+  color: #35b06a;
+  font-weight: 600;
+}
+
+/* canceled: skipped but kept, struck through on the grid */
+.recon-seg-btn.canceled.active {
+  background: color-mix(in srgb, var(--fg) 14%, var(--bg));
+  color: var(--fg);
+  font-weight: 600;
+}
+
+/* didn't happen deletes the event: a one-shot action, warned on hover */
+.recon-seg-btn.no:hover {
+  background: color-mix(in srgb, #c25555 18%, var(--bg));
+  color: #d96b6b;
+}
+
+.recon-hint {
+  font-size: 11px;
+  color: var(--fg-faint);
+  font-style: italic;
+}
+
+
+/* reconcile quick-actions inside cluster rows */
+.row-recon {
+  margin-left: auto;
+  display: none;
+  gap: 4px;
+  flex: none;
+}
+
+.cluster-row:hover .row-recon {
+  display: inline-flex;
+}
+
+.row-recon [role="button"] {
+  width: 17px;
+  text-align: center;
+  border-radius: 4px;
+  font-size: 10px;
+  background: color-mix(in srgb, var(--bg) 80%, transparent);
+}
+
+.row-recon .rr-yes:hover {
+  background: #2e9e5b;
+  color: #fff;
+}
+
+.row-recon .rr-no:hover {
+  background: #c25555;
+  color: #fff;
+}
