@@ -13,6 +13,7 @@
 //   PLAYWRIGHT_BROWSERS_PATH=0 node scripts/readme/record.mjs
 // Writes video/public/rec/NNNN.jpg and video/src/timeline.json. DRY=1 only
 // saves a still at each mark (to $TMPDIR/rec-dry), for checking the script.
+// Light theme (the README's choice); MEDIA_SCHEME=dark for the dark one.
 import { chromium } from "playwright";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -20,6 +21,7 @@ import { tmpdir } from "node:os";
 import { openDemo, settle } from "./page.mjs";
 
 const DRY = !!process.env.DRY;
+const scheme = process.env.MEDIA_SCHEME === "dark" ? "dark" : "light";
 const FPS = 30;
 const OUT = DRY ? join(process.env.TMPDIR ?? tmpdir(), "rec-dry") : "video/public/rec";
 rmSync(OUT, { recursive: true, force: true });
@@ -28,7 +30,7 @@ mkdirSync(OUT, { recursive: true });
 const vw = 1600;
 const vh = 900;
 const b = await chromium.launch();
-const page = await openDemo(b, { width: vw, height: vh, dpr: DRY ? 1 : 2.4, clock: true });
+const page = await openDemo(b, { width: vw, height: vh, dpr: DRY ? 1 : 2.4, clock: true, scheme });
 const grid = page.getByTestId("week-grid");
 await grid.evaluate((el) => (el.scrollTop = 7.5 * (el.scrollHeight / 24)));
 await page.clock.runFor(600);
@@ -280,7 +282,7 @@ await spot("cluster", sat.getByTestId("cluster-block"));
 
 writeFileSync(
   DRY ? join(OUT, "timeline.json") : "video/src/timeline.json",
-  JSON.stringify({ frames: f, fps: FPS, width: 3840, height: 2160, marks, spots }, null, 2) + "\n",
+  JSON.stringify({ frames: f, fps: FPS, width: 3840, height: 2160, scheme, marks, spots }, null, 2) + "\n",
 );
 console.log(`${f} frames (${(f / FPS).toFixed(1)}s)`, marks, DRY ? OUT : "");
 await b.close();

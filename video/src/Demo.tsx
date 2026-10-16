@@ -27,6 +27,33 @@ const clamp = { extrapolateLeft: "clamp", extrapolateRight: "clamp" } as const;
 const pct = (v: number) => `${(v * 100).toFixed(2)}%`;
 const mid = (r: { x0: number; y0: number; x1: number; y1: number }) => ({ x: (r.x0 + r.x1) / 2, y: (r.y0 + r.y1) / 2 });
 
+// the recording's theme (light unless recorded with MEDIA_SCHEME=dark): the
+// captions and labels take the page's side
+const light = (timeline as { scheme?: string }).scheme !== "dark";
+const ink = light
+  ? {
+      page: "#ffffff",
+      label: "#a67a04",
+      halo: "0 0 3px #fff, 0 0 3px #fff, 0 0 2px #fff",
+      card: "rgba(255,255,255,0.95)",
+      edge: "1px solid rgba(0,0,0,0.08)",
+      shadow: "0 10px 32px rgba(0,0,0,0.14)",
+      text: "#1f1f1f",
+      kicker: "#a67a04",
+      hint: "#6f6e69",
+    }
+  : {
+      page: "#191919",
+      label: "#f4d26b",
+      halo: "0 0 3px #111, 0 0 3px #111",
+      card: "rgba(14,14,14,0.86)",
+      edge: "1px solid rgba(255,255,255,0.08)",
+      shadow: "none",
+      text: "#f4f4f2",
+      kicker: "#e2b93b",
+      hint: "#c9c9c2",
+    };
+
 /** a camera shot from frame `at`: zoom `s`, centered on x, y (fractions of the frame) */
 type Shot = { at: number; s: number; x?: number; y?: number };
 const fact = mid(S.fact);
@@ -98,9 +125,9 @@ const Label: React.FC<{ name: string; text: string; x: number; y: number; from: 
         fontSize: 11,
         fontWeight: 500,
         letterSpacing: 0.4,
-        color: "#f4d26b",
+        color: ink.label,
         whiteSpace: "nowrap",
-        textShadow: "0 0 3px #111, 0 0 3px #111",
+        textShadow: ink.halo,
         opacity: interpolate(frame, [from, from + 8, to - 4, to], [0, 1, 1, 0], clamp),
       }}
     >
@@ -109,7 +136,7 @@ const Label: React.FC<{ name: string; text: string; x: number; y: number; from: 
         style={{
           display: "block",
           height: 1.5,
-          background: "#f4d26b",
+          background: ink.label,
           width: interpolate(frame, [from, from + 10], [0, 22], { ...clamp, easing: ease }),
         }}
       />
@@ -165,14 +192,15 @@ const CaptionCard: React.FC<{ c: Caption }> = ({ c }) => {
         top: 40,
         padding: "14px 22px 16px",
         borderRadius: 14,
-        background: "rgba(14,14,14,0.86)",
-        border: "1px solid rgba(255,255,255,0.08)",
-        color: "#f4f4f2",
+        background: ink.card,
+        border: ink.edge,
+        boxShadow: ink.shadow,
+        color: ink.text,
         opacity: interpolate(frame, [c.from, c.from + 0.25 * fps, c.to - 0.2 * fps, c.to], [0, 1, 1, 0], clamp),
         translate: interpolate(frame, [c.from, c.from + 0.3 * fps], ["0px 10px", "0px 0px"], { ...clamp, easing: ease }),
       }}
     >
-      <div style={{ fontFamily: mono, fontSize: 18, fontWeight: 500, letterSpacing: 2.2, color: "#e2b93b", textTransform: "uppercase" }}>
+      <div style={{ fontFamily: mono, fontSize: 18, fontWeight: 500, letterSpacing: 2.2, color: ink.kicker, textTransform: "uppercase" }}>
         {c.kicker}
       </div>
       <div style={{ fontFamily: serif, fontSize: 42, fontWeight: 500, lineHeight: 1.1, marginTop: 4, letterSpacing: -0.4 }}>{c.text}</div>
@@ -189,7 +217,7 @@ const CaptionCard: React.FC<{ c: Caption }> = ({ c }) => {
                   fontFamily: mono,
                   fontSize: 17,
                   fontWeight: 500,
-                  color: "#c9c9c2",
+                  color: ink.hint,
                   opacity: interpolate(frame, [at, at + 8, next - 6, next], [0, 1, 1, 0], clamp),
                 }}
               >
@@ -207,7 +235,7 @@ export const Demo: React.FC = () => {
   const frame = useCurrentFrame();
   const cam = camera(frame);
   return (
-    <AbsoluteFill style={{ backgroundColor: "#191919" }}>
+    <AbsoluteFill style={{ backgroundColor: ink.page }}>
       <AbsoluteFill
         style={{
           transformOrigin: "0 0",

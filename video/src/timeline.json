@@ -3,6 +3,7 @@
   "fps": 30,
   "width": 3840,
   "height": 2160,
+  "scheme": "light",
   "marks": {
     "week": 0,
     "reconcile": 75,

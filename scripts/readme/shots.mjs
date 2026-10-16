@@ -1,7 +1,8 @@
 // README media: screenshots of the demo week (scripts/readme/demo.mjs) in
 // the browser mock. Needs the dev server (`npm run dev`, :1420).
 //   PLAYWRIGHT_BROWSERS_PATH=0 node scripts/readme/shots.mjs
-// Writes docs/media/*.png (and docs/media/frames/* for the video).
+// Writes docs/media/*.png (and docs/media/frames/* for the video). Light
+// theme (the README's choice); MEDIA_SCHEME=dark for the dark one.
 import { chromium } from "playwright";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -10,6 +11,13 @@ import { openDemo } from "./page.mjs";
 import { calendars, events } from "./demo.mjs";
 
 const OUT = resolve("docs/media");
+const scheme = process.env.MEDIA_SCHEME === "dark" ? "dark" : "light";
+// the composites' own page, in the app's colors for that theme; Google's
+// column in Google Calendar's
+const T =
+  scheme === "dark"
+    ? { bg: "#191919", fg: "#e8e8e6", sub: "#9b9a97", cap: "#c9c8c5", edge: "rgba(255,255,255,.08)", gbg: "#202124", gline: "#3c4043" }
+    : { bg: "#ffffff", fg: "#1f1f1f", sub: "#6f6e69", cap: "#37352f", edge: "rgba(0,0,0,.1)", gbg: "#ffffff", gline: "#dadce0" };
 mkdirSync(`${OUT}/parts`, { recursive: true });
 mkdirSync(`${OUT}/frames`, { recursive: true });
 const b = await chromium.launch();
@@ -33,7 +41,7 @@ const freezeShine = (page, L = 320) =>
 
 // ---- the whole week (video frame + annotations) ----
 {
-  const page = await openDemo(b, { width: 1440, height: 900 });
+  const page = await openDemo(b, { width: 1440, height: 900, scheme });
   await page.getByTestId("sweep-banner").locator(".toast-close").click();
   await scrollTo(page, 7.6);
   await settle(page);
@@ -51,7 +59,7 @@ const freezeShine = (page, L = 320) =>
 // ---- reconcile: one scene, close up: yesterday in day view, its events
 // still dotted (unconfirmed), ✓ / ✕ on the hovered one, the reminder ----
 {
-  const page = await openDemo(b, { width: 1000, height: 625 });
+  const page = await openDemo(b, { width: 1000, height: 625, scheme });
   await page.keyboard.press("`"); // no sidebar
   await page.keyboard.press("d"); // day view
   await page.keyboard.press("k"); // back to yesterday
@@ -69,7 +77,7 @@ const freezeShine = (page, L = 320) =>
 
 // ---- focus score / highlighted events / goals: three parts ----
 {
-  const page = await openDemo(b, { width: 1440, height: 900 });
+  const page = await openDemo(b, { width: 1440, height: 900, scheme });
   await page.getByTestId("sweep-banner").locator(".toast-close").click();
   await scrollTo(page, 8.4);
   await settle(page);
@@ -106,7 +114,7 @@ const WINDOWS = [
   { name: "cluster", caption: "clustered view", day: 1, from: 16.5, to: 20.5 },
 ];
 {
-  const page = await openDemo(b, { width: 1440, height: 1100 });
+  const page = await openDemo(b, { width: 1440, height: 1100, scheme });
   await page.getByTestId("sweep-banner").locator(".toast-close").click();
   await page.keyboard.press("`");
   await settle(page);
@@ -185,16 +193,16 @@ const dataUri = (path) => "data:image/png;base64," + readFileSync(path).toString
 async function composite(path, title, cells, width) {
   const page = await (await b.newContext({ viewport: { width, height: 400 }, deviceScaleFactor: 2 })).newPage();
   await page.setContent(`<!doctype html><html><head><style>
-    body{margin:0;background:#191919;font:13px -apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:#e8e8e6}
+    body{margin:0;background:${T.bg};font:13px -apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:${T.fg}}
     .wrap{display:inline-flex;flex-direction:column;gap:14px;padding:22px 26px 20px}
-    h3{margin:0;font-size:13px;font-weight:600;color:#9b9a97;letter-spacing:.02em}
+    h3{margin:0;font-size:13px;font-weight:600;color:${T.sub};letter-spacing:.02em}
     .row{display:flex;gap:26px;align-items:flex-start}
     .cell{display:flex;flex-direction:column;align-items:center;gap:10px}
-    .cell img{display:block;border-radius:6px;border:1px solid rgba(255,255,255,.08)}
-    .cap{font-size:13px;color:#e8e8e6}
-    .gcol{position:relative;background:#202124;border-radius:6px;border:1px solid rgba(255,255,255,.08);overflow:hidden}
-    .hl{position:absolute;left:0;right:0;border-top:1px solid #3c4043}
-    .gev{position:absolute;box-sizing:border-box;border:1px solid #202124;border-radius:4px;padding:2px 5px;color:#fff;font:12px/15px Roboto,"Google Sans",Arial,sans-serif;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+    .cell img{display:block;border-radius:6px;border:1px solid ${T.edge}}
+    .cap{font-size:13px;color:${T.fg}}
+    .gcol{position:relative;background:${T.gbg};border-radius:6px;border:1px solid ${T.edge};overflow:hidden}
+    .hl{position:absolute;left:0;right:0;border-top:1px solid ${T.gline}}
+    .gev{position:absolute;box-sizing:border-box;border:1px solid ${T.gbg};border-radius:4px;padding:2px 5px;color:#fff;font:12px/15px Roboto,"Google Sans",Arial,sans-serif;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
     .gev b{font-weight:500}
   </style></head><body><div class="wrap" id="w">${title ? `<h3>${title}</h3>` : ""}<div class="row">${cells
     .map((c) => `<div class="cell">${c.html}<div class="cap">${c.caption}</div></div>`)
@@ -254,18 +262,18 @@ await composite(
     html: `<div style="zoom:${colW / w.width}">${gcalColumn(w)}</div>`,
   }));
   await page.setContent(`<!doctype html><html><head><style>
-    body{margin:0;width:1280px;height:800px;background:#191919;font:13px -apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:#e8e8e6;overflow:hidden}
+    body{margin:0;width:1280px;height:800px;background:${T.bg};font:13px -apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:${T.fg};overflow:hidden}
     .row{display:flex;justify-content:center;gap:30px;padding-top:150px}
     .grp{display:flex;flex-direction:column;gap:12px}
     .lab{font-size:17px;font-weight:600;letter-spacing:.06em;text-transform:uppercase}
-    .lab.ns{color:#e2b93b}.lab.g{color:#9b9a97}
+    .lab.ns{color:#c99512}.lab.g{color:${T.sub}}
     .cols{display:flex;gap:8px}
     .cell{display:flex;flex-direction:column;align-items:center;gap:8px}
-    .cell img{display:block;border-radius:6px;border:1px solid rgba(255,255,255,.08)}
-    .cap{font-size:13px;color:#c9c8c5}
-    .gcol{position:relative;background:#202124;border-radius:6px;border:1px solid rgba(255,255,255,.08);overflow:hidden}
-    .hl{position:absolute;left:0;right:0;border-top:1px solid #3c4043}
-    .gev{position:absolute;box-sizing:border-box;border:1px solid #202124;border-radius:4px;padding:2px 5px;color:#fff;font:12px/15px Roboto,"Google Sans",Arial,sans-serif;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+    .cell img{display:block;border-radius:6px;border:1px solid ${T.edge}}
+    .cap{font-size:13px;color:${T.cap}}
+    .gcol{position:relative;background:${T.gbg};border-radius:6px;border:1px solid ${T.edge};overflow:hidden}
+    .hl{position:absolute;left:0;right:0;border-top:1px solid ${T.gline}}
+    .gev{position:absolute;box-sizing:border-box;border:1px solid ${T.gbg};border-radius:4px;padding:2px 5px;color:#fff;font:12px/15px Roboto,"Google Sans",Arial,sans-serif;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
     .gev b{font-weight:500}
   </style></head><body><div class="row">${group("northstar", "ns", ours)}${group("Google Calendar", "g", theirs)}</div></body></html>`);
   await page.waitForTimeout(300);

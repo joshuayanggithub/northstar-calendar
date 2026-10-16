@@ -49,6 +49,11 @@ function fixture() {
     // Saturday: still ahead
     ev(`c${i}`, `Next ${pad(i)}`, at(17, i * 30), at(17, i * 30 + 30)),
   ]);
+  // a C-shape (a long block with a short event inside), one ended and one ahead
+  for (const day of [12, 17]) {
+    events.push(ev("c7", `Long block ${day}`, at(day, 13 * 60), at(day, 16 * 60)));
+    events.push(ev("c8", `Inside ${day}`, at(day, 14 * 60), at(day, 14 * 60 + 30)));
+  }
   // a burst of quick overlapping tasks, one ended (Monday) and one ahead (Saturday)
   for (const day of [12, 17]) {
     for (const [i, t] of ["Email", "Invoice", "Call landlord"].entries()) {
@@ -125,13 +130,13 @@ for (const scheme of ["dark", "light"] as const) {
         // apart: the fill moves visibly toward the page
         const gap = dE(past.bg, next.bg);
         gaps.push(gap);
-        expect(gap, `${name}: past and future fills too alike`).toBeGreaterThanOrEqual(0.09);
+        expect(gap, `${name}: past and future fills too alike`).toBeGreaterThanOrEqual(0.07);
         expect(dE(past.bg, page0), `${name}: past fill faded into the page`).toBeLessThan(dE(next.bg, page0));
-        // but still that calendar's color: a tinted block, same hue, over a quarter of its chroma
-        expect(dE(past.bg, page0), `${name}: past fill vanished`).toBeGreaterThanOrEqual(0.04);
+        // but still that calendar's color: a tinted block, same hue, over a third of its chroma
+        expect(dE(past.bg, page0), `${name}: past fill vanished`).toBeGreaterThanOrEqual(0.05);
         if (chroma(next.bg) >= 0.04) {
-          expect(chroma(past.bg) / chroma(next.bg), `${name}: past fill lost its color`).toBeGreaterThanOrEqual(0.25);
-          expect(chroma(past.bg), `${name}: past fill gone gray`).toBeGreaterThanOrEqual(0.012);
+          expect(chroma(past.bg) / chroma(next.bg), `${name}: past fill lost its color`).toBeGreaterThanOrEqual(0.35);
+          expect(chroma(past.bg), `${name}: past fill gone gray`).toBeGreaterThanOrEqual(0.015);
           const turn = Math.abs(((hue(past.bg) - hue(next.bg) + 540) % 360) - 180);
           expect(turn, `${name}: past fill changed hue`).toBeLessThanOrEqual(10);
         }
@@ -140,7 +145,7 @@ for (const scheme of ["dark", "light"] as const) {
         expect(contrast(past.fg, past.bg), `${name}: past title unreadable`).toBeGreaterThanOrEqual(3);
       }
       const mean = gaps.reduce((a, b) => a + b, 0) / gaps.length;
-      expect(mean, "past and future fills too alike on average").toBeGreaterThanOrEqual(0.15);
+      expect(mean, "past and future fills too alike on average").toBeGreaterThanOrEqual(0.12);
     });
 
     test("every ended event fades: not yet reviewed (still dotted), sleep, all-day, clustered", async ({ page }) => {
@@ -156,7 +161,19 @@ for (const scheme of ["dark", "light"] as const) {
       const ahead = await colors(page, "Ahead all-day", ".chip-allday");
       expect(ended.cls).toContain("past");
       expect(ahead.cls).not.toContain("past");
-      expect(dE(ended.bg, ahead.bg)).toBeGreaterThanOrEqual(0.09);
+      expect(dE(ended.bg, ahead.bg)).toBeGreaterThanOrEqual(0.07);
+      // a C-shape's outline (light theme) fades with its fill instead of keeping
+      // the calendar's full color around a faded block
+      const ring = async (t: string) => {
+        const c = page.locator(".chip-timed.chip-cfull", { hasText: t });
+        await expect(c).toHaveCount(1);
+        const sh = await c.evaluate((el) => getComputedStyle(el).boxShadow);
+        const m = sh.match(/\/ ([\d.]+)\)|rgba\([^)]*,\s*([\d.]+)\)/);
+        return sh === "none" ? 0 : m ? +(m[1] ?? m[2]) : 1;
+      };
+      const [ringPast, ringNext] = [await ring("Long block 12"), await ring("Long block 17")];
+      if (ringNext > 0) expect(ringPast, "past C-shape keeps its full-color outline").toBeLessThanOrEqual(ringNext * 0.5);
+      else expect(ringPast).toBe(0);
       // clustered quick tasks dim like the rest of the past
       const row = async (t: string) => {
         const r = page.locator(".cluster-row", { hasText: t });

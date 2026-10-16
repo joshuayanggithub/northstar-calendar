@@ -85,3 +85,7 @@ tracking: FEATURES.md for the parity matrix, e2e/QA-BACKLOG.md for QA items.)
 | 76 | Remove the drill sergeant and all current annotations | done `502fd205` (supervisor gone; once at launch every [DRILL] line comes off its event here and in Google, backup drill-removed.json; checked on a snapshot of the real DB: 12 of 12) |
 | 77 | Rename the app "North Star" (from calendar-app) | done `6b0bf1b5` (bundle, menu, Dock, window, menu bar; identifier kept so data, sign-in, settings carry over; Desktop shortcut ~/Desktop/North Star.app) |
 | 78 | README media match the app (stronger fade, no model writing notes) | done `c3bb97b1` |
+| 79 | Past events at 40% (from 35% / 40% renders) | done `d7cda88c` (one variable, --past-fade) |
+| 80 | Faded events kept a border in the original color | done `d7cda88c` (light-mode C-shape ring now fades with the fill; seen and checked in the real WebKit window) |
+| 81 | /Applications/North Star.app should pick up every new build | done (now a symlink to target/release/bundle/macos/North Star.app, like the Desktop one) |
+| 82 | All README screenshots and the video in light mode | done `5a441f0d` |

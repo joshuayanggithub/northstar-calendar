@@ -1089,17 +1089,17 @@ button {
 
 /* past events: everything that has ended, reviewed or not, is faded toward
    the page enough to tell from what is still ahead at a glance, and no
-   further: the calendar's color stays (its hue, and over a quarter of its
+   further: the calendar's color stays (its hue, and over a third of its
    chroma, in every Google color, both themes; e2e/pastfade.spec.ts). Never
    a gray-out, never transparency (layered events would show through each
    other). */
 .chip.past {
-  background: color-mix(in srgb, var(--cal) calc(var(--chip-tint) * 0.3), var(--bg));
-  color: color-mix(in srgb, var(--cal) 15%, var(--fg-secondary));
+  background: color-mix(in srgb, var(--cal) calc(var(--chip-tint) * var(--past-fade)), var(--bg));
+  color: color-mix(in srgb, var(--cal) 18%, var(--fg-secondary));
 }
 
 .chip-timed.chip-cfull.past {
-  background: color-mix(in srgb, var(--cal) calc((var(--chip-tint) - var(--slab-tint-drop)) * 0.3), var(--bg));
+  background: color-mix(in srgb, var(--cal) calc((var(--chip-tint) - var(--slab-tint-drop)) * var(--past-fade)), var(--bg));
 }
 
 .chip.past:hover,
@@ -2210,6 +2210,12 @@ h3.review-h {
   .chip-timed.chip-cfull.selected:hover {
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cal) 28%, transparent);
   }
+
+  /* an ended C-shape's outline fades with its fill: a full-color ring
+     around a faded block reads as a border */
+  .chip-timed.chip-cfull.past {
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cal) calc(28% * var(--past-fade)), transparent);
+  }
 }
 
 /* ---------- Notion-style time dropdown ---------- */
@@ -2703,7 +2709,7 @@ h3.review-h {
 }
 
 .cluster-row.past .cluster-dot {
-  opacity: 0.35;
+  opacity: 0.45;
 }
 
 /* day-score hover breakdown */
@@ -2904,8 +2910,8 @@ h3.review-h {
 /* canceled: still its calendar's hue, a step dimmer than the past */
 .chip-timed.canceled,
 .chip-timed.chip-cfull.canceled {
-  background: color-mix(in srgb, var(--cal) calc(var(--chip-tint) * 0.2), var(--bg));
-  color: color-mix(in srgb, var(--cal) 12%, var(--fg-faint));
+  background: color-mix(in srgb, var(--cal) calc(var(--chip-tint) * var(--past-fade) * 0.68), var(--bg));
+  color: color-mix(in srgb, var(--cal) 15%, var(--fg-faint));
 }
 
 /* confirmed events are just normal past events — no decoration */

@@ -182,6 +182,7 @@ browser server now runs independently. The 15:59 run had one transient
 
 ## Shipped log (newest first)
 
+- `5a441f0d` README media in light mode; `d7cda88c` past at 40%, faded C-shape ring
 - `6b0bf1b5` App renamed North Star (identifier unchanged); `c3bb97b1` README media redone
 - `502fd205` Drill-sergeant supervisor retired; its notes cleared once at launch (backup kept)
 - `04135f78`, `8ef1d0f7` Past events: every ended event faded to 30% of its tint, hue kept
