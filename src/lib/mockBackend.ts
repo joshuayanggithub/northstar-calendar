@@ -208,11 +208,12 @@ async function applySeriesPatch(masterId: string, patch: any) {
   const firstDate = first && (first.all_day ? first.start : toDateOnly(new Date(first.start)));
   // UNTIL truncation: drop instances starting after the boundary
   const rr: string | undefined = patch.recurrence?.[0];
-  const until = rr?.match(/UNTIL=(\d{8}T\d{6}Z)/)?.[1];
+  const until = rr?.match(/UNTIL=(\d{8}(?:T\d{6}Z)?)/)?.[1];
   if (until) {
-    const u = new Date(
-      `${until.slice(0, 4)}-${until.slice(4, 6)}-${until.slice(6, 8)}T${until.slice(9, 11)}:${until.slice(11, 13)}:${until.slice(13, 15)}Z`,
-    );
+    const date = `${until.slice(0, 4)}-${until.slice(4, 6)}-${until.slice(6, 8)}`;
+    const u = until.length === 8
+      ? new Date(`${date}T23:59:59Z`)
+      : new Date(`${date}T${until.slice(9, 11)}:${until.slice(11, 13)}:${until.slice(13, 15)}Z`);
     for (let j = events.length - 1; j >= 0; j--) {
       if (events[j].recurring_event_id === masterId && new Date(events[j].start) > u) {
         events.splice(j, 1);

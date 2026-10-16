@@ -1591,6 +1591,50 @@ test("recurring: editing 'this and following' keeps the remaining COUNT", async 
   expect(result.newRule).toBe("RRULE:FREQ=DAILY;COUNT=2");
 });
 
+test("recurring: all-day COUNT series can edit 'this and following'", async ({ page }) => {
+  const rule = "RRULE:FREQ=DAILY;COUNT=3";
+  const fixture = {
+    calendars: [{ id: "primary", summary: "Personal", color: "#4f8cff", is_primary: true, hidden: false, access_role: "owner" }],
+    events: ["2026-10-15", "2026-10-16", "2026-10-17"].map((date, i) => ({
+      id: `all-day-split-${i}`, calendar_id: "primary", etag: null, summary: "All-day split",
+      description: null, location: null, start: date,
+      end: `2026-10-${String(16 + i).padStart(2, "0")}`, all_day: true,
+      timezone: null, status: "confirmed", recurrence: null,
+      recurring_event_id: "all-day-split-master", conference_url: null, updated: null,
+      raw: { masterRecurrence: [rule], originalStartTime: { date } },
+    })),
+  };
+  await page.addInitScript((fx) => { (globalThis as any).__calFixture = fx; }, fixture);
+  await open(page);
+  const chips = page.getByTestId("allday-row").getByRole("button", { name: "All-day split" });
+  await expect(chips).toHaveCount(3);
+  await chips.nth(1).click();
+  const panel = page.getByTestId("event-panel");
+  await panel.locator(".panel-title").fill("All-day split edited");
+  await panel.getByRole("button", { name: /Save/ }).click();
+  const following = page.getByTestId("scope-dialog").getByTestId("scope-following");
+  await expect(following).toBeEnabled();
+  await following.click();
+  await expect(page.getByTestId("toast")).toContainText("and following");
+  const result = await page.evaluate(async () => {
+    const moduleUrl = performance.getEntriesByType("resource")
+      .map((entry) => entry.name).find((url) => url.includes("/src/lib/mockBackend.ts"));
+    if (!moduleUrl) throw new Error("mock backend module not loaded");
+    const { mockBackend } = await import(/* @vite-ignore */ moduleUrl);
+    const rows = await mockBackend.listEvents("2026-10-14", "2026-10-20");
+    return {
+      old: rows.filter((event) => event.recurring_event_id === "all-day-split-master").map((event) => event.id),
+      created: rows.find((event) => event.summary === "All-day split edited"),
+    };
+  });
+  expect(result.old).toEqual(["all-day-split-0"]);
+  expect(result.created).toMatchObject({
+    all_day: true,
+    start: "2026-10-16",
+    recurrence: ["RRULE:FREQ=DAILY;COUNT=2"],
+  });
+});
+
 test("recurring: deleting 'this and following' works for a COUNT series", async ({ page }) => {
   const fixture = {
     calendars: [{ id: "primary", summary: "Personal", color: "#4f8cff", is_primary: true, hidden: false, access_role: "owner" }],

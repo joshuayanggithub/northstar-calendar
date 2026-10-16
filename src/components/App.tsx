@@ -300,7 +300,7 @@ export default function App() {
           // recurring: ask for scope before touching anything. The dialog
           // opens now; the series master (a Google round trip) loads behind
           // it and is awaited only when a scope is picked.
-          askScope({ kind: "edit", event: ev, input, label, canSplit: !input.all_day && !ev.all_day });
+          askScope({ kind: "edit", event: ev, input, label, canSplit: true });
           return;
         }
         const prev = inputOf(ev);
@@ -520,7 +520,16 @@ export default function App() {
       const rrule: string | undefined = master?.recurrence?.find((r: string) =>
         r.startsWith("RRULE"),
       );
-      const untilOf = (boundaryIso: string) => {
+      const untilOf = (boundaryIso: string, allDay: boolean) => {
+        if (allDay) {
+          // RFC 5545 requires UNTIL to have the same value type as DTSTART.
+          // Google represents all-day DTSTART as a date, so end the old
+          // series on the calendar day before the selected occurrence.
+          const u = new Date(`${boundaryIso.slice(0, 10)}T00:00:00Z`);
+          u.setUTCDate(u.getUTCDate() - 1);
+          const pad = (n: number) => String(n).padStart(2, "0");
+          return `${u.getUTCFullYear()}${pad(u.getUTCMonth() + 1)}${pad(u.getUTCDate())}`;
+        }
         const u = new Date(new Date(boundaryIso).getTime() - 1000);
         const pad = (n: number) => String(n).padStart(2, "0");
         return (
@@ -528,8 +537,8 @@ export default function App() {
           `T${pad(u.getUTCHours())}${pad(u.getUTCMinutes())}${pad(u.getUTCSeconds())}Z`
         );
       };
-      const truncateRule = (rule: string, boundaryIso: string) => {
-        const until = `UNTIL=${untilOf(boundaryIso)}`;
+      const truncateRule = (rule: string, boundaryIso: string, allDay: boolean) => {
+        const until = `UNTIL=${untilOf(boundaryIso, allDay)}`;
         const withoutEnd = rule.replace(/;COUNT=\d+/, "").replace(/;UNTIL=[^;]+/, "");
         return `${withoutEnd};${until}`;
       };
@@ -546,7 +555,7 @@ export default function App() {
             showToast(`Deleted series “${ev.summary}”`, false);
           } else if (rrule) {
             await backend.updateSeriesMaster(ev.calendar_id, masterId, {
-              recurrence: [truncateRule(rrule, selectedOriginal)],
+              recurrence: [truncateRule(rrule, selectedOriginal, ev.all_day)],
             });
             showToast(`Deleted “${ev.summary}” and following`, false);
           }
@@ -663,7 +672,7 @@ export default function App() {
           // a sync pass between them pulled the old series' cancelled tail
           // before the new series existed, and the rest of the series
           // vanished from view until the next pass.
-          await backend.splitSeries(ev.calendar_id, masterId, [truncateRule(rrule, selectedOriginal)], {
+          await backend.splitSeries(ev.calendar_id, masterId, [truncateRule(rrule, selectedOriginal, ev.all_day)], {
             ...input,
             description: splitDrill(input.description).body || null,
             recurrence: [nextRule],
