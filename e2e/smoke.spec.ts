@@ -1606,6 +1606,15 @@ test("recurring: all-day COUNT series can edit 'this and following'", async ({ p
   };
   await page.addInitScript((fx) => { (globalThis as any).__calFixture = fx; }, fixture);
   await open(page);
+  await page.evaluate(() => {
+    const w = window as any;
+    const backend = w.__mockBackend;
+    const split = backend.splitSeries.bind(backend);
+    backend.splitSeries = (...args: unknown[]) => {
+      w.__allDaySplitRule = args[2];
+      return split(...args);
+    };
+  });
   const chips = page.getByTestId("allday-row").getByRole("button", { name: "All-day split" });
   await expect(chips).toHaveCount(3);
   await chips.nth(1).click();
@@ -1625,9 +1634,11 @@ test("recurring: all-day COUNT series can edit 'this and following'", async ({ p
     return {
       old: rows.filter((event) => event.recurring_event_id === "all-day-split-master").map((event) => event.id),
       created: rows.find((event) => event.summary === "All-day split edited"),
+      oldRule: (window as any).__allDaySplitRule,
     };
   });
   expect(result.old).toEqual(["all-day-split-0"]);
+  expect(result.oldRule).toEqual(["RRULE:FREQ=DAILY;UNTIL=20261015"]);
   expect(result.created).toMatchObject({
     all_day: true,
     start: "2026-10-16",
