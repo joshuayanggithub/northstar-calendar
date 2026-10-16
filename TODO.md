@@ -234,10 +234,9 @@ these to FEATURES.md with the hash.
 
 Last edited 2026-10-16 01:59 and sitting uncommitted in the working tree;
 saved before the merge. Its own tests, run against the merged code:
-- [ ] **Drag after a partial horizontal pan lands in the wrong day** (test
-  fails on main). Fix in the WIP: WeekView's pointer→day math uses the
-  day-clip width and adds the pan offset (3 lines, `dayClipRef`/`panRef.acc`).
-  Low risk; bring it in with its test.
+- [x] **Drag after a partial horizontal pan lands in the wrong day**: the
+  WIP's column math (day-clip width + pan offset) is in `9e9f91a1`, along with
+  day switching by sideways travel with slack.
 - [ ] **All-day COUNT series can't do "this and following"** (test fails on
   main). The WIP drops App.tsx's guard (`canSplit` excluded all-day). Needs
   a live check that splitting an all-day series is right against Google
@@ -274,6 +273,7 @@ the window on an existing display (e.g. SSH X forwarding) instead.
 
 ## Shipped log (newest first)
 
+- `9e9f91a1` Drag day switching by sideways travel with slack (no more accidental day hops)
 - `d3166cdd` Group drag: all selected events move together with live ghosts
 - `dc7bd650` Joints: C-shape steps at its spine; jointed shapes keep the 1px seam
 - `d89a5923` Merged linux-e2e-root-cause-fixes (annotations, swipe, recurring edits); `fd49d3f9` in-app E2E on macOS

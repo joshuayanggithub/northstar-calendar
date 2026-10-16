@@ -57,7 +57,18 @@ interface DragState {
   clientY: number;
   /** while moving: pointer is over the all-day lane of this day index */
   allDayDropDay?: number | null;
+  /** move: where the pointer went down, and how many days the drag has
+   *  switched so far (day switching goes by sideways travel, with slack) */
+  grabX?: number;
+  dayShift?: number;
 }
+
+/** A moved event switches day only after the pointer has travelled this far
+ *  past the halfway point of a column, sideways from where it was grabbed
+ *  (0.2: 70% of a column), and switches back only past the same margin.
+ *  Switching by the column under the pointer made a vertical drag of an
+ *  event grabbed near its edge hop to the next day on a few px of drift. */
+const DAY_SWITCH_SLACK = 0.2;
 
 interface CtxMenu {
   x: number;
@@ -448,6 +459,11 @@ export function WeekView(props: {
     [timed, pxPerMin, calendars, reconTick, starTick, props.seamStyle, colPx, days.length, props.hideWeekends],
   );
 
+  const colWidth = useCallback(() => {
+    const clip = dayClipRef.current?.clientWidth;
+    const grid = gridRef.current?.getBoundingClientRect().width ?? 0;
+    return (clip && clip > 0 ? clip : grid - gutterW) / days.length;
+  }, [days.length, gutterW]);
   const locate = useCallback(
     (clientX: number, clientY: number): { dayIndex: number; min: number } | null => {
       const el = gridRef.current;
@@ -457,12 +473,14 @@ export function WeekView(props: {
       const bodyTop = (el.querySelector(".grid-body") as HTMLElement)?.offsetTop ?? 0;
       const yy = clientY - rect.top + el.scrollTop - bodyTop;
       const gutter = gutterW;
-      const colW = (rect.width - gutter) / days.length;
-      const dayIndex = Math.max(0, Math.min(days.length - 1, Math.floor((x - gutter) / colW)));
+      // columns as drawn: the day area's own width (not the grid's, which
+      // counts the scrollbar), shifted by a partial swipe (acc px past days[0])
+      const colW = colWidth();
+      const dayIndex = Math.max(0, Math.min(days.length - 1, Math.floor((x - gutter + panRef.current.acc) / colW)));
       const min = Math.max(0, Math.min(DAY_MIN, yy / pxPerMin));
       return { dayIndex, min };
     },
-    [days.length, gutterW],
+    [days.length, gutterW, colWidth],
   );
 
   const commitDrag = useCallback(
@@ -635,22 +653,35 @@ export function WeekView(props: {
         const loc = locate(ev.clientX, ev.clientY);
         const d = dragRef.current;
         if (!loc || !d) return;
+        let dayIndex = loc.dayIndex;
+        let dayShift = d.dayShift;
+        if (d.kind === "move" && d.grabX != null) {
+          // sideways travel from the grab point, with slack both ways
+          const raw = (ev.clientX - d.grabX) / colWidth();
+          let k = d.dayShift ?? 0;
+          while (raw > k + 0.5 + DAY_SWITCH_SLACK) k++;
+          while (raw < k - 0.5 - DAY_SWITCH_SLACK) k--;
+          k = Math.max(-d.dayIndex, Math.min(days.length - 1 - d.dayIndex, k));
+          dayShift = k;
+          dayIndex = d.dayIndex + k;
+        }
         let allDayDropDay: number | null = null;
         if (d.kind === "move") {
           const lane = gridRef.current?.querySelector(".allday-row");
           if (lane) {
             const r = lane.getBoundingClientRect();
-            if (ev.clientY >= r.top && ev.clientY <= r.bottom) allDayDropDay = loc.dayIndex;
+            if (ev.clientY >= r.top && ev.clientY <= r.bottom) allDayDropDay = dayIndex;
           }
         }
         const next: DragState = {
           ...d,
-          curDayIndex: loc.dayIndex,
+          curDayIndex: dayIndex,
+          dayShift,
           curMin: loc.min,
           clientX: ev.clientX,
           clientY: ev.clientY,
           allDayDropDay,
-          moved: d.moved || Math.abs(loc.min - d.anchorMin) > 3 || loc.dayIndex !== d.dayIndex || allDayDropDay != null,
+          moved: d.moved || Math.abs(loc.min - d.anchorMin) > 3 || dayIndex !== d.dayIndex || allDayDropDay != null,
         };
         dragRef.current = next;
         setDrag(next);
@@ -683,7 +714,7 @@ export function WeekView(props: {
       window.addEventListener("pointercancel", cancel);
       window.addEventListener("keydown", onKey, true);
     },
-    [locate, commitDrag, props],
+    [locate, commitDrag, props, colWidth],
   );
 
   const [marquee, setMarquee] = useState<{
@@ -802,6 +833,8 @@ export function WeekView(props: {
       curMin: loc.min,
       clientX: e.clientX,
       clientY: e.clientY,
+      grabX: e.clientX,
+      dayShift: 0,
       moved: false,
     });
   };
