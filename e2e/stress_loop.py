@@ -31,8 +31,8 @@ while time.time() < end:
     stamp = datetime.fromtimestamp(started, timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     log = log_dir / f"{stamp}.log"
     command = [
-        "npx", "playwright", "test", "e2e/smoke.spec.ts", "e2e/realdata.spec.ts",
-        "--reporter=line", f"--output={log_dir / stamp}",
+        "npx", "playwright", "test", "--reporter=line",
+        f"--output={log_dir / stamp}",
     ]
     env = dict(os.environ, PLAYWRIGHT_BROWSERS_PATH="0")
     try:
