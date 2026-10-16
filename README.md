@@ -7,25 +7,25 @@ northstar is a mac dekstop calendar app that centers around features maximizing 
 
 # Productivity add-ons
 1. Reconcile Events
+
 It's pretty common that you get lazy and forget to delete events that didn't happen -  by default, events are now dotted lines (didn't happen) and you have to manually "reconcile" events to mark events that happened or didn't.
 
    ![Yesterday in day view: the events are still dotted (unconfirmed); hovering one shows ✓ and ✕; the reminder at the bottom reads "Yesterday: 6 unconfirmed events" with Confirm all / Review](docs/media/reconcile.png)
 
 3. Annotations for reflection
 
-Annotations are used in literature to criticque writing, so why not apply this to your life? Let's imagine you printed your calendar this week and hired your pessimistic alter-ego to determine how well you accomplished your goals / what went wrong? 
-
-Self-reflection is a core component of [weekly/daily reviews](https://substack.com/home/post/p-219365768). This makes weekly reviews easy rather than staring at a hard-to-look-at colorful mess of events .
+Annotations are used in literature to critique writing, so why not apply this to your life? Let's imagine you printed your calendar this week and annotated your calendar do determine how well you accomplished your goals / what went wrong? 
 
 ![A week with red handwritten notes in the free space around the events, with arrows to the events they critique](docs/media/annotations.png)
 
 3. Focus score / Highlighted Events / Goal dashboard
-What feature might [prime](https://en.wikipedia.org/wiki/Priming_%28psychology%29) oneself to be more self-critical and evaluative of their goals? 1. A focus score that ranks deep work and 2. highlighted events with pretty ui animations to make goal-driven events stand out 3. goal dashboard to keep driven 
+Some cool small features that help [prime](https://en.wikipedia.org/wiki/Priming_%28psychology%29) oneself to be more self-critical and evaluative of their goals? are a focus score that ranks deep work and. highlighting goal-driven events with pretty ui animations, and goal dashboard.  
 
 ![Three columns: the focus score's breakdown for a day; a goal-work event with its gold light running along the outline; the goal dashboard with daily, weekly and long-term goals](docs/media/focus-goals.png)
 
 # UI/UX Improvements
 1. Overlapped Events
+
 In google calendar its really hard to read overlapped events. Its a really simple fix of ensuring that overlapped events never add horizontal whitespace or random innents and clustering small-length events together in a more readable format.
 
 ![northstar: C-shape invariance, rabbet joint, clustered view](docs/media/overlaps.png)
