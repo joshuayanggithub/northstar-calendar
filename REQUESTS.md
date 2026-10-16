@@ -95,3 +95,4 @@ tracking: FEATURES.md for the parity matrix, e2e/QA-BACKLOG.md for QA items.)
 | 86 | Overlap UI clunky (a long block, a nested event, lunch running into its end, one calendar) | done `dc7bd650` (a C-shape's joint steps at its spine; jointed shapes keep the 1px seam) |
 | 87 | Drag multiple selected events at once | done `d3166cdd` (ghost per event while dragging, wall-clock shift, selection kept; view-only/all-day stay) |
 | 88 | Dragging an event jumps to the next/previous day; lateral day switching too sensitive | done `9e9f91a1` (day follows sideways travel with 70% slack; swipe offset counted) |
+| 89 | A better app icon for North Star (ideas; C, then calendar variations of C; picked C3) | done `4352f531` ("Polaris is today"; menu bar star; source in design/icon/) |

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+<defs>
+  <linearGradient id="night" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0d1630"/><stop offset="1" stop-color="#1f2d57"/></linearGradient>
+  <linearGradient id="dusk" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0d1630"/><stop offset=".62" stop-color="#3a3466"/><stop offset="1" stop-color="#c9774f"/></linearGradient>
+  <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffe08a"/><stop offset="1" stop-color="#e2a41f"/></linearGradient>
+  <linearGradient id="cream" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fbf8f1"/><stop offset="1" stop-color="#efe8da"/></linearGradient>
+  <radialGradient id="glow"><stop offset="0" stop-color="#ffd75e" stop-opacity=".75"/><stop offset="1" stop-color="#ffd75e" stop-opacity="0"/></radialGradient>
+  <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#000" flood-opacity=".28"/></filter>
+</defs><rect x="100" y="100" width="824" height="824" rx="186" fill="url(#cream)" />
+    <rect x="100" y="100" width="824" height="824" rx="186" fill="none" stroke="#e3dccd" stroke-width="4"/>
+    <rect x="330" y="150" width="40" height="120" rx="20" fill="#9aa3b8"/><rect x="654" y="150" width="40" height="120" rx="20" fill="#9aa3b8"/>
+    <path d="M 512 236 Q 542 536 732 566 Q 542 596 512 786 Q 482 596 292 566 Q 482 536 512 236 Z" fill="#1d2b57"/>
+    <circle cx="512" cy="566" r="34" fill="url(#gold)"/></svg>

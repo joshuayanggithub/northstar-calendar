@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+<defs>
+  <linearGradient id="night" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0d1630"/><stop offset="1" stop-color="#1f2d57"/></linearGradient>
+  <linearGradient id="dusk" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0d1630"/><stop offset=".62" stop-color="#3a3466"/><stop offset="1" stop-color="#c9774f"/></linearGradient>
+  <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffe08a"/><stop offset="1" stop-color="#e2a41f"/></linearGradient>
+  <linearGradient id="cream" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fbf8f1"/><stop offset="1" stop-color="#efe8da"/></linearGradient>
+  <radialGradient id="glow"><stop offset="0" stop-color="#ffd75e" stop-opacity=".75"/><stop offset="1" stop-color="#ffd75e" stop-opacity="0"/></radialGradient>
+  <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#000" flood-opacity=".28"/></filter>
+</defs><rect x="100" y="100" width="824" height="824" rx="186" fill="url(#night)" />
+    <g filter="url(#shadow)"><rect x="236" y="268" width="552" height="520" rx="70" fill="#f6f2e9"/>
+    <path d="M236 338 a70 70 0 0 1 70 -70 h412 a70 70 0 0 1 70 70 v52 h-552z" fill="#e5484d"/></g>
+    <rect x="352" y="222" width="34" height="100" rx="17" fill="#c9cfdb"/><rect x="638" y="222" width="34" height="100" rx="17" fill="#c9cfdb"/>
+    <rect x="292" y="438" width="82" height="72" rx="18" fill="#dcd6ca"/><rect x="292" y="542" width="82" height="72" rx="18" fill="#dcd6ca"/><rect x="292" y="646" width="82" height="72" rx="18" fill="#dcd6ca"/><rect x="410" y="438" width="82" height="72" rx="18" fill="#dcd6ca"/><rect x="410" y="542" width="82" height="72" rx="18" fill="#dcd6ca"/><rect x="410" y="646" width="82" height="72" rx="18" fill="#dcd6ca"/><rect x="528" y="438" width="82" height="72" rx="18" fill="#dcd6ca"/><rect x="528" y="646" width="82" height="72" rx="18" fill="#dcd6ca"/><rect x="646" y="438" width="82" height="72" rx="18" fill="#dcd6ca"/><rect x="646" y="542" width="82" height="72" rx="18" fill="#dcd6ca"/><rect x="646" y="646" width="82" height="72" rx="18" fill="#dcd6ca"/>
+    <circle cx="569" cy="578" r="120" fill="url(#glow)"/>
+    <path d="M 569 466 Q 583.72 563.28 639 578 Q 583.72 592.72 569 662 Q 554.28 592.72 499 578 Q 554.28 563.28 569 466 Z" fill="url(#gold)" stroke="#b9800f" stroke-width="4"/></svg>

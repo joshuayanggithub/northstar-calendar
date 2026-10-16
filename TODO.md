@@ -273,6 +273,7 @@ the window on an existing display (e.g. SSH X forwarding) instead.
 
 ## Shipped log (newest first)
 
+- `4352f531` App icon "Polaris is today" + north-star menu bar glyph
 - `9e9f91a1` Drag day switching by sideways travel with slack (no more accidental day hops)
 - `d3166cdd` Group drag: all selected events move together with live ghosts
 - `dc7bd650` Joints: C-shape steps at its spine; jointed shapes keep the 1px seam

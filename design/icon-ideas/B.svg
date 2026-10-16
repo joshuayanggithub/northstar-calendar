@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+<defs>
+  <linearGradient id="night" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0d1630"/><stop offset="1" stop-color="#1f2d57"/></linearGradient>
+  <linearGradient id="dusk" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0d1630"/><stop offset=".62" stop-color="#3a3466"/><stop offset="1" stop-color="#c9774f"/></linearGradient>
+  <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffe08a"/><stop offset="1" stop-color="#e2a41f"/></linearGradient>
+  <linearGradient id="cream" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fbf8f1"/><stop offset="1" stop-color="#efe8da"/></linearGradient>
+  <radialGradient id="glow"><stop offset="0" stop-color="#ffd75e" stop-opacity=".75"/><stop offset="1" stop-color="#ffd75e" stop-opacity="0"/></radialGradient>
+  <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#000" flood-opacity=".28"/></filter>
+</defs><rect x="100" y="100" width="824" height="824" rx="186" fill="url(#night)" />
+    <circle cx="512" cy="530" r="282" fill="none" stroke="#33467a" stroke-width="10"/>
+    <circle cx="732.5" cy="354.2" r="26" fill="#8fa3d6"/><circle cx="786.9" cy="592.8" r="26" fill="#8fa3d6"/><circle cx="634.4" cy="784.1" r="26" fill="#8fa3d6"/><circle cx="389.6" cy="784.1" r="26" fill="#8fa3d6"/><circle cx="237.1" cy="592.8" r="26" fill="#8fa3d6"/><circle cx="291.5" cy="354.2" r="26" fill="#8fa3d6"/>
+    <path d="M512 530 L497 330 L512 300 L527 330 Z" fill="url(#gold)"/>
+    <path d="M512 530 L500 690 L512 712 L524 690 Z" fill="#4b5f96"/>
+    <circle cx="512" cy="530" r="30" fill="#f6f2e9"/>
+    <circle cx="512" cy="248" r="110" fill="url(#glow)"/>
+    <path d="M 512 156 Q 523.84 236.16 570 248 Q 523.84 259.84 512 314 Q 500.16 259.84 454 248 Q 500.16 236.16 512 156 Z" fill="url(#gold)"/></svg>
