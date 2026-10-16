@@ -14,7 +14,7 @@ async function open(page: Page) {
   await expect(page.locator("[data-testid=margin-notes][data-pending='0']")).toHaveCount(1);
 }
 
-const tikTok = (page: Page) => page.getByTestId("margin-note").filter({ hasText: "addicted to the scroll" });
+const tikTok = (page: Page) => page.getByTestId("margin-note").filter({ hasText: "Forty minutes of scrolling" });
 
 /** where the note's arrow ends, relative to its event's box */
 async function arrowEnd(page: Page, key: string) {

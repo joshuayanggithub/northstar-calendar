@@ -2141,27 +2141,27 @@ test("drill: an ended event without a note can get one for reflection", async ({
   await expect(panel.getByTestId("drill-add")).toHaveCount(0);
 });
 
-test("drill: the supervisor's note is written in the margin and splits in the editor", async ({ page }) => {
+test("notes: a note is written in the margin and splits in the editor", async ({ page }) => {
   await open(page);
   // Monday 9 PM 'Distraction: TikTok' carries a [DRILL] line in its description
   await page.getByTestId("week-grid").evaluate((el) => (el.scrollTop = 20 * 48));
   const chip = page.locator(".chip-timed", { hasText: "Distraction: TikTok" });
-  await expect(page.getByTestId("margin-note").filter({ hasText: "addicted to the scroll" })).toHaveCount(1);
+  await expect(page.getByTestId("margin-note").filter({ hasText: "Forty minutes of scrolling" })).toHaveCount(1);
   // the editor shows it as the red-pen block, NOT inside the description box
   await chip.click();
   const panel = page.getByTestId("event-panel");
-  await expect(panel.getByTestId("panel-drill")).toContainText("addicted to the scroll");
+  await expect(panel.getByTestId("panel-drill")).toContainText("Forty minutes of scrolling");
   await expect(panel.getByPlaceholder("Description")).toHaveValue("");
   // editing + saving preserves the annotation in the stored description
   await panel.getByPlaceholder("Description").fill("note to self");
   await panel.getByRole("button", { name: "Save" }).click();
   await chip.click();
-  await expect(panel.getByTestId("panel-drill")).toContainText("addicted to the scroll");
+  await expect(panel.getByTestId("panel-drill")).toContainText("Forty minutes of scrolling");
   await expect(panel.getByPlaceholder("Description")).toHaveValue("note to self");
   // erasing the note removes it at once (no Save needed)
   await panel.getByTestId("drill-erase").click();
   await expect(panel.getByTestId("panel-drill")).toHaveCount(0);
-  await expect(page.getByTestId("margin-note").filter({ hasText: "addicted to the scroll" })).toHaveCount(0);
+  await expect(page.getByTestId("margin-note").filter({ hasText: "Forty minutes of scrolling" })).toHaveCount(0);
   await page.keyboard.press("Escape");
 });
 
@@ -2170,7 +2170,8 @@ test("recon: past events stay unsettled until confirmed; score credits confirmed
   // Morning run (7-8 AM today) has ended but nobody confirmed it
   const run = page.locator(".chip-timed", { hasText: "Morning run" });
   await expect(run).toHaveClass(/unsettled/);
-  await expect(run).not.toHaveClass(/past/);
+  // ended, so it reads as past (faded) like any other; the dotted outline marks it unconfirmed
+  await expect(run).toHaveClass(/past/);
   // today's score badge shows unconfirmed time as unaccounted (badge absent: nothing confirmed yet)
   const todayScore = page.locator(".day-head.today").getByTestId("day-score");
   await expect(todayScore).toHaveCount(0);
@@ -2178,6 +2179,7 @@ test("recon: past events stay unsettled until confirmed; score credits confirmed
   await run.click({ button: "right" });
   await page.getByTestId("ctx-menu").getByRole("button", { name: /Happened/ }).click();
   await expect(run).toHaveClass(/past/);
+  await expect(run).not.toHaveClass(/unsettled/);
   await expect(todayScore).toBeVisible();
   // strike a different past event: Standup hasn't ended at 9AM... use morning walk (Tue is grandfathered) -> use ctx on run again to unconfirm
   await run.click({ button: "right" });

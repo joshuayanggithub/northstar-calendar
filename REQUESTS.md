@@ -81,3 +81,7 @@ tracking: FEATURES.md for the parity matrix, e2e/QA-BACKLOG.md for QA items.)
 | 72 | README images sized to the text; feature numbering fixed | done `c63d152b` |
 | 73 | Video as a walkthrough you can follow (no 10-second limit), with annotations right after reconcile; screenshots a bit larger | done `7c11c824` (one minute, fake-clock recording; the Review pill no longer wraps the title) |
 | 74 | Annotations screenshot a little larger (its notes are small) | done `80b9442b` (full text width) |
+| 75 | Past events visibly faded next to future ones, colors still visible; then "even more faded", 30% picked from 30% vs 35% renders | done `04135f78`, `8ef1d0f7` (every ended event fades: unconfirmed, sleep, all-day, clustered; e2e/pastfade.spec.ts over all 24 Google colors, both themes) |
+| 76 | Remove the drill sergeant and all current annotations | done `502fd205` (supervisor gone; once at launch every [DRILL] line comes off its event here and in Google, backup drill-removed.json; checked on a snapshot of the real DB: 12 of 12) |
+| 77 | Rename the app "North Star" (from calendar-app) | done `6b0bf1b5` (bundle, menu, Dock, window, menu bar; identifier kept so data, sign-in, settings carry over; Desktop shortcut ~/Desktop/North Star.app) |
+| 78 | README media match the app (stronger fade, no model writing notes) | done `c3bb97b1` |

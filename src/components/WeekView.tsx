@@ -79,6 +79,11 @@ function keyOf(e: { calendar_id: string; id: string }): string {
   return `${e.calendar_id}/${e.id}`;
 }
 
+/** over, whether reviewed yet or not: past events read faded (app.css .past) */
+function ended(e: CalendarEvent, now: Date): boolean {
+  return eventDates(e).end.getTime() <= now.getTime();
+}
+
 export function WeekView(props: {
   backend: Backend | null;
   days: Date[];
@@ -888,7 +893,7 @@ export function WeekView(props: {
                 .map((e) => (
                   <button
                     key={keyOf(e)}
-                    className="chip chip-allday"
+                    className={"chip chip-allday" + (ended(e, nowDate) ? " past" : "")}
                     style={chipStyle(colorOf(calendars, e.calendar_id))}
                     title={e.summary}
                     onPointerDown={(pe) => startChipDrag(pe, e, days.indexOf(d))}
@@ -1026,7 +1031,7 @@ export function WeekView(props: {
                   const color = colorOf(calendars, e.calendar_id);
                   const { start, end } = eventDates(e);
                   const recon = reconState(e, calendars, nowDate);
-                  const isPast = recon === "done" || recon === "canceled";
+                  const isPast = ended(e, nowDate);
                   const common =
                     (isPast ? " past" : "") +
                     (recon === "unsettled" ? " unsettled" : "") +
@@ -1102,6 +1107,7 @@ export function WeekView(props: {
                           title={e.summary + " (" + fmtChipRange(start, eventDates(e).end) + ")"}
                           className={
                             "cluster-row" +
+                            (ended(e, nowDate) ? " past" : "") +
                             ((st0) => (st0 ? (st0.kind === "manual" ? " starred" : " starred-auto") : ""))(starState(starKey(e))) +
                             (selectedKeys.has(keyOf(e)) ? " selected" : "") +
                             ((r) => (r === "unsettled" ? " unsettled" : r === "canceled" ? " canceled" : r === "done" ? " done" : ""))(
@@ -1168,7 +1174,7 @@ export function WeekView(props: {
                   const beingMoved =
                     drag?.kind !== "create" && drag?.event?.id === e.id && drag.moved && !drag.duplicate;
                   const recon = reconState(e, calendars, nowDate);
-                  const isPast = recon === "done" || recon === "canceled";
+                  const isPast = ended(e, nowDate);
                   return (
                     <div
                       key={keyOf(e)}

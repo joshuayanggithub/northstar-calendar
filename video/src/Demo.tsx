@@ -136,8 +136,8 @@ const CAPTIONS: Caption[] = [
     kicker: "2 · Annotations",
     text: "Reflect in the margins",
     hints: [
-      [M.notes, "A local model critiques your week"],
-      [M.addnote, "Add a note of your own"],
+      [M.notes, "Notes on how the week went"],
+      [M.addnote, "Add one to any event"],
       [M.dragnote, "Drag it anywhere; the arrow follows"],
     ],
   },

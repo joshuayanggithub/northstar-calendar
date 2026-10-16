@@ -1,4 +1,4 @@
-// Margin notes: the supervisor's red-pen notes, placed the way a person
+// Margin notes: your red-pen notes on events, placed the way a person
 // annotates a printed week. A note goes wherever there is room (empty grid,
 // the solid body of an event, across a day line), tilted a hair or turned
 // sideways, with a hand-drawn arrow back to its event. It is never written

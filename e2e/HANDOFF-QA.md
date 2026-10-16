@@ -49,7 +49,9 @@ mode** on macOS, trackpad-heavy.
   alias rows orphan). Verify cleanup with a list after sync.
 - **One app instance at a time** (dev vs release share the SQLite DB; two
   sync engines fight). Release bundle: `target/release/bundle/macos/…app`,
-  Desktop symlink `~/Desktop/Calendar.app` points there. The hook/webdriver
+  Desktop symlink `~/Desktop/North Star.app` points there (bundle
+  `North Star.app`, executable `northstar`; identifier still
+  `com.joshuayang.calendar-app`, so data, sign-in and settings carry over). The hook/webdriver
   exist only in debug builds.
 - Restore the user's view (press the view key he was on) after driving the
   real window; don't launch GUI apps via `open` from the sandbox (blocked).

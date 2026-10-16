@@ -19,9 +19,9 @@ const BATCH_PER_TICK: usize = 4;
 const TICK_SECS: u64 = 45;
 /// bulk-friendly models first; gemma3:12b is accurate but 6-11s/title
 const MODEL_PREFERENCE: [&str; 4] = ["qwen2.5:0.5b", "llama3.2:1b", "llama3.2:3b", "gemma3:12b"];
-/// marker separating the drill-sergeant annotation inside a description
+/// marks a note line inside a description (notes are the person's own; the
+/// drill-sergeant supervisor that used to write them is gone)
 pub const DRILL_MARK: &str = "[DRILL]";
-const DRILL_PER_TICK: usize = 2;
 /// salted into goals_hash so prompt changes re-classify cached titles
 const PROMPT_VERSION: &str = "v3";
 
@@ -234,116 +234,13 @@ fn run_once(app: &AppHandle) {
         save_cache(app, &cache);
         let _ = app.emit("goal-class-changed", ());
     }
-    if let Some(model) = model.or_else(|| pick_model(&agent)) {
-        run_drill(app, &agent, &model, &goals);
-    }
 }
 
-fn drill_path(app: &AppHandle) -> Option<std::path::PathBuf> {
-    crate::state::data_dir(app).ok().map(|d| d.join("drill.json"))
+fn data_file(app: &AppHandle, name: &str) -> Option<std::path::PathBuf> {
+    crate::state::data_dir(app).ok().map(|d| d.join(name))
 }
 
-/// What the supervisor wrote on an event. `line` fingerprints the note text
-/// it wrote: when the event's note no longer matches (the person edited or
-/// erased it), the note is theirs and is never rewritten. Older records
-/// (a bare signature) count as settled.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-enum DrillEntry {
-    Wrote { sig: u64, line: u64 },
-    Legacy(u64),
-}
-
-fn load_drill(app: &AppHandle) -> HashMap<String, DrillEntry> {
-    drill_path(app)
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
-
-/// the note text on an event, if any (the [DRILL] line)
-fn drill_line(desc: Option<&str>) -> Option<String> {
-    desc?
-        .lines()
-        .find(|l| l.trim_start().starts_with(DRILL_MARK))
-        .map(|l| l.trim_start()[DRILL_MARK.len()..].trim().to_string())
-}
-
-/// Whether the supervisor may (re)write this event's note: never over a
-/// note the person wrote, edited or erased.
-fn may_annotate(entry: Option<&DrillEntry>, current: Option<&str>, sig: u64) -> bool {
-    match entry {
-        None => current.is_none(),
-        Some(DrillEntry::Legacy(_)) => false,
-        Some(DrillEntry::Wrote { sig: s, line }) => {
-            current.map(hash_of) == Some(*line) && *s != sig
-        }
-    }
-}
-
-fn save_drill(app: &AppHandle, m: &HashMap<String, DrillEntry>) {
-    if let Some(p) = drill_path(app) {
-        let _ = std::fs::create_dir_all(p.parent().unwrap());
-        let _ = std::fs::write(p, serde_json::to_string(m).unwrap_or_default());
-    }
-}
-
-/// The note as it should read: the model sometimes wraps its line in stage
-/// directions ("**[Red marker scribble in margin next to X]**", "**Calendar
-/// Entry: X**") or repeats the event title first. Mirrors cleanDrill in
-/// src/lib/drill.ts (which also cleans notes written before this existed).
-fn clean_note(raw: &str, title: &str) -> Option<String> {
-    let collapse = |x: &str| x.split_whitespace().collect::<Vec<_>>().join(" ");
-    let scene = |x: &str| {
-        let l = x.to_lowercase();
-        ["red marker", "red pen", "red ink", "margin", "scrawl", "scribbl", "calendar entry", "calendar event"]
-            .iter()
-            .any(|k| l.contains(k))
-    };
-    let mut s = collapse(raw);
-    let t = collapse(title).to_lowercase();
-    for _ in 0..3 {
-        let before = s.clone();
-        if let Some(rest) = s.strip_prefix("**") {
-            match rest.find("**") {
-                Some(end) if scene(&rest[..end]) => s = rest[end + 2..].trim().to_string(),
-                None if scene(rest) => s = rest.trim().to_string(),
-                _ => {}
-            }
-        }
-        if s.starts_with('[') || s.starts_with('(') {
-            if let Some(end) = s.find([']', ')']) {
-                if scene(&s[..end]) {
-                    s = s[end + 1..].trim().to_string();
-                }
-            }
-        }
-        let lower = s.to_lowercase();
-        for p in ["calendar entry:", "calendar event:"] {
-            if lower.starts_with(p) {
-                s = s[p.len()..].trim().to_string();
-                break;
-            }
-        }
-        if !t.is_empty() && s.to_lowercase().starts_with(&t) {
-            let n = t.chars().count();
-            s = s.chars().skip(n).collect::<String>();
-            s = s.trim_start_matches(|c: char| c.is_whitespace() || ":-–—".contains(c)).to_string();
-        }
-        s = s.trim().to_string();
-        if s == before {
-            break;
-        }
-    }
-    if s.len() > 2 && s.starts_with('*') && s.ends_with('*') && !s[1..s.len() - 1].contains('*') {
-        s = s[1..s.len() - 1].trim().to_string();
-    }
-    if s.chars().all(|c| c == '*' || c == '.' || c == '…' || c.is_whitespace()) {
-        return None;
-    }
-    Some(s)
-}
-
+/// a description without its note lines, the rest as written
 fn strip_drill(desc: &str) -> String {
     desc.lines()
         .filter(|l| !l.trim_start().starts_with(DRILL_MARK))
@@ -353,115 +250,70 @@ fn strip_drill(desc: &str) -> String {
         .to_string()
 }
 
-/// One red-pen line from the supervisor, grounded in what the event was.
-fn drill_one(
-    agent: &ureq::Agent,
-    model: &str,
-    goals: &[String],
-    e: &sync_core::models::Event,
-    kind: &str,
-) -> Option<String> {
-    let goal_list = goals.join("; ");
-    let prompt = format!(
-        "You are a drill-sergeant personal coach (think David Goggins) reviewing a printed \
-         calendar with a red marker. The person's goals: {goal_list}.\n\
-         Event: \"{}\" ({kind}).\n\
-         Write EXACTLY ONE short handwritten-style margin note, max 12 words, addressed as \
-         'you'. Harsh and blunt for distractions, demanding-but-proud for goal work, \
-         disciplinarian about sleep schedule. No emojis, no hashtags, no slurs, \
-         no quotation marks, no markdown. Write only the note itself: do not \
-         describe the marker or the margin, do not repeat the event title.",
-        e.summary
-    );
-    let resp: serde_json::Value = agent
-        .post(&format!("{OLLAMA}/api/generate"))
-        .timeout(Duration::from_secs(90))
-        .send_json(serde_json::json!({
-            "model": model,
-            "prompt": prompt,
-            "stream": false,
-            "options": {"temperature": 0.7, "num_predict": 40}
-        }))
-        .ok()?
-        .into_json()
-        .ok()?;
-    let line = resp["response"].as_str()?.trim().replace(['\n', '"'], " ");
-    let line = clean_note(&line, &e.summary)?;
-    if line.len() > 140 {
-        return None;
+/// The drill-sergeant supervisor is gone. Once, take down every note it
+/// left: each [DRILL] line comes off its event, here and in Google Calendar,
+/// and the rest of the description stays. What came off is kept in
+/// drill-removed.json. Notes written from now on are the person's own.
+pub fn retire_drill_notes(app: &AppHandle) {
+    let (Some(marker), Some(backup)) = (data_file(app, "drill-retired"), data_file(app, "drill-removed.json")) else {
+        return;
+    };
+    if marker.exists() {
+        return;
     }
-    Some(line)
-}
-
-fn run_drill(app: &AppHandle, agent: &ureq::Agent, model: &str, goals: &[String]) {
-    let now = Local::now();
-    let start = (now - CDuration::days(1)).format("%Y-%m-%dT00:00:00").to_string();
-    let end = now.format("%Y-%m-%dT%H:%M:%S").to_string();
     let state = app.state::<AppState>();
-    let Ok(events) = state.db(|db| db.list_events_between(&start, &end)) else { return };
-    let class_cache = load_cache(app);
-    let mut drill = load_drill(app);
-    let mut done = 0;
-    for e in events {
-        if done >= DRILL_PER_TICK {
-            break;
+    let Ok(events) = state.db(|db| db.list_events_between("0000", "9999")) else { return };
+    let noted: Vec<_> = events
+        .into_iter()
+        .filter(|e| e.description.as_deref().is_some_and(|d| d.lines().any(|l| l.trim_start().starts_with(DRILL_MARK))))
+        .collect();
+    // the backup first (and only the first time), so nothing is lost
+    if !backup.exists() {
+        let kept: Vec<_> = noted
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "calendar_id": e.calendar_id, "id": e.id, "summary": e.summary,
+                    "start": e.start, "description": e.description,
+                })
+            })
+            .collect();
+        let _ = std::fs::create_dir_all(backup.parent().unwrap());
+        if std::fs::write(&backup, serde_json::to_string_pretty(&kept).unwrap_or_default()).is_err() {
+            return;
         }
-        if e.all_day || e.end > end {
-            continue; // only events that already ended
-        }
-        let key = format!("{}/{}", e.calendar_id, e.id);
-        // the goals text, not the classifier's prompt version: a stricter
-        // classifier is no reason to rewrite yesterday's notes
-        let sig = hash_of(&format!("{}|{}|{}", e.summary, DRILL_MARK, goals.join("\n")));
-        let current = drill_line(e.description.as_deref());
-        if !may_annotate(drill.get(&key), current.as_deref(), sig) {
-            continue;
-        }
-        let lower = e.summary.to_lowercase();
-        let kind = if lower.starts_with("distraction") {
-            "a self-labelled distraction"
-        } else if lower.contains("sleep") || lower.contains("asleep") || lower.contains("in bed") {
-            "sleep - judge the schedule and duration from the title"
-        } else if class_cache.get(&key).map(|c| c.goal.is_some()) == Some(true) {
-            "goal work"
-        } else {
-            continue; // the supervisor doesn't annotate neutral events
-        };
-        let Some(line) = drill_one(agent, model, goals, &e, kind) else { continue };
-        let new_desc = {
-            let base = strip_drill(e.description.as_deref().unwrap_or(""));
-            if base.is_empty() {
-                format!("{DRILL_MARK} {line}")
-            } else {
-                format!("{base}\n\n{DRILL_MARK} {line}")
-            }
-        };
-        info!("drill: {} <- {}", line, e.summary);
-        let cal = e.calendar_id.clone();
-        let id = e.id.clone();
+    }
+    let mut cleared = 0;
+    for e in &noted {
+        let desc = strip_drill(e.description.as_deref().unwrap_or(""));
         let res = state.db(|db| {
-            let Some(mut ev) = db.get_event(&cal, &id)? else {
+            let Some(mut ev) = db.get_event(&e.calendar_id, &e.id)? else {
                 return Ok(());
             };
             let etag = ev.etag.clone();
-            ev.description = Some(new_desc.clone());
+            ev.description = (!desc.is_empty()).then(|| desc.clone());
             db.upsert_event(&ev)?;
             db.enqueue_op(
-                &cal,
-                &id,
+                &e.calendar_id,
+                &e.id,
                 sync_core::models::OpKind::Patch,
-                Some(&serde_json::json!({ "description": new_desc })),
+                Some(&serde_json::json!({ "description": desc })),
                 etag.as_deref(),
             )?;
             Ok(())
         });
         if res.is_ok() {
-            drill.insert(key, DrillEntry::Wrote { sig, line: hash_of(&line) });
-            done += 1;
+            cleared += 1;
         }
     }
-    if done > 0 {
-        save_drill(app, &drill);
+    info!("drill notes retired: {cleared} of {} cleared", noted.len());
+    if cleared == noted.len() {
+        let _ = std::fs::write(&marker, Local::now().to_rfc3339());
+        if let Some(p) = data_file(app, "drill.json") {
+            let _ = std::fs::remove_file(p); // the supervisor's own records
+        }
+    }
+    if cleared > 0 {
         let _ = app.emit("db-changed", ());
         state.kick_sync(crate::state::SyncKick::Now);
     }
@@ -472,6 +324,7 @@ pub fn spawn(app: AppHandle) {
         .name("goal-classify".into())
         .spawn(move || {
             std::thread::sleep(Duration::from_secs(10));
+            retire_drill_notes(&app);
             loop {
                 run_once(&app);
                 std::thread::sleep(Duration::from_secs(TICK_SECS));
@@ -499,44 +352,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn supervisor_never_rewrites_a_note_the_person_owns() {
-        let wrote = DrillEntry::Wrote { sig: 1, line: hash_of("Read faster.") };
-        // its own note, unchanged, and the event changed: may rewrite
-        assert!(may_annotate(Some(&wrote), Some("Read faster."), 2));
-        // unchanged event: nothing to do
-        assert!(!may_annotate(Some(&wrote), Some("Read faster."), 1));
-        // edited or erased by the person: theirs for good
-        assert!(!may_annotate(Some(&wrote), Some("I did read it, slowly."), 2));
-        assert!(!may_annotate(Some(&wrote), None, 2));
-        // a note the person wrote first; older records are settled
-        assert!(!may_annotate(None, Some("my own note"), 2));
-        assert!(!may_annotate(Some(&DrillEntry::Legacy(7)), None, 2));
-        // a fresh event with no note
-        assert!(may_annotate(None, None, 2));
-    }
-
-    #[test]
-    fn clean_note_drops_stage_directions_and_the_title() {
-        assert_eq!(
-            clean_note("**[Red Marker Scribble in Margin Next to  Read Chapter 4 ]**  You *will* understand it.", "Read Chapter 4").as_deref(),
-            Some("You *will* understand it.")
-        );
-        assert_eq!(
-            clean_note("**Calendar Entry: Read the style guide**  *You. Read. Absorb.*", "Read the style guide").as_deref(),
-            Some("You. Read. Absorb.")
-        );
-        assert_eq!(
-            clean_note("Finish Diffusion Notes: *Finally! Push harder.*", "Finish Diffusion Notes").as_deref(),
-            Some("Finally! Push harder.")
-        );
-        assert_eq!(clean_note("**Calendar Entry:  Big Lecture", "Big Lecture"), None);
-        assert_eq!(clean_note("frontier work", "Read paper").as_deref(), Some("frontier work"));
-    }
-
-    #[test]
-    fn drill_line_reads_the_note() {
-        assert_eq!(drill_line(Some("body\n\n[DRILL] Ship it.")).as_deref(), Some("Ship it."));
-        assert_eq!(drill_line(Some("no note")), None);
+    fn retiring_takes_only_the_note_line() {
+        assert_eq!(strip_drill("[DRILL] Ship it."), "");
+        assert_eq!(strip_drill("Agenda: budget\nRoom 4\n\n[DRILL] Ship it."), "Agenda: budget\nRoom 4");
+        assert_eq!(strip_drill("  [DRILL] indented\nkeep me"), "keep me");
+        assert_eq!(strip_drill("no note here"), "no note here");
     }
 
     #[test]

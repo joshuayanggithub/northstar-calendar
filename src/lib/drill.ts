@@ -1,4 +1,4 @@
-// The drill-sergeant's red-pen line lives INSIDE the event description behind
+// Your red-pen note lives INSIDE the event description behind
 // a [DRILL] marker (so it syncs through Google like any field). The UI splits
 // it out: the editor shows the clean body, the chip wears the scrawl.
 

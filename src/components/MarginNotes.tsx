@@ -1,4 +1,4 @@
-// The supervisor's red-pen notes as margin annotations over the week.
+// Your red-pen notes as margin annotations over the week.
 // This layer reads where the chips and their text actually landed, hands
 // that to lib/marginNotes.ts to place every note in the free space around
 // them, and draws the arrows. A note can be dragged to adjust it; the spot

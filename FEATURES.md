@@ -68,7 +68,8 @@ Calendar account, manual = user confirms in the running app.
 | Menubar tray: next event + join button + sync/open/quit | in testing (user verify) | manual |
 | Global quick-create shortcut (⌥C) | in testing (user verify) | manual |
 | Calendar colors = Google Calendar's displayed palette (legacy API hex mapped), tinted translucent | tested (2026-10-16, `10efe30e`) | e2e/color.spec.ts; checked against the live Google sidebar |
-| Margin notes: the supervisor's red pen placed in free space (any column, event bodies), arrows to the event, always whole, draggable (spot remembered), placed by annealing in a worker | tested (2026-10-16, `7180685a`, `e1a55b97`) | e2e/marginnotes.spec.ts (property + captured real pages), e2e/notes.spec.ts (drag/reload/reset), textprobe law 5 in Chromium + real window (7 views) |
+| Past events faded: every ended event (unconfirmed, sleep, all-day, clustered too) at 30% of its calendar's tint, hue kept | tested (2026-10-16, `04135f78`, `8ef1d0f7`) | e2e/pastfade.spec.ts (all 24 Google colors, both themes: past/future gap, hue, chroma, title contrast) |
+| Margin notes: your red-pen notes placed in free space (any column, event bodies), arrows to the event, always whole, draggable (spot remembered), placed by annealing in a worker | tested (2026-10-16, `7180685a`, `e1a55b97`) | e2e/marginnotes.spec.ts (property + captured real pages), e2e/notes.spec.ts (drag/reload/reset), textprobe law 5 in Chromium + real window (7 views) |
 | Goals in the sidebar (daily / weekly / long-term, kept by the app; ticks reset per day / week) | tested (2026-10-16, `f940f148`) | e2e/goals.spec.ts; Rust migration test |
 | Pessimistic focus score: deep work = Homework / Learning and Research / Enrichment only; clean stretches, interruptions, distraction, sleep duration/timing/regularity, late nights | tested (2026-10-16, `31c58084`) | e2e/focus.spec.ts (incl. gaming attempts); design/focus-score.md |
 

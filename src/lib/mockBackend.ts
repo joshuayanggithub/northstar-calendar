@@ -36,7 +36,7 @@ const events: CalendarEvent[] = [
   })(),
   (() => {
     const e = mk("primary", "Distraction: TikTok", at(-2, 21), at(-2, 21, 45));
-    e.description = "[DRILL] You are addicted to the scroll. Snap out of it.";
+    e.description = "[DRILL] Forty minutes of scrolling. Phone stays in the other room.";
     return e;
   })(),
   mk("primary", "Dentist", at(5, 9), at(5, 10)),

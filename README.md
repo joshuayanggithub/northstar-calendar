@@ -1,7 +1,7 @@
 # Main
 northstar is a rust-based, macOS, dekstop calendar app that centers around features maximizing your north star: long-term goals and productivity! the most popular calendar (gcal, notion) apps are 1. basic clunky - lacking basic UI/UX features that help when scheduling lots of events 2. lack true features that enable long-term planning and reflection of goals. 
 
-<img src="docs/media/northstar.gif" width="800" alt="A one-minute walkthrough on a made-up week: yesterday is reconciled (✓ on one event, then Review for the rest); the margin notes critique the week, a note of your own is added and dragged into place; Saturday is planned (a writing block forms a rabbet joint with a swim and a C-shape around a call); three quick tasks collapse into one clustered list">
+<img src="docs/media/northstar.gif" width="800" alt="A one-minute walkthrough on a made-up week: yesterday is reconciled (✓ on one event, then Review for the rest); notes in the margins critique the week, and one more is added to an event and dragged into place; Saturday is planned (a writing block forms a rabbet joint with a swim and a C-shape around a call); three quick tasks collapse into one clustered list">
 
 # Productivity add-ons
 ### 1. Reconcile Events
@@ -31,10 +31,10 @@ In google calendar its really hard to read overlapped events. Its a really simpl
 <img src="docs/media/overlaps-gcal.png" width="660" alt="The same events laid out the way Google Calendar does: side-by-side columns with cut-off titles">
   
 # Implementation
-northstar is a [Tauri 2](https://tauri.app/) app: a Rust core and a React + TypeScript interface in the system's WebKit view. It is local-first. Events live in a local SQLite database and sync both ways with Google Calendar; the goal classification and the annotations come from a local model (via [Ollama](https://ollama.com/)), so nothing else leaves the machine.
+northstar is a [Tauri 2](https://tauri.app/) app: a Rust core and a React + TypeScript interface in the system's WebKit view. It is local-first. Events live in a local SQLite database and sync both ways with Google Calendar; the goal classification comes from a local model (via [Ollama](https://ollama.com/)), so nothing else leaves the machine.
 
 - **Sync core** ([`crates/sync-core`](crates/sync-core), Rust): the SQLite store and the Google Calendar client. Incremental sync with sync tokens (a 410 triggers a full resync), writes guarded by ETags (`If-Match`; on a 412 the remote copy wins), echo suppression for its own writes, and the OAuth refresh token kept in the macOS keychain.
-- **App shell** ([`src-tauri`](src-tauri)): the commands the interface calls (events, calendars, goals, the journal), the sync thread, the menu bar item, and the supervisor ([`classify.rs`](src-tauri/src/classify.rs)) that asks the local model which events served a goal and writes the reflection notes.
+- **App shell** ([`src-tauri`](src-tauri)): the commands the interface calls (events, calendars, goals, the journal), the sync thread, the menu bar item, and the classifier ([`classify.rs`](src-tauri/src/classify.rs)) that asks the local model which events served a goal.
 - **Interface** ([`src`](src)): the week/day, month, agenda, insights and review views. The layout work is pure TypeScript in [`src/lib`](src/lib):
   - [`layout.ts`](src/lib/layout.ts) packs overlapping events into C-shapes, rabbet joints and clusters, never leaving horizontal gaps;
   - [`labelPlace.ts`](src/lib/labelPlace.ts) places each event's title and time inside the part of its shape that stays visible;
@@ -52,7 +52,7 @@ flowchart LR
   subgraph Shell["App shell: Tauri 2 (Rust)"]
     C["Commands"]
     T["Menu bar item"]
-    SUP["Supervisor<br/>goal classification · annotations"]
+    SUP["Classifier<br/>goal classification"]
   end
   subgraph Core["sync-core (Rust)"]
     DB[("SQLite")]

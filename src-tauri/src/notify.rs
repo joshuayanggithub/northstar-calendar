@@ -141,7 +141,7 @@ fn tray_events(db: &Db) -> Vec<(DateTime<Local>, DateTime<Local>, String, String
 
 pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let menu = MenuBuilder::new(app)
-        .item(&MenuItemBuilder::with_id("open", "Open Calendar").build(app)?)
+        .item(&MenuItemBuilder::with_id("open", "Open North Star").build(app)?)
         .item(&MenuItemBuilder::with_id("sync", "Sync now").build(app)?)
         .separator()
         .item(&MenuItemBuilder::with_id("quit", "Quit").build(app)?)
@@ -151,7 +151,7 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
         .icon_as_template(true)
-        .tooltip("Calendar")
+        .tooltip("North Star")
         .menu(&menu)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => {
@@ -277,7 +277,7 @@ fn build_menu(app: &AppHandle, rows: &[(String, String)], join: Option<&str>) ->
     if let Some(url) = join {
         b = b.item(&MenuItemBuilder::with_id(format!("join:{url}"), "Join next meeting").build(app)?);
     }
-    b.item(&MenuItemBuilder::with_id("open", "Open Calendar").build(app)?)
+    b.item(&MenuItemBuilder::with_id("open", "Open North Star").build(app)?)
         .item(&MenuItemBuilder::with_id("sync", "Sync now").build(app)?)
         .separator()
         .item(&MenuItemBuilder::with_id("quit", "Quit").build(app)?)

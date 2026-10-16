@@ -1087,16 +1087,19 @@ button {
   display: none;
 }
 
-/* past events (Notion): the calendar's hue stays, a bit darker, and the
-   text dims — never a gray-out, never transparency (layered events would
-   show through each other) */
+/* past events: everything that has ended, reviewed or not, is faded toward
+   the page enough to tell from what is still ahead at a glance, and no
+   further: the calendar's color stays (its hue, and over a quarter of its
+   chroma, in every Google color, both themes; e2e/pastfade.spec.ts). Never
+   a gray-out, never transparency (layered events would show through each
+   other). */
 .chip.past {
-  background: color-mix(in srgb, var(--cal) calc(var(--chip-tint) * 0.78), var(--bg));
-  color: color-mix(in srgb, var(--cal) 28%, var(--fg-secondary));
+  background: color-mix(in srgb, var(--cal) calc(var(--chip-tint) * 0.3), var(--bg));
+  color: color-mix(in srgb, var(--cal) 15%, var(--fg-secondary));
 }
 
 .chip-timed.chip-cfull.past {
-  background: color-mix(in srgb, var(--cal) calc((var(--chip-tint) - var(--slab-tint-drop)) * 0.78), var(--bg));
+  background: color-mix(in srgb, var(--cal) calc((var(--chip-tint) - var(--slab-tint-drop)) * 0.3), var(--bg));
 }
 
 .chip.past:hover,
@@ -2694,6 +2697,15 @@ h3.review-h {
   white-space: nowrap;
 }
 
+/* ended quick tasks fade like past chips */
+.cluster-row.past {
+  color: var(--fg-secondary);
+}
+
+.cluster-row.past .cluster-dot {
+  opacity: 0.35;
+}
+
 /* day-score hover breakdown */
 .score-wrap {
   position: relative;
@@ -2892,8 +2904,8 @@ h3.review-h {
 /* canceled: still its calendar's hue, a step dimmer than the past */
 .chip-timed.canceled,
 .chip-timed.chip-cfull.canceled {
-  background: color-mix(in srgb, var(--cal) calc(var(--chip-tint) * 0.5), var(--bg));
-  color: color-mix(in srgb, var(--cal) 20%, var(--fg-faint));
+  background: color-mix(in srgb, var(--cal) calc(var(--chip-tint) * 0.2), var(--bg));
+  color: color-mix(in srgb, var(--cal) 12%, var(--fg-faint));
 }
 
 /* confirmed events are just normal past events — no decoration */
@@ -2953,7 +2965,7 @@ h3.review-h {
   font-size: 11px;
 }
 
-/* the supervisor's red pen: notes written over the printed week, wherever
+/* the red pen: your notes written over the printed week, wherever
    there is room, with an arrow to their event (components/MarginNotes.tsx).
    Never clipped: lines are pre-wrapped by the placer. A halo in the page
    color keeps the ink readable over event bodies. */

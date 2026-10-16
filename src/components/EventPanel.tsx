@@ -980,8 +980,8 @@ export function EventPanel(props: {
   );
 }
 
-/** The red-pen note: the supervisor's line, editable in place for your own
- *  reflection. It commits on its own (Enter or clicking away; Esc cancels),
+/** The red-pen note: your own line of reflection on the event, edited in
+ *  place. It commits on its own (Enter or clicking away; Esc cancels),
  *  independent of the event form's Save, so closing the panel never loses
  *  it. One line: the note is stored as a single [DRILL] line. */
 function DrillNote(props: {
