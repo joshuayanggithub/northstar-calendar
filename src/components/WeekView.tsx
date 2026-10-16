@@ -148,10 +148,15 @@ export function WeekView(props: {
   // handler. A later wheel event resumes from the same partial-column offset.
   const dayClipRef = useRef<HTMLDivElement | null>(null);
   const [colPx, setColPx] = useState(0);
+  const colPxRef = useRef(1);
   useEffect(() => {
     const el = dayClipRef.current;
     if (!el) return;
-    const measure = () => setColPx(el.clientWidth / Math.max(1, days.length));
+    const measure = () => {
+      const width = Math.max(1, el.clientWidth / Math.max(1, days.length));
+      colPxRef.current = width;
+      setColPx(width);
+    };
     measure();
     const ro = new ResizeObserver(measure);
     ro.observe(el);
@@ -265,11 +270,22 @@ export function WeekView(props: {
   const headStripRef = useRef<HTMLDivElement | null>(null);
   const alldayStripRef = useRef<HTMLDivElement | null>(null);
   const colsStripRef = useRef<HTMLDivElement | null>(null);
-  const panRef = useRef({ acc: 0 });
+  // acc: px the content has been swiped past the RENDERED days[0].
+  // pending: day steps already requested from onPan but not rendered yet.
+  // acc only drops by a column in the commit that renders the shifted days
+  // (below); dropping it in the wheel handler painted one frame of the old
+  // days pulled back a whole column at every day boundary (the jitter).
+  const panRef = useRef({ acc: 0, pending: 0 });
+  const panFrameRef = useRef<number | null>(null);
   const extN = days.length + 2;
-  const applyStripTransform = useCallback(
+  const paintStripTransform = useCallback(
     () => {
-      const tx = `translateX(calc(${(-100 / extN).toFixed(4)}% - ${panRef.current.acc}px))`;
+      panFrameRef.current = null;
+      // one overscan column per side: while a requested shift is still
+      // rendering, hold at the overscan edge rather than show blank strip
+      const w = colPxRef.current;
+      const shown = Math.max(-w, Math.min(w, panRef.current.acc));
+      const tx = `translate3d(calc(${(-100 / extN).toFixed(4)}% - ${shown}px), 0, 0)`;
       for (const r of [headStripRef, alldayStripRef, colsStripRef]) {
         const el = r.current;
         if (!el) continue;
@@ -278,35 +294,83 @@ export function WeekView(props: {
     },
     [extN],
   );
+  const scheduleStripTransform = useCallback(() => {
+    if (panFrameRef.current != null) return;
+    panFrameRef.current = requestAnimationFrame(paintStripTransform);
+  }, [paintStripTransform]);
+  // The commit that renders a requested shift takes it out of acc, so the
+  // strip's new days and its offset reach the screen in the same frame.
+  const firstDay = days[0].getTime();
+  const shownFirstRef = useRef(firstDay);
   useLayoutEffect(() => {
-    applyStripTransform();
+    const prev = shownFirstRef.current;
+    shownFirstRef.current = firstDay;
+    if (prev === firstDay) return;
+    const pan = panRef.current;
+    let steps = 0;
+    if (pan.pending !== 0) {
+      const dir = Math.sign(pan.pending) as -1 | 1;
+      let d = new Date(prev);
+      for (let i = 1; i <= Math.abs(pan.pending); i++) {
+        d = adjacentDay(d, dir);
+        if (d.getTime() === firstDay) {
+          steps = i * dir;
+          break;
+        }
+      }
+    }
+    if (steps) {
+      pan.acc -= steps * colPxRef.current;
+      pan.pending -= steps;
+    } else {
+      // moved by navigation (Today, arrows, mini-calendar), not the swipe
+      pan.acc = 0;
+      pan.pending = 0;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [firstDay]);
+  useLayoutEffect(() => {
+    paintStripTransform();
   });
   useLayoutEffect(() => {
     panRef.current.acc = 0;
-    applyStripTransform();
-  }, [days.length, props.hideWeekends, applyStripTransform]);
+    panRef.current.pending = 0;
+    paintStripTransform();
+  }, [days.length, props.hideWeekends, paintStripTransform]);
+  useEffect(
+    () => () => {
+      if (panFrameRef.current != null) cancelAnimationFrame(panFrameRef.current);
+    },
+    [],
+  );
   useEffect(() => {
     const el = gridRef.current;
     const onPan = props.onPan;
     if (!el || !onPan) return;
-    const colW = () =>
-      Math.max(1, (dayClipRef.current?.getBoundingClientRect().width ?? el.clientWidth - gutterW) / Math.max(1, days.length));
     const onWheel = (e: WheelEvent) => {
       if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return; // vertical scroll
       e.preventDefault(); // keep WebKit from treating it as history nav
-      const w = colW();
-      panRef.current.acc += e.deltaX;
-      const crossings = Math.trunc(panRef.current.acc / w);
-      if (crossings !== 0) {
-        onPan(crossings);
-        panRef.current.acc -= crossings * w;
+      // Wheel handlers can arrive much faster than the display refresh. The
+      // old path forced a layout read and wrote three transforms for every
+      // packet, which is especially expensive in WebKitGTK. ResizeObserver
+      // owns the cached width; visual writes are coalesced to one per frame.
+      const unit = e.deltaMode === WheelEvent.DOM_DELTA_LINE
+        ? 16
+        : e.deltaMode === WheelEvent.DOM_DELTA_PAGE
+          ? el.clientWidth
+          : 1;
+      const pan = panRef.current;
+      pan.acc += e.deltaX * unit;
+      const want = Math.trunc(pan.acc / colPxRef.current);
+      if (want !== pan.pending) {
+        onPan(want - pan.pending);
+        pan.pending = want;
       }
-      applyStripTransform();
+      scheduleStripTransform();
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.onPan, days.length, gutterW, applyStripTransform]);
+  }, [props.onPan, scheduleStripTransform]);
 
   const nowDate = now();
   const todayIdx = days.findIndex((d) => isSameDay(d, nowDate));
@@ -347,11 +411,12 @@ export function WeekView(props: {
     }
   }
   const allDay = useMemo(() => events.filter((e) => e.all_day), [events]);
-  /** a new value whenever the chips may have moved: the margin notes re-place */
+  /** a new value whenever the chips may have moved, other than by a swipe
+   *  (MarginNotes gets the first day separately and carries notes along) */
   const notesLayoutKey = useMemo(
     () => ({}),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [timed, pxPerMin, calendars, reconTick, starTick, props.seamStyle, colPx, days[0]?.getTime(), days.length, props.hideWeekends],
+    [timed, pxPerMin, calendars, reconTick, starTick, props.seamStyle, colPx, days.length, props.hideWeekends],
   );
 
   const locate = useCallback(
@@ -757,7 +822,21 @@ export function WeekView(props: {
               width: `${(extN / days.length) * 100}%`,
             }}
           >
-            {days.map((d, di) => {
+            {[
+              ...days.map((d, di) => [d, di + 2, true] as const),
+              [beforeDay, 1, false] as const,
+              [afterDay, extN, false] as const,
+            ].map(([d, gridCol, live]) => {
+          // one list keyed by date: a header sliding between overscan and
+          // live keeps its element instead of remounting on every swipe step
+          if (!live) {
+            return (
+              <div key={d.toISOString()} className="day-head-x" style={{ gridColumn: gridCol, gridRow: 1 }}>
+                <span className="dow">{format(d, "EEE")}</span>
+                <span className="dnum">{d.getDate()}</span>
+              </div>
+            );
+          }
           // focus score for elapsed days; today scores the day so far
           let score: number | null = null;
           if (startOfDay(d) <= startOfDay(nowDate)) {
@@ -780,7 +859,7 @@ export function WeekView(props: {
             <div
               key={d.toISOString()}
               className={"day-head" + (isSameDay(d, nowDate) ? " today" : "")}
-              style={{ gridColumn: di + 2, gridRow: 1 }}
+              style={{ gridColumn: gridCol, gridRow: 1 }}
             >
               <span className="dow">{format(d, "EEE")}</span>
               <span className="dnum">{d.getDate()}</span>
@@ -806,19 +885,6 @@ export function WeekView(props: {
               )}
             </div>
           );
-            })}
-            {[-1, days.length].map((k) => {
-              const d = k === -1 ? beforeDay : afterDay;
-              return (
-                <div
-                  key={"ovs-" + k}
-                  className="day-head-x"
-                  style={{ gridColumn: k === -1 ? 1 : extN, gridRow: 1 }}
-                >
-                  <span className="dow">{format(d, "EEE")}</span>
-                  <span className="dnum">{d.getDate()}</span>
-                </div>
-              );
             })}
           </div>
         </div>
@@ -909,7 +975,7 @@ export function WeekView(props: {
                 const cell = renderCell();
                 return (
                   <div
-                    key={d.toISOString() + (live ? "" : "-ovs")}
+                    key={d.toISOString()}
                     style={{ gridColumn: gridCol, gridRow: 1, pointerEvents: live ? undefined : "none" }}
                     className="allday-slot"
                   >
@@ -1015,7 +1081,7 @@ export function WeekView(props: {
               live && props.draft && !props.draft.allDay && isSameDay(props.draft.start, day) && !drag;
             return (
               <div
-                key={day.toISOString() + (live ? "" : "-ovs")}
+                key={day.toISOString()}
                 className={"day-col" + (isSameDay(day, nowDate) ? " today" : "") + (day.getDay() === 0 || day.getDay() === 6 ? " weekend" : "")}
                 style={{ gridColumn: gridCol, gridRow: 1, pointerEvents: live ? undefined : "none" }}
                 onPointerDown={live ? (e) => startCreate(e, di) : undefined}
@@ -1313,9 +1379,20 @@ export function WeekView(props: {
             extN={extN}
             events={timed}
             layoutKey={notesLayoutKey}
+            firstDay={firstDay}
             pxPerMin={pxPerMin}
             keyOf={keyOf}
             onSelect={(e) => props.onSelect(e)}
+            onDelete={(e) => {
+              // Clicking the note selected its event. Once the note is gone,
+              // that selection must go too, or the next Delete/Backspace
+              // (a double press, key repeat) falls through to the global
+              // handler and deletes the event itself.
+              props.onSelect(null);
+              void props.actions.setNote(e, null).catch(() => {
+                // setNote reports the failure with a toast
+              });
+            }}
           />
           </div>
         </div>

@@ -27,8 +27,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 keyring = { version = "3", features = ["apple-native"] }
 iana-time-zone = "0.1"
-
-# W3C WebDriver endpoint inside the app (127.0.0.1:4445) so standard test
-# runners can drive the real WKWebView window. Debug builds only.
-[target.'cfg(debug_assertions)'.dependencies]
+# W3C WebDriver endpoint inside the app (127.0.0.1:4445). Cargo does not
+# support debug_assertions in target dependency tables; initialization is
+# still compiled behind #[cfg(debug_assertions)] in src/lib.rs.
 tauri-plugin-webdriver = "0.2.3"

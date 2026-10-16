@@ -262,7 +262,7 @@ fn load_drill(app: &AppHandle) -> HashMap<String, DrillEntry> {
 }
 
 /// the note text on an event, if any (the [DRILL] line)
-fn drill_line(desc: Option<&str>) -> Option<String> {
+pub(crate) fn drill_line(desc: Option<&str>) -> Option<String> {
     desc?
         .lines()
         .find(|l| l.trim_start().starts_with(DRILL_MARK))
@@ -344,7 +344,7 @@ fn clean_note(raw: &str, title: &str) -> Option<String> {
     Some(s)
 }
 
-fn strip_drill(desc: &str) -> String {
+pub(crate) fn strip_drill(desc: &str) -> String {
     desc.lines()
         .filter(|l| !l.trim_start().starts_with(DRILL_MARK))
         .collect::<Vec<_>>()

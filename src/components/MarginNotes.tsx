@@ -74,8 +74,12 @@ const union = (rs: Rect[]): Rect | null =>
       }
     : null;
 
-type Placed = { places: NotePlace[]; anchors: Map<string, Rect>; colW: number };
-const EMPTY: Placed = { places: [], anchors: new Map(), colW: 1 };
+/** chipX: each noted event's left edge when placed, so a swipe can carry the
+ *  note along with its event (followChips) */
+type Placed = { places: NotePlace[]; anchors: Map<string, Rect>; colW: number; chipX: Map<string, number> };
+const EMPTY: Placed = { places: [], anchors: new Map(), colW: 1, chipX: new Map() };
+/** how long the strip must rest after a swipe step before notes re-place */
+const PAN_SETTLE_MS = 160;
 
 /** one placement worker for the app; null where workers aren't available */
 let worker: Worker | null | undefined;
@@ -97,11 +101,14 @@ export function MarginNotes(props: {
   /** columns in the strip, overscan included */
   extN: number;
   events: CalendarEvent[];
-  /** changes whenever the chips may have moved */
+  /** changes whenever the chips may have moved, except by a swipe */
   layoutKey: unknown;
+  /** the first visible day; changing alone means the strip was swiped */
+  firstDay: number;
   pxPerMin: number;
   keyOf: (e: CalendarEvent) => string;
   onSelect: (e: CalendarEvent) => void;
+  onDelete: (e: CalendarEvent) => void;
 }) {
   const layerRef = useRef<HTMLDivElement>(null);
   const [placed, setPlaced] = useState<Placed>(EMPTY);
@@ -130,7 +137,47 @@ export function MarginNotes(props: {
   }
   const noteSig = [...notesOf].map(([k, v]) => k + "\u0001" + v.text).join("\u0002");
 
-  useLayoutEffect(() => {
+  /** A swipe step re-renders the strip one column over. Carry each placed
+   *  note by exactly as far as its event's chip moved, in the same commit,
+   *  instead of clearing every note and re-measuring the whole week (which
+   *  blanked the notes for most of a swipe and cost a full layout read per
+   *  day). Notes whose event left the strip go; the full placement runs once
+   *  the strip comes to rest. */
+  const followChips = () => {
+    const layer = layerRef.current;
+    const strip = props.stripRef.current;
+    if (!layer || !strip || !placed.places.length) return;
+    const L = layer.getBoundingClientRect();
+    const dxOf = new Map<string, number>();
+    const chipX = new Map<string, number>();
+    for (const p of placed.places) {
+      const was = placed.chipX.get(p.key);
+      const el = strip.querySelector<HTMLElement>(`.chip-timed[data-ek="${CSS.escape(p.key)}"], .cluster-block [data-ek="${CSS.escape(p.key)}"]`);
+      if (was === undefined || !el) continue;
+      const x = el.getBoundingClientRect().left - L.left;
+      dxOf.set(p.key, x - was);
+      chipX.set(p.key, x);
+    }
+    const shift = (r: Rect, dx: number): Rect => ({ x0: r.x0 + dx, y0: r.y0, x1: r.x1 + dx, y1: r.y1 });
+    const anchors = new Map<string, Rect>();
+    for (const [k, a] of placed.anchors) if (dxOf.has(k)) anchors.set(k, shift(a, dxOf.get(k)!));
+    setPlaced({
+      ...placed,
+      anchors,
+      chipX,
+      places: placed.places
+        .filter((p) => dxOf.has(p.key))
+        .map((p) => {
+          const dx = dxOf.get(p.key)!;
+          return dx ? { ...p, x: p.x + dx, box: shift(p.box, dx) } : p;
+        }),
+    });
+  };
+
+  /** measure the page and place every note (off-thread when possible).
+   *  keepShown: the notes on screen already point at the right events (they
+   *  followed a swipe), so leave them up until the new spots are in. */
+  const place = (keepShown: boolean) => {
     const layer = layerRef.current;
     const strip = props.stripRef.current;
     if (!layer || !strip) return;
@@ -206,6 +253,7 @@ export function MarginNotes(props: {
     });
 
     const anchors = new Map<string, Rect>();
+    const chipX = new Map<string, number>();
     const specs: NoteSpec[] = [];
     for (const [key, { text: note }] of notesOf) {
       const chip = chips.find((c) => c.key === key && titles.some((t) => t.key === key));
@@ -216,6 +264,7 @@ export function MarginNotes(props: {
       for (const o of chips) if (o.col === chip.col && o.z > chip.z && o.key !== key) own = subtract(own, o.r);
       const pin = notePin(key);
       anchors.set(key, anchor);
+      chipX.set(key, chip.el.getBoundingClientRect().left - L.left);
       specs.push({
         key,
         words: noteWords(note),
@@ -247,7 +296,7 @@ export function MarginNotes(props: {
     if (page === last.page && notesSig === last.notes) return;
     // the page itself changed (another week, a zoom): old notes would point
     // at the wrong things, so they go until the new spots are in
-    if (page !== last.page && placed.places.length) setPlaced(EMPTY);
+    if (!keepShown && page !== last.page && placed.places.length) setPlaced(EMPTY);
     last.page = page;
     last.notes = notesSig;
     const seq = ++last.seq;
@@ -261,7 +310,7 @@ export function MarginNotes(props: {
       if (seq !== lastRef.current.seq) return; // a newer page is on its way
       if (layerRef.current) layerRef.current.dataset.pending = "0";
       (window as unknown as { __marginMs?: number }).__marginMs = ms;
-      setPlaced({ places, anchors, colW });
+      setPlaced({ places, anchors, colW, chipX });
     };
     const wk = placer();
     if (wk) {
@@ -277,8 +326,38 @@ export function MarginNotes(props: {
       const t0 = performance.now();
       done(placeNotes(field, specs, (x) => w[x] ?? measure(x)), performance.now() - t0);
     }
+  };
+  // the settle timer calls the newest render's place()
+  const placeRef = useRef(place);
+  placeRef.current = place;
+  const settleRef = useRef<number | null>(null);
+  const depsRef = useRef<unknown[] | null>(null);
+  useLayoutEffect(() => {
+    const deps = [props.layoutKey, props.days, props.pxPerMin, noteSig, pinTick, fontTick];
+    const prev = depsRef.current;
+    depsRef.current = deps;
+    if (settleRef.current != null) {
+      clearTimeout(settleRef.current);
+      settleRef.current = null;
+    }
+    if (prev && deps.every((d, i) => d === prev[i])) {
+      // only firstDay moved: a swipe step
+      followChips();
+      settleRef.current = window.setTimeout(() => {
+        settleRef.current = null;
+        placeRef.current(true);
+      }, PAN_SETTLE_MS);
+      return;
+    }
+    place(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.layoutKey, props.days, props.pxPerMin, noteSig, pinTick, fontTick]);
+  }, [props.layoutKey, props.days, props.pxPerMin, noteSig, pinTick, fontTick, props.firstDay]);
+  useLayoutEffect(
+    () => () => {
+      if (settleRef.current != null) clearTimeout(settleRef.current);
+    },
+    [],
+  );
 
   const startDrag = (pe: React.PointerEvent<HTMLDivElement>, p: NotePlace) => {
     if (pe.button !== 0) return;
@@ -330,7 +409,12 @@ export function MarginNotes(props: {
         });
       } else if (!moved) {
         const n = notesOf.get(p.key);
-        if (n) props.onSelect(n.e);
+        if (n) {
+          // pointerdown is prevented so a drag cannot start an event drag;
+          // restore focus explicitly so Delete belongs to the annotation.
+          el.focus({ preventScroll: true });
+          props.onSelect(n.e);
+        }
       }
     };
     el.addEventListener("pointermove", move);
@@ -372,6 +456,9 @@ export function MarginNotes(props: {
             data-testid="margin-note"
             data-ek={p.key}
             data-inside={p.inside ? 1 : 0}
+            tabIndex={0}
+            role="button"
+            aria-label={`Annotation for ${notesOf.get(p.key)?.e.summary ?? "event"}`}
             title={p.pinned ? "Drag to move · double-click to let it find its own spot" : "Drag to move"}
             style={{
               left: p.x + (d?.dx ?? 0),
@@ -383,6 +470,13 @@ export function MarginNotes(props: {
               transform: p.angle ? `rotate(${p.angle}deg)` : undefined,
             }}
             onPointerDown={(pe) => startDrag(pe, p)}
+            onKeyDown={(e) => {
+              if (e.key !== "Delete" && e.key !== "Backspace") return;
+              e.preventDefault();
+              e.stopPropagation();
+              const n = notesOf.get(p.key);
+              if (n) props.onDelete(n.e);
+            }}
             onDoubleClick={(e) => {
               e.stopPropagation();
               setNotePin(p.key, null);

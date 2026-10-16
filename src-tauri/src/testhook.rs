@@ -116,7 +116,17 @@ fn dispatch(app: &AppHandle, req: &Value) -> Result<Value, String> {
         }
         "pending_ops" => {
             let ops = state.db(|db| db.list_pending_ops()).map_err(|e| e.to_string())?;
-            Ok(json!({"count": ops.len()}))
+            // what would go to Google, so E2E can check the exact PATCH body
+            let list: Vec<_> = ops
+                .iter()
+                .map(|o| json!({
+                    "kind": o.kind.as_str(),
+                    "calendar_id": o.calendar_id,
+                    "event_id": o.event_id,
+                    "payload": o.payload,
+                }))
+                .collect();
+            Ok(json!({"count": ops.len(), "ops": list}))
         }
         "add_calendar" => {
             let name_or_id = req["name_or_id"].as_str().ok_or("missing name_or_id")?.to_string();

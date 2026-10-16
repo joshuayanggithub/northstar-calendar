@@ -161,6 +161,72 @@ browser server now runs independently. The 15:59 run had one transient
   the live calendar snapshot; screenshots reviewed (week, zoomed, narrow,
   9-day).
 
+## Root-cause pass — 2026-10-16 (fixed in the working tree, NOT committed yet)
+
+Method: `.claude/skills/bug-root-cause/SKILL.md`. Every item was reproduced
+before fixing: in the real Linux WebKitGTK window on the HEAD code
+(`e66be3e`), then re-run with the same probe on the fix. When committed, move
+these to FEATURES.md with the hash.
+
+- [x] **Delete on an annotation deleted its event.** Clicking a margin note
+  `preventDefault`s pointerdown (so no focus) and selects the event; Delete
+  then hit App's global handler → `bulkRemove(selected)`. Fix: the note takes
+  focus and handles Delete/Backspace itself, and clears the selection so a
+  second press can't fall through (MarginNotes.tsx, WeekView.tsx).
+- [x] **Editor ✕ didn't remove the annotation.** Three causes: (1) EventPanel
+  reset every field from the snapshot it opened with whenever `calendars`
+  changed identity, which every db-changed does → the erased note came back;
+  (2) `google_body` omits `description` when None, so the PATCH left Google's
+  note in place and the push response wrote it back locally (location had the
+  same bug); (3) two queued edits to one event both carried the pre-edit etag,
+  so the second 412'd against our own first and was dropped "remote wins".
+  Fix: reset only on a new event; PATCH sends `null` for cleared
+  description/location; new atomic `set_event_note` command (read-modify-write
+  on the stored description, PATCHes only `description`); panel follows the
+  stored note; sync engine rebases queued ops onto the etag our own push
+  produced and holds later ops for an event whose earlier op failed.
+- [x] **Calendar flashed on every annotation delete.** The note vanished
+  (local write) then came back (push echo with Google's untouched copy, see
+  above) and the editor re-ran its full reset. Verified on WebKitGTK: deleting
+  a note now removes exactly that note; no event chip is torn down.
+- [x] **Horizontal scroll laggy/jittery.** The wheel handler dropped the
+  offset by a column as soon as it asked for a day shift, before React
+  rendered the shifted days → one frame of the old days pulled back a column
+  at every boundary (native HEAD: 9 backward jumps in 9.7 days; now 0). Also:
+  overscan columns keyed `date-ovs` remounted at each step; MarginNotes
+  cleared every note and re-measured the week on each step; the sidebar
+  re-rendered every step (inline callbacks). Fix: offset only drops in the
+  commit that renders the shift; date-only keys; notes follow their chips and
+  re-place once the swipe settles; memoized sidebar.
+- [x] **Recurring edits/deletes took ~5 s; the series vanished, then
+  respawned.** Series commands were sync Tauri commands, which run on the
+  main thread → each Google round trip froze the window. Series changes never
+  touched the local store, and "this and following" was two calls (truncate,
+  then create) that each kicked a sync, so a pass pulled the old series'
+  cancelled tail before the new series existed. Fix: async commands
+  (`off_main`), one-step `update_series_master(…, destination)` and
+  `split_series`, optimistic local apply (delete tail / move / rename), the
+  scope dialog opens at once (master loads behind it), a per-calendar pull
+  gate, priority pull of the touched calendars, pulls applied atomically (all
+  pages, one transaction; also fixes the 410 resync's empty window), and the
+  pushed master's placeholder swapped for its instances in that transaction.
+  Also fixed: "All events" copied the edited occurrence's red-pen note onto
+  every instance.
+- [ ] **Verify against live Google on the Mac**: series edit/split/move and an
+  annotation erase with sync on (sandbox has sync off, so the PATCH payloads
+  were checked in the queue, not on Google). `e2e/live_series_*.py` cover the
+  series paths.
+- [ ] **Linux visual baselines**: `visual:` snapshot tests only have
+  `-darwin.png` baselines; a Linux run writes `-linux.png` files. Review and
+  commit them, or keep visual runs on the Mac.
+- [ ] Re-run `npm run test:e2e:app` on macOS (sandbox_app.sh / in_app.sh
+  changed for Linux).
+
+Linux E2E (new): `npm run setup:e2e:linux` once (sudo apt), then
+`npm run test:e2e:app` — sandboxed real WebKitGTK window under Xvfb,
+`real_window.sh` + `native_regressions.py`. `CAL_E2E_DISPLAY=$DISPLAY` shows
+the window on an existing display (e.g. SSH X forwarding) instead.
+
 ## Ready to build (no decision needed)
 
 - [ ] Stars + reconciliation + classifications sync via Google

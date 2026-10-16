@@ -9,6 +9,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "test:e2e": "PLAYWRIGHT_BROWSERS_PATH=0 playwright test",
+    "test:e2e:app": "bash e2e/in_app.sh",
+    "setup:e2e:linux": "bash e2e/setup_linux.sh",
     "test:rust": "cargo test -p sync-core"
   },
   "dependencies": {

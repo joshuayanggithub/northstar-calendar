@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import {
   addMonths,
   format,
@@ -261,7 +261,9 @@ function GoalsSection(props: {
   );
 }
 
-export function Sidebar(props: {
+// Memoized: App re-renders on every swipe step, but nothing the sidebar
+// shows depends on the week view's pan offset.
+export const Sidebar = memo(function Sidebar(props: {
   backend: Backend | null;
   calendars: Calendar[];
   anchor: Date;
@@ -403,4 +405,4 @@ export function Sidebar(props: {
       {!runningInTauri && <div className="mock-badge">browser mock mode</div>}
     </aside>
   );
-}
+});

@@ -42,6 +42,10 @@ const KEYRING_ACCOUNT: &str = "google_refresh_token";
 
 pub enum SyncKick {
     Now,
+    /// A change touched these calendars: pull them first (a short pass), so
+    /// the result shows without waiting on every other calendar, then run
+    /// the regular full pass.
+    Calendars(Vec<String>),
 }
 
 /// Dev-build token store: a 0600 file in the app data dir. Used in debug
@@ -107,6 +111,12 @@ pub struct AppState {
     pub oauth_config: OAuthConfig,
     access: Arc<Mutex<Option<AccessToken>>>,
     kick_tx: Sender<SyncKick>,
+    /// Held by the sync thread across each calendar's pull, and by a
+    /// recurring-series change for its Google calls + local apply. A pull
+    /// that ran between a split's truncate and its new series (or an edit's
+    /// patch and its move) caught the series half-changed: gone from view
+    /// until the next pass.
+    pub sync_gate: Arc<Mutex<()>>,
 }
 
 impl AppState {
@@ -119,7 +129,7 @@ impl AppState {
             info!("SANDBOX: data in {}, Google sync off", data_dir.display());
         }
 
-        let oauth_config = load_oauth_config()?;
+        let oauth_config = load_oauth_config(sandboxed)?;
         let db_path = data_dir.join("calendar.db");
         info!("opening db at {}", db_path.display());
         let db = Db::open(&db_path)?;
@@ -141,6 +151,7 @@ impl AppState {
         let tokens: Arc<dyn TokenStore> = Arc::new(KeychainTokens);
         let access: Arc<Mutex<Option<AccessToken>>> = Arc::new(Mutex::new(None));
         let (kick_tx, kick_rx) = std::sync::mpsc::channel();
+        let sync_gate = Arc::new(Mutex::new(()));
 
         if !sandboxed {
             spawn_sync_thread(
@@ -150,6 +161,7 @@ impl AppState {
                 tokens.clone(),
                 access.clone(),
                 kick_rx,
+                sync_gate.clone(),
             );
         }
 
@@ -160,6 +172,7 @@ impl AppState {
             oauth_config,
             access,
             kick_tx,
+            sync_gate,
         })
     }
 
@@ -202,6 +215,7 @@ fn spawn_sync_thread(
     tokens: Arc<dyn TokenStore>,
     access: Arc<Mutex<Option<AccessToken>>>,
     kick_rx: Receiver<SyncKick>,
+    gate: Arc<Mutex<()>>,
 ) {
     std::thread::Builder::new()
         .name("sync".into())
@@ -213,12 +227,24 @@ fn spawn_sync_thread(
                     return;
                 }
             };
+            let mut first: Vec<String> = Vec::new();
             loop {
                 if tokens.get_refresh_token().is_some() {
                     match current_access_token(&config, tokens.as_ref(), &access) {
                         Ok(token) => {
                             let client = GoogleClient::new(token);
-                            let engine = SyncEngine::new(&db, &client);
+                            let engine = SyncEngine::new(&db, &client).with_pull_gate(&gate);
+                            if !first.is_empty() {
+                                match engine.sync_calendars(&first) {
+                                    Ok(report) => {
+                                        if report.pushed + report.pulled + report.conflicts > 0 {
+                                            let _ = app.emit("db-changed", ());
+                                        }
+                                    }
+                                    Err(e) => warn!("priority sync failed: {e}"),
+                                }
+                                first.clear();
+                            }
                             match engine.sync_once() {
                                 Ok(report) => {
                                     if report.pushed + report.pulled + report.conflicts > 0 {
@@ -240,10 +266,22 @@ fn spawn_sync_thread(
                     }
                 }
                 // Wait for the next interval or an explicit kick.
+                let mut take = |kick: SyncKick| {
+                    if let SyncKick::Calendars(ids) = kick {
+                        for id in ids {
+                            if !first.contains(&id) {
+                                first.push(id);
+                            }
+                        }
+                    }
+                };
                 match kick_rx.recv_timeout(SYNC_INTERVAL) {
-                    Ok(SyncKick::Now) => {
+                    Ok(kick) => {
+                        take(kick);
                         // Drain coalesced kicks so burst edits cause one sync.
-                        while kick_rx.try_recv().is_ok() {}
+                        while let Ok(kick) = kick_rx.try_recv() {
+                            take(kick);
+                        }
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
@@ -281,7 +319,7 @@ fn current_access_token(
 
 /// Dev-time OAuth config discovery: CALENDAR_APP_OAUTH env var, or
 /// .oauth.local.json walking up from the executable/cwd.
-fn load_oauth_config() -> std::result::Result<OAuthConfig, Box<dyn std::error::Error>> {
+fn load_oauth_config(sandboxed: bool) -> std::result::Result<OAuthConfig, Box<dyn std::error::Error>> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(p) = std::env::var("CALENDAR_APP_OAUTH") {
         candidates.push(PathBuf::from(p));
@@ -305,6 +343,16 @@ fn load_oauth_config() -> std::result::Result<OAuthConfig, Box<dyn std::error::E
                 return Ok(OAuthConfig { client_id, client_secret });
             }
         }
+    }
+    // A sandbox never starts the sync thread and never opens OAuth. Requiring
+    // a developer secret here prevented isolated native E2E on fresh Linux
+    // machines even though those credentials could not be used.
+    if sandboxed {
+        info!("SANDBOX: no OAuth config; using disabled test placeholder");
+        return Ok(OAuthConfig {
+            client_id: "sandbox-disabled".into(),
+            client_secret: String::new(),
+        });
     }
     Err("no .oauth.local.json found (set CALENDAR_APP_OAUTH or place it at the repo root)".into())
 }
