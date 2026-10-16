@@ -29,7 +29,7 @@ Calendar account, manual = user confirms in the running app.
 | Day view | tested (e2e) | e2e |
 | Agenda/schedule list (List view, kept per user preference) | tested (e2e) | e2e |
 | Jump to today / date navigation (t, arrows) | tested (e2e) | e2e |
-| Continuous horizontal pan in week and custom day-count views | tested (2026-10-15, `03b55d3`) | e2e step-by-step + native WKWebView across day boundaries with zero backward steps; partial swipes stay put; hidden weekends stay five business days |
+| Continuous horizontal pan in week and custom day-count views | tested (2026-10-16, `03b55d3`, `237f33d`) | e2e step-by-step + native WKWebView across day boundaries with zero backward steps; partial swipes stay put; hidden weekends stay five business days; annotations remain rigid during and after settlement |
 | Mini-month navigator in sidebar | tested (e2e) | e2e |
 | Calendar visibility toggles (hover Hide/Show affordance, Google selected-flag seeding) | tested (e2e) | e2e |
 | Notion chip anatomy: inline times, wrapped titles, capsule accent, ghosted past, weekend wash, tz gutter label | tested | e2e both themes |
@@ -70,7 +70,7 @@ Calendar account, manual = user confirms in the running app.
 | Calendar colors = Google Calendar's displayed palette (legacy API hex mapped), tinted translucent | tested (2026-10-16, `10efe30e`) | e2e/color.spec.ts; checked against the live Google sidebar |
 | Multi-select drag: shift-click / shift-drag several events, drag one, all move (ghost each, wall-clock shift, selection kept) | tested (2026-10-16, `d3166cdd`) | e2e/groupdrag.spec.ts |
 | Past events faded: every ended event (unconfirmed, sleep, all-day, clustered too) at 30% of its calendar's tint, hue kept | tested (2026-10-16, `04135f78`, `8ef1d0f7`) | e2e/pastfade.spec.ts (all 24 Google colors, both themes: past/future gap, hue, chroma, title contrast) |
-| Margin notes: your red-pen notes placed in free space (any column, event bodies), arrows to the event, always whole, draggable (spot remembered), placed by annealing in a worker | tested (2026-10-16, `7180685a`, `e1a55b97`) | e2e/marginnotes.spec.ts (property + captured real pages), e2e/notes.spec.ts (drag/reload/reset), textprobe law 5 in Chromium + real window (7 views) |
+| Margin notes: your red-pen notes placed in free space (any column, event bodies), arrows to the event, always whole, draggable (spot remembered), placed by annealing in a worker | tested (2026-10-16, `7180685a`, `e1a55b97`, `237f33d`) | e2e/marginnotes.spec.ts (property + captured real pages), e2e/notes.spec.ts (drag/reload/reset/delete/no-flash/swipe rigidity), textprobe law 5 in Chromium + real window (7 views) |
 | Goals in the sidebar (daily / weekly / long-term, kept by the app; ticks reset per day / week) | tested (2026-10-16, `f940f148`) | e2e/goals.spec.ts; Rust migration test |
 | Pessimistic focus score: deep work = Homework / Learning and Research / Enrichment only; clean stretches, interruptions, distraction, sleep duration/timing/regularity, late nights | tested (2026-10-16, `31c58084`) | e2e/focus.spec.ts (incl. gaming attempts); design/focus-score.md |
 

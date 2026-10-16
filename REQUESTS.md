@@ -7,7 +7,7 @@ tracking: FEATURES.md for the parity matrix, e2e/QA-BACKLOG.md for QA items.)
 |---|---|---|
 | 1 | Notion Calendar as UI ground truth, Google Calendar for features | done (design/references/) |
 | 2 | List view kept as a selectable view | done |
-| 3 | Rigorous end-to-end UX testing vs ground truth | ongoing (212-case full suite passed at 22:59 UTC; native WKWebView/WebDriver and live Google probes; 15-minute runs scheduled through 2026-10-16 02:59:44 UTC) |
+| 3 | Rigorous end-to-end UX testing vs ground truth | ongoing (Linux full suite: 269 passed, 62 intentional skips, zero failures; both-theme Linux baselines reviewed in `2d122b3`; 15-minute stress continuation scheduled through 2026-10-16 19:03 PT) |
 | 4 | Fix drag text-selection, panel placement, calendar show/hide, add/subscribe calendars | done |
 | 5 | Read-only calendars (subscribed feeds not movable/editable) | done |
 | 6 | Recurring edit scope popup (this / this+following / all) | done (`a72e439` also enables safe fixed-count splits; native Google COUNT=3 round trip passed) |
@@ -55,7 +55,7 @@ tracking: FEATURES.md for the parity matrix, e2e/QA-BACKLOG.md for QA items.)
 | 48 | Reorient title/time to fit the odd shapes the joints and C-shapes leave (step pockets, sideways spine time), verified with screenshots | done `2fc384d8` (CAPTURE=1 e2e/capture.spec.ts for 2x column crops) |
 | 49 | Test in the real app window (not only Chromium) | done `7abd0889` (debug `CAL_SANDBOX` mode + e2e/sandbox_app.sh + e2e/realwindow.spec.ts; never touches the live DB or Google) |
 | 50 | Titles extend to multiple lines; title + time block keeps one neat indent | done `7abd0889` (aligned-block placement, alignment laws in the probe) |
-| 51 | Keep investigating calendar scrolling lag during the extended QA run | ongoing (`03b55d3` fixes backward springback and reduces wheel work; dense production-browser probe and native pan probe passed) |
+| 51 | Keep investigating calendar scrolling lag during the extended QA run | ongoing (`03b55d3` fixes backward springback and reduces wheel work; `237f33d` removes the remaining 66px post-settle annotation snap; dense browser/native probes and the 269-test suite pass) |
 | 52 | Recurring “All events” should save timed/all-day conversion and a later instance's date change | done `03b55d3` (mock E2E + disposable live two-occurrence Google conversion both ways) |
 | 51 | Reconcile: "didn't happen" (✕) deletes the event; "canceled" = skipped but kept on the calendar (struck through) | done `d47e56b1` (all surfaces: hover ✕, cluster rows, context menu, panel, R triage X/C; ⌘Z restores a delete) |
 | 52 | Goal-driven work must stand out: animated gold shine ring (like a shine-border button), bold title, no star glyphs | done `d2e3011f` (ring follows joints/C-shapes; suggestions get a still, quieter ring) |

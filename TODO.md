@@ -108,12 +108,10 @@ browser server now runs independently. The 15:59 run had one transient
   2 new occurrences through the native editor, then both masters were
   deleted and the queue drained. The first occurrence edits the original
   master directly. Committed `a72e439`.
-- [ ] Continue the 15-minute full-suite stress loop and inspect every failure
-  through the 02:59:44 UTC deadline. The 22:29 run had two assertions based
-  on the previous spring behavior; those tests were updated and focused
-  reruns passed. The 22:44 full run passed 210/210 and the 22:59 run passed
-  212/212. The next run includes the fixed-count deletion and first-instance
-  regressions added during the 22:59 run.
+- [ ] Continue the 15-minute full-suite stress loop and inspect every failure.
+  A fresh Linux continuation is running through 2026-10-16 19:03 PT; results
+  are preserved under `logs/stress-2026-10-17/`. Before it began, the complete
+  suite passed 269 with 62 intentional skips and zero failures.
 
 ## Overlap text placement — 2026-10-15 evening (committed `2fc384d8`)
 
@@ -216,9 +214,15 @@ these to FEATURES.md with the hash.
   annotation erase with sync on (sandbox has sync off, so the PATCH payloads
   were checked in the queue, not on Google). `e2e/live_series_*.py` cover the
   series paths.
-- [ ] **Linux visual baselines**: `visual:` snapshot tests only have
-  `-darwin.png` baselines; a Linux run writes `-linux.png` files. Review and
-  commit them, or keep visual runs on the Mac.
+- [x] **Linux visual baselines**: reviewed at original resolution in both
+  themes and committed as `2d122b3`; all 12 visual checks pass on Linux.
+- [x] **Annotation snapped a column after horizontal scrolling stopped.**
+  During the swipe each note followed its chip exactly, but 160 ms after the
+  last wheel event the settled worker result replaced surviving notes with a
+  newly chosen position (the reproduced jump was 66 px). Settlement now keeps
+  each surviving note's event-relative position while using fresh placement
+  only for notes entering the viewport (`237f33d`). The mutation-level
+  regression and the full 269-test browser suite pass.
 - [x] Re-run `npm run test:e2e:app` on macOS (`fd49d3f9`): stop now kills
   the whole app tree (npm alone left it up, and the next run reused it), the
   presence check accepts a cluster row, async scripts go through the hook
@@ -251,6 +255,8 @@ Linux E2E (new): `npm run setup:e2e:linux` once (sudo apt), then
 `npm run test:e2e:app` — sandboxed real WebKitGTK window under Xvfb,
 `real_window.sh` + `native_regressions.py`. `CAL_E2E_DISPLAY=$DISPLAY` shows
 the window on an existing display (e.g. SSH X forwarding) instead.
+On this Linux host, GTK3/WebKitGTK 4.1 development packages are still absent
+and `sudo -n` requires a password, so native setup cannot finish unattended.
 
 ## Ready to build (no decision needed)
 
@@ -273,6 +279,8 @@ the window on an existing display (e.g. SSH X forwarding) instead.
 
 ## Shipped log (newest first)
 
+- `2d122b3` Reviewed Linux visual baselines for both themes
+- `237f33d` Margin notes stay rigid after swipe settlement; drag E2E fixtures are host-timezone independent
 - `4352f531` App icon "Polaris is today" + north-star menu bar glyph
 - `9e9f91a1` Drag day switching by sideways travel with slack (no more accidental day hops)
 - `d3166cdd` Group drag: all selected events move together with live ghosts
