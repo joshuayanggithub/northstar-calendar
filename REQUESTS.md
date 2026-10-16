@@ -77,3 +77,6 @@ tracking: FEATURES.md for the parity matrix, e2e/QA-BACKLOG.md for QA items.)
 | 68 | Demo persona: no ML or the author's interests; Rosa, a freelance writer (NYT bestseller, Pulitzer goals) | done `a2da639e` |
 | 69 | Video: overlap fixes side by side with Google's layout; less generic type; a self-reflection caption | done `b642605f` |
 | 70 | Publish to github.com/joshuayanggithub/northstar-calendar | done (clean single-commit snapshot after a personal-data scrub: `5f863ac5`, `bdd18605`) |
+| 71 | A 10-second 1080p video of a real session: the week, reconcile, plan a day (C-shape, rabbet joint), cluster | done `814a0239` (replaced by 73) |
+| 72 | README images sized to the text; feature numbering fixed | done `c63d152b` |
+| 73 | Video as a walkthrough you can follow (no 10-second limit), with annotations right after reconcile; screenshots a bit larger | done `7c11c824` (one minute, fake-clock recording; the Review pill no longer wraps the title) |

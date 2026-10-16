@@ -1,8 +1,10 @@
 # northstar video
 
-The 10-second demo at the top of the app's README: a real session in the app
-on a made-up week, recorded frame by frame, then cut (camera, labels,
-captions) with [Remotion](https://www.remotion.dev/) and its agent skills
+The one-minute walkthrough at the top of the app's README: a real session in
+the app on a made-up week (reconcile, annotations, plan a day, quick tasks),
+recorded frame by frame on a fake clock so everything plays at its real
+speed, then cut (camera, labels, captions) with
+[Remotion](https://www.remotion.dev/) and its agent skills
 (`npx skills add remotion-dev/skills --agent claude-code --skill '*' --yes`).
 
 ```bash

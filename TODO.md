@@ -182,6 +182,9 @@ browser server now runs independently. The 15:59 run had one transient
 
 ## Shipped log (newest first)
 
+- `7c11c824` README video: one-minute walkthrough (reconcile, annotations, plan a day,
+  quick tasks); Review pill keeps the title on one line; larger README shots
+- `c63d152b` README images sized to the text, numbering fixed; `814a0239` 10-second video
 - `bdd18605` Mock data neutralised; `5f863ac5` personal data kept out of the repo
 - `b642605f` README video (side-by-side overlaps, editorial type); `a2da639e` README + media
 - `f940f148` Goals live in the app (daily / weekly / long-term), calendar-list styling

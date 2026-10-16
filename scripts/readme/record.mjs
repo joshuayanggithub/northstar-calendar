@@ -1,24 +1,37 @@
 // The README video's footage: a real session in the app on the made-up
-// week (scripts/readme/demo.mjs), captured frame by frame at 30 fps so the
-// cursor moves smoothly and every frame is sharp (3840x2160 for a 1080p cut
-// with room to zoom). The session: reconcile yesterday, then plan Saturday
-// (a call, then a writing block over it and the morning swim: C-shape and
-// rabbet joint), then three quick tasks that collapse into a cluster.
+// week (scripts/readme/demo.mjs), captured frame by frame at 30 fps
+// (3840x2160, for a 1080p cut with room to zoom). The page runs on a fake
+// clock that moves one frame per screenshot, and its CSS animations are
+// slowed to match, so hovers, toasts and transitions play at their real
+// speed however long a screenshot takes. A walkthrough, at a pace you can
+// follow:
+//   1. reconcile yesterday: ✓ on one event, then Review for the rest
+//   2. annotations: the model's notes, a note of your own, dragged into place
+//   3. plan Saturday: a call, then a writing block over it and the morning
+//      swim (C-shape and rabbet joint)
+//   4. three quick tasks that collapse into one cluster
 //   PLAYWRIGHT_BROWSERS_PATH=0 node scripts/readme/record.mjs
-// Writes video/public/rec/NNNN.jpg and video/src/timeline.json.
+// Writes video/public/rec/NNNN.jpg and video/src/timeline.json. DRY=1 only
+// saves a still at each mark (to $TMPDIR/rec-dry), for checking the script.
 import { chromium } from "playwright";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { openDemo } from "./page.mjs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { openDemo, settle } from "./page.mjs";
 
-const OUT = "video/public/rec";
+const DRY = !!process.env.DRY;
+const FPS = 30;
+const OUT = DRY ? join(process.env.TMPDIR ?? tmpdir(), "rec-dry") : "video/public/rec";
 rmSync(OUT, { recursive: true, force: true });
 mkdirSync(OUT, { recursive: true });
 
+const vw = 1600;
+const vh = 900;
 const b = await chromium.launch();
-const page = await openDemo(b, { width: 1600, height: 900, dpr: 2.4 });
+const page = await openDemo(b, { width: vw, height: vh, dpr: DRY ? 1 : 2.4, clock: true });
 const grid = page.getByTestId("week-grid");
 await grid.evaluate((el) => (el.scrollTop = 7.5 * (el.scrollHeight / 24)));
-await page.waitForTimeout(600);
+await page.clock.runFor(600);
 
 // a visible cursor (screenshots don't include the system one)
 await page.addStyleTag({
@@ -35,12 +48,37 @@ await page.evaluate(() => {
   document.body.appendChild(d);
 });
 
+// CSS animations run on the compositor's clock, not the fake one: slow them
+// by how much longer a frame takes to capture than it lasts on screen
+const cdp = await page.context().newCDPSession(page);
+await cdp.send("Animation.enable");
+async function shot(path) {
+  await page.screenshot({ path, type: "jpeg", quality: 88 });
+}
+if (!DRY) {
+  const t0 = Date.now();
+  for (let i = 0; i < 3; i++) await shot(`${OUT}/probe.jpg`);
+  const perFrame = (Date.now() - t0) / 3;
+  await cdp.send("Animation.setPlaybackRate", { playbackRate: Math.min(1, 1000 / FPS / perFrame) });
+  rmSync(`${OUT}/probe.jpg`);
+}
+
 let f = 0;
 const marks = {};
-const mark = (k) => (marks[k] = f);
+const spots = {};
+async function mark(k) {
+  marks[k] = f;
+  if (DRY) await shot(`${OUT}/${String(f).padStart(4, "0")}-${k}.jpg`);
+}
+const frac = (r) => r && { x0: r.x / vw, y0: r.y / vh, x1: (r.x + r.width) / vw, y1: (r.y + r.height) / vh };
+/** where something is now, as fractions of the frame (for the camera and labels) */
+async function spot(k, loc) {
+  spots[k] = frac(await loc.boundingBox());
+}
 async function snap(n = 1) {
   for (let i = 0; i < n; i++) {
-    await page.screenshot({ path: `${OUT}/${String(f).padStart(4, "0")}.jpg`, type: "jpeg", quality: 90 });
+    if (!DRY) await shot(`${OUT}/${String(f).padStart(4, "0")}.jpg`);
+    await page.clock.runFor(1000 / FPS);
     f++;
   }
 }
@@ -72,16 +110,18 @@ async function up() {
   await page.mouse.up();
   await page.evaluate(() => document.getElementById("demo-cursor").classList.remove("down"));
 }
-async function click(frames = 3) {
+/** press, hold a beat, let go, then watch for `after` frames */
+async function click(after = 12) {
   await down();
-  await snap(2);
+  await snap(4);
   await up();
-  await snap(frames);
+  await snap(after);
 }
-async function type(text, perFrame = 2) {
-  for (let i = 0; i < text.length; i++) {
-    await page.keyboard.type(text[i]);
-    if (i % perFrame === perFrame - 1 || i === text.length - 1) await snap();
+/** about ten keys a second */
+async function type(text, framesPerKey = 3) {
+  for (const ch of text) {
+    await page.keyboard.type(ch);
+    await snap(framesPerKey);
   }
 }
 const center = async (loc) => {
@@ -97,82 +137,150 @@ const satX = async () => {
   const c = await page.locator("[data-testid=day-col-6]").boundingBox();
   return c.x + c.width * 0.55;
 };
+const notesSettled = () => settle(page, "[data-testid=margin-notes][data-pending='0']");
 /** drag out a new event on Saturday, name it, maybe file it, save */
-async function create(from, to, title, { cal, travel = 12, drag = 12 } = {}) {
+async function create(from, to, title, { cal, travel = 22, drag = 16 } = {}) {
   const x = await satX();
   await moveTo(x, await yOf(from), travel);
+  await snap(4);
   await down();
-  await snap();
-  await moveTo(x, await yOf(to), drag, true);
-  await up();
-  await page.waitForTimeout(120);
   await snap(2);
-  await type(title);
+  await moveTo(x, await yOf(to), drag, true);
+  await snap(2);
+  await up();
+  await snap(10);
+  await type(title, 2);
+  await snap(8);
   if (cal) {
-    await moveTo(...(await center(page.getByTestId("panel-cal-trigger"))), 8);
-    await click(2);
-    await moveTo(...(await center(page.getByTestId("panel-cal-options").getByRole("option", { name: cal }))), 6);
-    await click(2);
+    await moveTo(...(await center(page.getByTestId("panel-cal-trigger"))), 18);
+    await click(12);
+    await moveTo(...(await center(page.getByTestId("panel-cal-options").getByRole("option", { name: cal }))), 14);
+    await snap(4);
+    await click(10);
     // focus sits on the picker now: save with the button
-    await moveTo(...(await center(page.getByTestId("event-panel").getByRole("button", { name: /^Create/ }))), 9);
-    await click(1);
+    await moveTo(...(await center(page.getByTestId("event-panel").getByRole("button", { name: /^Create/ }))), 18);
+    await snap(4);
+    await click(2);
   } else {
     await page.keyboard.press("Enter");
   }
-  await page.waitForTimeout(150);
-  await page.locator("[data-testid=margin-notes][data-pending='0']").waitFor({ timeout: 5000 }).catch(() => {});
-  await snap(2);
+  await notesSettled();
+  await snap(16);
 }
 
 await place(cur.x, cur.y);
-// 1. the week
-mark("week");
-await snap(18);
+const wed = page.getByTestId("day-col-3");
+const fact = wed.locator(".chip-timed", { hasText: "Fact-check article" });
+await spot("fact", fact);
+await spot("wed", wed);
+await spot("banner", page.getByTestId("sweep-banner"));
 
-// 2. reconcile: yesterday's unconfirmed event, ✓
-mark("reconcile");
-const fact = page.locator("[data-testid=day-col-3] .chip-timed", { hasText: "Fact-check article" });
+// the week
+await mark("week");
+await snap(2.5 * FPS);
+
+// 1. reconcile: hover yesterday's dotted event, ✓ ...
+await mark("reconcile");
 const [fx, fy] = await center(fact);
-await moveTo(fx - 20, fy, 16);
+await moveTo(fx - 30, fy - 4, 26);
+await snap(18);
+await moveTo(...(await center(fact.getByTestId("recon-yes"))), 14);
+await snap(6);
+await click(30);
+// ... then Review steps through the rest of yesterday, one event at a time
+await mark("review");
+const banner = page.getByTestId("sweep-banner");
+await moveTo(...(await center(banner.getByRole("button", { name: "Review" }))), 26);
+await snap(6);
+await click(20);
+const pill = page.getByTestId("recon-pill");
+await spot("pill", pill);
+// revisions, coffee (the editor canceled), interview, lunch, phone in bed
+for (const btn of ["recon-btn-yes", "recon-btn-canceled", "recon-btn-yes", "recon-btn-yes", "recon-btn-yes"]) {
+  await moveTo(...(await center(pill.getByTestId(btn))), 12);
+  await snap(4);
+  await click(16);
+}
+await snap(30);
+await mark("reconciled");
+
+// 2. annotations: the model's notes on the week, in the free space
+await mark("notes");
+const research = page.getByTestId("margin-note").filter({ hasText: "Research is not writing" });
+await spot("research", research);
+const [rx, ry] = await center(research);
+await moveTo(rx + 40, ry + 40, 30);
+await snap(2.5 * FPS);
+// a note of your own on the event you just confirmed
+await mark("addnote");
+await moveTo(fx - 20, fy, 26);
 await snap(4);
-await moveTo(...(await center(fact.getByTestId("recon-yes"))), 9);
-await click(4);
-await moveTo(fx - 60, fy + 70, 8);
+await click(18);
+await spot("panel", page.getByTestId("event-panel"));
+await moveTo(...(await center(page.getByTestId("drill-add"))), 20);
+await snap(4);
+await click(8);
+await type("Took two hours. Sources first.");
+await snap(10);
+await page.keyboard.press("Enter");
+await snap(18);
+await moveTo(...(await center(page.getByTestId("event-panel").locator(".panel-close").last())), 20);
+await snap(4);
+await click(2);
+await notesSettled();
+await mark("noted");
+await snap(24);
+// it found a spot on its own; drag it a little to taste: the arrow follows
+await mark("dragnote");
+const mine = page.getByTestId("margin-note").filter({ hasText: "Sources first" });
+await spot("note0", mine);
+const nb = await mine.boundingBox();
+const fb = await fact.boundingBox();
+await moveTo(nb.x + nb.width / 2, nb.y + nb.height / 2, 22);
+await snap(6);
+await down();
+await snap(4);
+// to the open space under the event, a little in from the edge
+await moveTo(fb.x + 18 + nb.width / 2, fb.y + fb.height + 34 + nb.height / 2, 34);
+await snap(4);
+await up();
 await snap(8);
-mark("reconciled");
+await notesSettled();
+await spot("note1", mine);
+await moveTo(cur.x + 80, cur.y + 70, 20);
+await snap(36);
+await mark("annotated");
 
 // 3. plan Saturday: a call, then a writing block over it and the swim
-mark("plan");
-await create(10, 10.5, "Call with agent", { travel: 14, drag: 8 });
-await create(11.95, 9, "Novel: chapter 9", { cal: "Homework", travel: 10, drag: 14 });
-await moveTo((await satX()) - 260, await yOf(13.5), 8);
-mark("planned");
-await snap(22);
+await mark("plan");
+await create(10, 10.5, "Call with agent");
+await create(11.95, 9, "Novel: chapter 9", { cal: "Homework", drag: 30 });
+await moveTo((await satX()) - 260, await yOf(13.5), 20);
+await mark("planned");
+await snap(2.5 * FPS);
 
 // 4. three quick tasks that overlap: one cluster
-mark("cluster");
-await create(16, 16.5, "Email", { travel: 10, drag: 6 });
-await create(16.75, 16.25, "Invoice", { travel: 6, drag: 6 });
-await create(17, 16.5, "Call landlord", { travel: 6, drag: 6 });
-await moveTo((await satX()) - 260, await yOf(18.5), 8);
-mark("clustered");
-await snap(18);
-mark("end");
+await mark("cluster");
+await create(16, 16.5, "Email", { drag: 10 });
+await create(16.75, 16.25, "Invoice", { travel: 16, drag: 10 });
+await create(17, 16.5, "Call landlord", { travel: 16, drag: 10 });
+await moveTo((await satX()) - 260, await yOf(18.5), 20);
+await mark("clustered");
+await snap(2.5 * FPS);
+await mark("outro");
+await snap(2.5 * FPS);
+await mark("end");
 
-// where the features ended up, as fractions of the frame, for the labels
-const vw = 1600;
-const vh = 900;
-const frac = (r) => r && { x0: r.x / vw, y0: r.y / vh, x1: (r.x + r.width) / vw, y1: (r.y + r.height) / vh };
 const sat = page.locator("[data-testid=day-col-6]");
-const spots = {
-  swim: frac(await sat.locator(".chip-timed", { hasText: "Open water swim" }).boundingBox()),
-  block: frac(await sat.locator(".chip-timed", { hasText: "Novel: chapter 9" }).boundingBox()),
-  call: frac(await sat.locator(".chip-timed", { hasText: "Call with agent" }).boundingBox()),
-  cluster: frac(await sat.getByTestId("cluster-block").boundingBox()),
-  fact: frac(await page.locator("[data-testid=day-col-3] .chip-timed", { hasText: "Fact-check article" }).boundingBox()),
-  banner: frac(await page.getByTestId("sweep-banner").boundingBox()),
-};
+await spot("sat", sat);
+await spot("swim", sat.locator(".chip-timed", { hasText: "Open water swim" }));
+await spot("block", sat.locator(".chip-timed", { hasText: "Novel: chapter 9" }));
+await spot("call", sat.locator(".chip-timed", { hasText: "Call with agent" }));
+await spot("cluster", sat.getByTestId("cluster-block"));
 
-writeFileSync("video/src/timeline.json", JSON.stringify({ frames: f, fps: 30, width: 3840, height: 2160, marks, spots }, null, 2) + "\n");
-console.log(`${f} frames`, marks);
+writeFileSync(
+  DRY ? join(OUT, "timeline.json") : "video/src/timeline.json",
+  JSON.stringify({ frames: f, fps: FPS, width: 3840, height: 2160, marks, spots }, null, 2) + "\n",
+);
+console.log(`${f} frames (${(f / FPS).toFixed(1)}s)`, marks, DRY ? OUT : "");
 await b.close();

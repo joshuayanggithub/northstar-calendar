@@ -1,7 +1,7 @@
 {
   "name": "northstar-video",
   "version": "1.0.0",
-  "description": "The README's 10-second demo of northstar (Remotion). Footage: ../scripts/readme/record.mjs.",
+  "description": "The README's one-minute walkthrough of northstar (Remotion). Footage: ../scripts/readme/record.mjs.",
   "repository": {},
   "license": "UNLICENSED",
   "private": true,
@@ -27,7 +27,7 @@
     "upgrade": "remotion upgrade",
     "lint": "eslint src && tsc",
     "render": "remotion render src/index.ts Demo ../docs/media/northstar.mp4 --crf=16 && npm run gif",
-    "gif": "ffmpeg -hide_banner -loglevel error -y -i ../docs/media/northstar.mp4 -vf \"fps=12,scale=960:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128:stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle\" ../docs/media/northstar.gif",
+    "gif": "ffmpeg -hide_banner -loglevel error -y -i ../docs/media/northstar.mp4 -vf \"fps=10,scale=960:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128:stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle\" ../docs/media/northstar.gif",
     "record": "cd .. && PLAYWRIGHT_BROWSERS_PATH=0 node scripts/readme/record.mjs"
   }
 }
