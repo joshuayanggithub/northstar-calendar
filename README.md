@@ -1,7 +1,7 @@
 # Main
 northstar is a mac dekstop calendar app that centers around features maximizing your north star: long-term goals and productivity! the most popular calendar (gcal, notion) apps are 1. basic clunky - lacking basic UI/UX features that help when scheduling lots of events 2. lack true features that enable long-term planning and reflection of goals. 
 
-![northstar in ten seconds: a week of a made-up calendar, reconciling events, annotations, and the focus score](docs/media/northstar.gif)
+![northstar in ten seconds: a made-up week; an unconfirmed event is reconciled with ✓, Saturday is planned (a writing block forms a rabbet joint with a swim and a C-shape around a call), and three quick tasks collapse into one clustered list](docs/media/northstar.gif)
 
 # Productivity add-ons
 1. Reconcile Events

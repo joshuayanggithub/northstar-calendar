@@ -3,8 +3,8 @@ import { DEMO_NOW, calendars, events, goals, storage } from "./demo.mjs";
 
 export const BASE = process.env.APP_URL ?? "http://127.0.0.1:1420";
 
-export async function openDemo(browser, { width = 1440, height = 900, scheme = "dark", query = "" } = {}) {
-  const ctx = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: 2, colorScheme: scheme });
+export async function openDemo(browser, { width = 1440, height = 900, scheme = "dark", query = "", dpr = 2 } = {}) {
+  const ctx = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: dpr, colorScheme: scheme });
   const ls = storage();
   await ctx.addInitScript(
     ({ fixture, ls }) => {

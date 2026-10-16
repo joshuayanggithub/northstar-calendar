@@ -11,3 +11,4 @@ public/*.png
 
 # Remotion agent skills (npx skills add remotion-dev/skills --agent claude-code)
 .claude/
+public/rec/

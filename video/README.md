@@ -1,14 +1,13 @@
 # northstar video
 
-The 10-second clip at the top of the app's README, made with
-[Remotion](https://www.remotion.dev/) and its agent skills
+The 10-second demo at the top of the app's README: a real session in the app
+on a made-up week, recorded frame by frame, then cut (camera, labels,
+captions) with [Remotion](https://www.remotion.dev/) and its agent skills
 (`npx skills add remotion-dev/skills --agent claude-code --skill '*' --yes`).
-
-The stills come from the app itself, showing a made-up week
-(`../scripts/readme/demo.mjs`, captured by `../scripts/readme/shots.mjs`).
 
 ```bash
 npm i
+npm run record    # the session: ../scripts/readme/record.mjs (needs the app's dev server on :1420)
 npm run dev       # Remotion Studio
-npm run render    # ../docs/media/northstar.mp4 + .gif (the gif needs ffmpeg on PATH)
+npm run render    # ../docs/media/northstar.mp4 (1080p) + .gif (the gif needs ffmpeg on PATH)
 ```
