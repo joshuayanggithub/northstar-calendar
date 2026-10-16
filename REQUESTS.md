@@ -89,3 +89,4 @@ tracking: FEATURES.md for the parity matrix, e2e/QA-BACKLOG.md for QA items.)
 | 80 | Faded events kept a border in the original color | done `d7cda88c` (light-mode C-shape ring now fades with the fill; seen and checked in the real WebKit window) |
 | 81 | /Applications/North Star.app should pick up every new build | done (now a symlink to target/release/bundle/macos/North Star.app, like the Desktop one) |
 | 82 | All README screenshots and the video in light mode | done `5a441f0d` |
+| 83 | A calendar's color changed in Google Calendar should show in the app | done `21677558` (colors and names always synced every 30s; the interface now reloads when only the calendar list changed) |

@@ -219,9 +219,14 @@ fn spawn_sync_thread(
                         Ok(token) => {
                             let client = GoogleClient::new(token);
                             let engine = SyncEngine::new(&db, &client);
+                            let before = calendar_list(&db);
                             match engine.sync_once() {
                                 Ok(report) => {
-                                    if report.pushed + report.pulled + report.conflicts > 0 {
+                                    let after = calendar_list(&db);
+                                    if before != after {
+                                        info!("sync: calendar list changed (a color, name or access)");
+                                    }
+                                    if ui_needs_refresh(&report, &before, &after) {
                                         info!(
                                             "sync: pushed={} pulled={} conflicts={}",
                                             report.pushed, report.pulled, report.conflicts
@@ -251,6 +256,19 @@ fn spawn_sync_thread(
             }
         })
         .expect("failed to spawn sync thread");
+}
+
+/// the calendar list as the interface shows it (colors, names, access), to
+/// tell whether a sync changed it
+fn calendar_list(db: &Db) -> Option<String> {
+    db.list_calendars().ok().and_then(|c| serde_json::to_string(&c).ok())
+}
+
+/// Whether the interface must reload after a sync: an event moved either
+/// way, or a calendar changed in Google (its color or name) with no event
+/// changing at all.
+fn ui_needs_refresh(report: &sync_core::SyncReport, before: &Option<String>, after: &Option<String>) -> bool {
+    report.pushed + report.pulled + report.conflicts > 0 || before != after
 }
 
 fn current_access_token(
@@ -325,4 +343,23 @@ fn init_logging(data_dir: &std::path::Path) {
         )
         .try_init();
     info!("logs at {}", log_dir.display());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_calendar_recolored_in_google_reaches_the_interface() {
+        let quiet = sync_core::SyncReport::default();
+        let black = Some(r##"[{"id":"life","color":"#000000"}]"##.to_string());
+        let graphite = Some(r##"[{"id":"life","color":"#c2c2c2"}]"##.to_string());
+        // only the color changed, no event did: still reload
+        assert!(ui_needs_refresh(&quiet, &black, &graphite));
+        // nothing changed at all: stay quiet
+        assert!(!ui_needs_refresh(&quiet, &black, &black));
+        // events moved: reload as before
+        let pulled = sync_core::SyncReport { pulled: 1, ..Default::default() };
+        assert!(ui_needs_refresh(&pulled, &black, &black));
+    }
 }
