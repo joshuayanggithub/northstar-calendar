@@ -2525,6 +2525,22 @@ h3.review-h {
   background: color-mix(in srgb, #c25555 14%, transparent);
 }
 
+/* a jointed shape's 1px seam in page color, drawn inside its outline (the
+   joint's clip cuts off the box-shadow ring plain chips use) */
+.joint-seam {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.joint-seam path {
+  fill: none;
+  stroke: var(--bg);
+  stroke-width: 2px;
+}
+
 /* ---------- goal work: a running gold light and a bold title ----------
    A short light (white-hot core at the front of a gold tail, with a blurred
    glow) runs once around the event's outline at constant speed (~2.4s),

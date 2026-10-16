@@ -274,6 +274,7 @@ the window on an existing display (e.g. SSH X forwarding) instead.
 
 ## Shipped log (newest first)
 
+- `dc7bd650` Joints: C-shape steps at its spine; jointed shapes keep the 1px seam
 - `d89a5923` Merged linux-e2e-root-cause-fixes (annotations, swipe, recurring edits); `fd49d3f9` in-app E2E on macOS
 - `79d8b089` Calendar colors/names changed in Google show without an event change; `44773b99` past at 35%
 - `5a441f0d` README media in light mode; `d7cda88c` past at 40%, faded C-shape ring

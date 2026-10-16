@@ -85,6 +85,9 @@ export interface ContainerLayout<T> {
   /** joint extents (px) at the top / bottom edge — see packDayWithSleeves */
   seamTopPx: number;
   seamBottomPx: number;
+  /** where each joint steps across (px from the box's left), null: halfway */
+  seamTopStepPx: number | null;
+  seamBottomStepPx: number | null;
   /** paint order within the day column (later placed = higher) */
   z: number;
 }
@@ -108,6 +111,8 @@ export interface SleevePacked<T> {
     insetPx: number;
     seamTopPx: number;
     seamBottomPx: number;
+    seamTopStepPx: number | null;
+    seamBottomStepPx: number | null;
     z: number;
   })[];
   /** dense cascades of small events, merged into one block of rows */
@@ -259,6 +264,8 @@ export function packDayWithSleeves<T>(
     B: number; // visual bottom
     jt: number; // top joint step (px)
     jb: number; // bottom joint step (px)
+    jtx: number | null; // where the top joint steps across (px from the left; null: halfway)
+    jbx: number | null; // likewise the bottom joint
     slab: boolean;
   };
   let nodes: Node[] = [
@@ -273,6 +280,8 @@ export function packDayWithSleeves<T>(
       B: 0,
       jt: 0,
       jb: 0,
+      jtx: null,
+      jbx: null,
       slab: isSlab(it),
     })),
     ...clusters.map((c, i) => ({
@@ -286,6 +295,8 @@ export function packDayWithSleeves<T>(
       B: 0,
       jt: 0,
       jb: 0,
+      jtx: null,
+      jbx: null,
       slab: false,
     })),
   ];
@@ -361,6 +372,7 @@ export function packDayWithSleeves<T>(
       for (const a of ancestors) n.T = Math.max(n.T, bandOf(a)[1]);
       // the box as it would be drawn at this top
       n.jt = 0;
+      n.jtx = null;
       n.B = Math.max(n.endMin * pxPerMin, n.T + natH - Math.max(0, n.T - natural));
       n.B = Math.max(n.B, n.T + minHeight(n));
       // (d) joint with the previous overlapping same-depth event — chip or
@@ -387,6 +399,10 @@ export function packDayWithSleeves<T>(
           const a = Math.max(lo, Math.min(n.T + ov / 2 - J / 2, roomTop), descFloor);
           n.T = a;
           n.jt = J;
+          // a C-shape steps at its spine: its left strip runs on to its end
+          // and the event below tucks in under its nested events, edge to
+          // edge, instead of meeting it halfway across
+          n.jtx = partner.slab ? SLEEVE_LANE_PX : null;
           n.B = Math.max(n.endMin * pxPerMin, n.T + J + LABEL_PX, n.T + minHeight(n));
         }
       }
@@ -402,6 +418,7 @@ export function packDayWithSleeves<T>(
     if (partner) {
       partner.B = n.T + n.jt;
       partner.jb = n.jt;
+      partner.jbx = n.jtx;
     }
     n.B = Math.max(n.B, n.T + n.jt + (n.c ? minHeight(n) : n.slab ? bandPx.get(n)! : LABEL_PX));
     placed.push(n);
@@ -422,6 +439,8 @@ export function packDayWithSleeves<T>(
       height: n.B - n.T,
       seamTopPx: n.jt,
       seamBottomPx: n.jb,
+      seamTopStepPx: n.jtx,
+      seamBottomStepPx: n.jbx,
       z: n.rank + 1,
     };
   });
@@ -437,6 +456,8 @@ export function packDayWithSleeves<T>(
       insetPx: n.depth * SLEEVE_LANE_PX,
       seamTopPx: n.jt,
       seamBottomPx: n.jb,
+      seamTopStepPx: n.jtx,
+      seamBottomStepPx: n.jbx,
       z: n.rank + 1,
     };
   });
@@ -496,8 +517,20 @@ export function jointClipPath(
   seamBottom: number,
   style: "rabbet" | "scarf",
   r = 4,
+  stepTop: number | null = null,
+  stepBottom: number | null = null,
 ): string {
-  return `path("${jointPathD(w, h, seamTop, seamBottom, style, r)}")`;
+  return `path("${jointPathD(w, h, seamTop, seamBottom, style, r, stepTop, stepBottom)}")`;
+}
+
+/** where a rabbet joint steps across a box w wide: at `step` px from the
+ *  left (a C-shape's spine), else halfway; never so close to an edge that
+ *  the corners can't round. Partners share width and inset, so both halves
+ *  of a joint compute the same x. */
+export function jointStepX(w: number, step: number | null | undefined, r = 4): number {
+  const mid = Math.round(w / 2);
+  if (step == null) return mid;
+  return Math.max(Math.min(2 * r, mid), Math.min(step, mid));
 }
 
 /** The outline itself as SVG path data (same shape the clip path cuts):
@@ -509,22 +542,25 @@ export function jointPathD(
   seamBottom: number,
   style: "rabbet" | "scarf",
   r = 4,
+  stepTop: number | null = null,
+  stepBottom: number | null = null,
 ): string {
-  const mid = Math.round(w / 2);
+  const topX = jointStepX(w, stepTop, r);
+  const botX = jointStepX(w, stepBottom, r);
   const pts: [number, number][] = [];
   if (style === "rabbet") {
-    if (seamTop > 0) pts.push([mid, 0]);
+    if (seamTop > 0) pts.push([topX, 0]);
     else pts.push([0, 0]);
     pts.push([w, 0]);
     if (seamBottom > 0) {
-      pts.push([w, h - seamBottom], [mid, h - seamBottom], [mid, h]);
+      pts.push([w, h - seamBottom], [botX, h - seamBottom], [botX, h]);
     } else {
       pts.push([w, h]);
     }
     pts.push([0, h]);
     // A fractional-pixel seam can round above the preceding chip's bottom
     // after CSS path serialization. Cover that hairline on the lower chip.
-    if (seamTop > 0) pts.push([0, Math.max(0, seamTop - 0.1)], [mid, Math.max(0, seamTop - 0.1)]);
+    if (seamTop > 0) pts.push([0, Math.max(0, seamTop - 0.1)], [topX, Math.max(0, seamTop - 0.1)]);
   } else {
     pts.push([0, seamTop > 0 ? seamTop : 0], [w, 0]);
     pts.push([w, seamBottom > 0 ? h - seamBottom : h], [0, h]);

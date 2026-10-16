@@ -209,8 +209,11 @@ export function WeekView(props: {
     const W = colPx - 1; // the column's padding box (1px left border)
     const boxes: ShapeBox<object>[] = [];
     const specs = new Map<CalendarEvent, TextSpec>();
-    const box = (key: object, inset: number, top: number, height: number, st: number, sb: number, z: number, ring: number) =>
-      boxes.push({ key, z, left: inset, width: W - inset - 2, clipWidth: colPx - inset - 2, top, height, seamTop: st, seamBottom: sb, ring });
+    const box = (
+      key: object, inset: number, top: number, height: number, st: number, sb: number, z: number, ring: number,
+      stepTop: number | null = null, stepBottom: number | null = null,
+    ) =>
+      boxes.push({ key, z, left: inset, width: W - inset - 2, clipWidth: colPx - inset - 2, top, height, seamTop: st, seamBottom: sb, stepTop, stepBottom, ring });
     const spec = (e: CalendarEvent, padL: number, height: number, slab: boolean): TextSpec => {
       const { start, end } = eventDates(e);
       return {
@@ -225,13 +228,13 @@ export function WeekView(props: {
       };
     };
     for (const c of packed.containers) {
-      box(c.item, c.lane * SLEEVE_LANE_WIDTH, c.top, c.height, c.seamTopPx, c.seamBottomPx, c.z, 0);
+      box(c.item, c.lane * SLEEVE_LANE_WIDTH, c.top, c.height, c.seamTopPx, c.seamBottomPx, c.z, 0, c.seamTopStepPx, c.seamBottomStepPx);
       specs.set(c.item, spec(c.item, 7, c.height, true));
     }
     for (const r of packed.regular) {
       // chips paint a 1px background ring around themselves (goal rings
       // are drawn inside the box)
-      box(r.item, r.insetPx, r.top, r.height, r.seamTopPx, r.seamBottomPx, r.z, 1);
+      box(r.item, r.insetPx, r.top, r.height, r.seamTopPx, r.seamBottomPx, r.z, 1, r.seamTopStepPx, r.seamBottomStepPx);
       specs.set(r.item, spec(r.item, 6, r.height, false));
     }
     for (const cl of packed.clusters) box(cl, cl.insetPx, cl.top, cl.height, 0, 0, cl.z, 0);
@@ -244,20 +247,38 @@ export function WeekView(props: {
    *  and the 2px gap) */
   const boxW = (insetPx: number) => colPx - insetPx - 3;
   /** rounded joint clip for a chip/slab of the given inset, or undefined */
-  const jointClip = (insetPx: number, height: number, st: number, sb: number) => {
+  const jointClip = (insetPx: number, height: number, st: number, sb: number, stepT: number | null, stepB: number | null) => {
     if (seamMode === "overlay" || (st <= 0 && sb <= 0) || colPx <= 0) return undefined;
-    return jointClipPath(boxW(insetPx), height, st, sb, seamMode);
+    return jointClipPath(boxW(insetPx), height, st, sb, seamMode, 4, stepT, stepB);
+  };
+  /** A jointed shape's seam: plain chips are set apart by a 1px ring of page
+   *  color outside them (a box-shadow), but a joint's clip-path cuts that
+   *  ring off, so two interlocking events of one calendar fused into a
+   *  single blob with a stray notch. The same ring, traced inside the
+   *  shape's own outline (notch included); the clip keeps its inner half. */
+  const jointSeam = (insetPx: number, height: number, st: number, sb: number, stepT: number | null, stepB: number | null) => {
+    if (seamMode === "overlay" || (st <= 0 && sb <= 0) || colPx <= 0) return null;
+    const w = boxW(insetPx);
+    const d = jointPathD(w, height, st, sb, seamMode === "scarf" ? "scarf" : "rabbet", 4, stepT, stepB);
+    return (
+      <svg className="joint-seam" width={w} height={height} aria-hidden data-testid="joint-seam">
+        <path d={d} />
+      </svg>
+    );
   };
   /** Goal work's shine: a short gold light that runs once around the box's
    *  own outline (a joint's notch included) at constant speed, then rests
    *  (CSS .goal-run). It is an SVG dash travelling along the outline path,
    *  centred on the edge so the box's clip keeps its inner half. Each event
    *  starts at its own point in the cycle so they don't flash together. */
-  const goalRing = (key: string, insetPx: number, height: number, st: number, sb: number, kind: "manual" | "auto") => {
+  const goalRing = (
+    key: string, insetPx: number, height: number, st: number, sb: number, kind: "manual" | "auto",
+    stepT: number | null = null, stepB: number | null = null,
+  ) => {
     if (colPx <= 0) return null;
     const w = boxW(insetPx);
     const jointed = seamMode !== "overlay" && (st > 0 || sb > 0);
-    const d = jointPathD(w, height, jointed ? st : 0, jointed ? sb : 0, seamMode === "scarf" ? "scarf" : "rabbet");
+    const d = jointPathD(w, height, jointed ? st : 0, jointed ? sb : 0, seamMode === "scarf" ? "scarf" : "rabbet", 4, stepT, stepB);
     let h = 0;
     for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
     const vars = {
@@ -1092,8 +1113,8 @@ export function WeekView(props: {
                 onPointerDown={live ? (e) => startCreate(e, di) : undefined}
                 data-testid={live ? `day-col-${di}` : undefined}
               >
-                {containers.map(({ item: e, lane, top, height, seamTopPx, seamBottomPx, z }) => {
-                  const slabClip = jointClip(lane * SLEEVE_LANE_WIDTH, height, seamTopPx, seamBottomPx);
+                {containers.map(({ item: e, lane, top, height, seamTopPx, seamBottomPx, seamTopStepPx, seamBottomStepPx, z }) => {
+                  const slabClip = jointClip(lane * SLEEVE_LANE_WIDTH, height, seamTopPx, seamBottomPx, seamTopStepPx, seamBottomStepPx);
                   const color = colorOf(calendars, e.calendar_id);
                   const { start, end } = eventDates(e);
                   const recon = reconState(e, calendars, nowDate);
@@ -1136,7 +1157,8 @@ export function WeekView(props: {
                         setCtx({ x: ce.clientX, y: ce.clientY, event: e });
                       }}
                     >
-                      {((g) => g && goalRing(keyOf(e), lane * SLEEVE_LANE_WIDTH, height, seamTopPx, seamBottomPx, g.kind))(
+                      {jointSeam(lane * SLEEVE_LANE_WIDTH, height, seamTopPx, seamBottomPx, seamTopStepPx, seamBottomStepPx)}
+                      {((g) => g && goalRing(keyOf(e), lane * SLEEVE_LANE_WIDTH, height, seamTopPx, seamBottomPx, g.kind, seamTopStepPx, seamBottomStepPx))(
                         starState(starKey(e)),
                       )}
                       <div className="cfull-label">
@@ -1232,10 +1254,10 @@ export function WeekView(props: {
                     })}
                   </div>
                 ))}
-                {regular.map(({ item: e, top, height, leftPct, widthPct, insetPx, seamTopPx, seamBottomPx, z }) => {
+                {regular.map(({ item: e, top, height, leftPct, widthPct, insetPx, seamTopPx, seamBottomPx, seamTopStepPx, seamBottomStepPx, z }) => {
                   const st = seamMode === "overlay" ? 0 : seamTopPx;
                   const sb = seamMode === "overlay" ? 0 : seamBottomPx;
-                  const clipPath = jointClip(insetPx, height, st, sb);
+                  const clipPath = jointClip(insetPx, height, st, sb, seamTopStepPx, seamBottomStepPx);
                   const color = colorOf(calendars, e.calendar_id);
                   const beingMoved =
                     drag?.kind !== "create" && drag?.event?.id === e.id && drag.moved && !drag.duplicate;
@@ -1279,7 +1301,8 @@ export function WeekView(props: {
                       data-ek={keyOf(e)}
                       data-text-rule={placedText?.get(e)?.rule}
                     >
-                      {((g) => g && goalRing(keyOf(e), insetPx, height, st, sb, g.kind))(starState(starKey(e)))}
+                      {jointSeam(insetPx, height, st, sb, seamTopStepPx, seamBottomStepPx)}
+                      {((g) => g && goalRing(keyOf(e), insetPx, height, st, sb, g.kind, seamTopStepPx, seamBottomStepPx))(starState(starKey(e)))}
                       <ChipText e={e} p={placedText?.get(e)} />
                       {recon === "unsettled" && (
                         <span className="recon-actions">

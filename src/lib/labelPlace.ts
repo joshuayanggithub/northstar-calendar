@@ -28,6 +28,7 @@
 // drawn under another event or outside its own shape.
 
 import { textPx, wrapLines, SIZES, SIZES_XS, type TextSizes } from "./chipText";
+import { jointStepX } from "./layout";
 import { fmtChipRange, fmtTimeShort } from "./dates";
 
 export interface Rect {
@@ -49,6 +50,10 @@ export interface ShapeBox<K> {
   height: number;
   seamTop: number;
   seamBottom: number;
+  /** where the top / bottom joint steps across (px from the box's left);
+   *  absent or null: halfway (layout.ts jointStepX) */
+  stepTop?: number | null;
+  stepBottom?: number | null;
   /** width the joint clip path is drawn at (the notch sits at its middle) */
   clipWidth: number;
   /** background-colored ring painted around the box */
@@ -71,11 +76,12 @@ export function shapeRects(b: ShapeBox<unknown>, style: SeamStyle, asOccluder = 
   if (style === "scarf") {
     return asOccluder ? [{ x0, x1, y0, y1 }] : [{ x0, x1, y0: y0 + st, y1: y1 - sb }];
   }
-  const mid = x0 + Math.round(b.clipWidth / 2);
+  const topX = x0 + jointStepX(b.clipWidth, b.stepTop);
+  const botX = x0 + jointStepX(b.clipWidth, b.stepBottom);
   const out: Rect[] = [];
-  if (st > 0) out.push({ x0: mid, x1, y0, y1: y0 + st });
+  if (st > 0) out.push({ x0: topX, x1, y0, y1: y0 + st });
   out.push({ x0, x1, y0: y0 + st, y1: y1 - sb });
-  if (sb > 0) out.push({ x0, x1: mid, y0: y1 - sb, y1 });
+  if (sb > 0) out.push({ x0, x1: botX, y0: y1 - sb, y1 });
   return out.filter((r) => r.y1 - r.y0 > EPS && r.x1 - r.x0 > EPS);
 }
 

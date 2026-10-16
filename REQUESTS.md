@@ -92,3 +92,4 @@ tracking: FEATURES.md for the parity matrix, e2e/QA-BACKLOG.md for QA items.)
 | 83 | A calendar's color changed in Google Calendar should show in the app | done `21677558` (colors and names always synced every 30s; the interface now reloads when only the calendar list changed) |
 | 84 | Past events at 35% instead of 40% | done `44773b99` |
 | 85 | Merge origin/linux-e2e-root-cause-fixes (bug fixing) and resolve conflicts | done `d89a5923` (3 conflicts: classify.rs, state.rs, smoke.spec.ts), macOS in-app fixes `fd49d3f9`; another session's uncommitted WIP saved to `wip/other-session-2026-10-16` (see TODO.md) |
+| 86 | Overlap UI clunky (a long block, a nested event, lunch running into its end, one calendar) | done `dc7bd650` (a C-shape's joint steps at its spine; jointed shapes keep the 1px seam) |
