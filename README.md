@@ -3,8 +3,6 @@ northstar is a mac dekstop calendar app that centers around features maximizing 
 
 ![northstar in ten seconds: a week of a made-up calendar, reconciling events, annotations, and the focus score](docs/media/northstar.gif)
 
-<sub>10 seconds, made with [Remotion](https://www.remotion.dev/) (source in [`video/`](video)) · [mp4](docs/media/northstar.mp4) · every image on this page is a made-up demo week (Rosa, a freelance writer; [`scripts/readme`](scripts/readme))</sub>
-
 # Productivity add-ons
 1. Reconcile Events
 
@@ -19,6 +17,7 @@ Annotations are used in literature to critique writing, so why not apply this to
 ![A week with red handwritten notes in the free space around the events, with arrows to the events they critique](docs/media/annotations.png)
 
 3. Focus score / Highlighted Events / Goal dashboard
+4. 
 Some cool small features that help [prime](https://en.wikipedia.org/wiki/Priming_%28psychology%29) oneself to be more self-critical and evaluative of their goals? are a focus score that ranks deep work and. highlighting goal-driven events with pretty ui animations, and goal dashboard.  
 
 ![Three columns: the focus score's breakdown for a day; a goal-work event with its gold light running along the outline; the goal dashboard with daily, weekly and long-term goals](docs/media/focus-goals.png)
