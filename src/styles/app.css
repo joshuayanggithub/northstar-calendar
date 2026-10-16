@@ -1089,13 +1089,13 @@ button {
 
 /* past events: everything that has ended, reviewed or not, is faded toward
    the page enough to tell from what is still ahead at a glance, and no
-   further: the calendar's color stays (its hue, and over a third of its
+   further: the calendar's color stays (its hue, and about a third of its
    chroma, in every Google color, both themes; e2e/pastfade.spec.ts). Never
    a gray-out, never transparency (layered events would show through each
    other). */
 .chip.past {
   background: color-mix(in srgb, var(--cal) calc(var(--chip-tint) * var(--past-fade)), var(--bg));
-  color: color-mix(in srgb, var(--cal) 18%, var(--fg-secondary));
+  color: color-mix(in srgb, var(--cal) 16%, var(--fg-secondary));
 }
 
 .chip-timed.chip-cfull.past {
@@ -2709,7 +2709,7 @@ h3.review-h {
 }
 
 .cluster-row.past .cluster-dot {
-  opacity: 0.45;
+  opacity: 0.4;
 }
 
 /* day-score hover breakdown */

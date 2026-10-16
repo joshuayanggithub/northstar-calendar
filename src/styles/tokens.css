@@ -24,7 +24,7 @@
   --chip-tint: 55%;
   --slab-tint-drop: 3%; /* quiet-slab delta; light bg needs most of the tint */
   --chip-text-mix: 38%; /* calendar color mixed toward fg for chip text */
-  --past-fade: 0.4; /* how much of its calendar color an ended event keeps (app.css .past) */
+  --past-fade: 0.35; /* how much of its calendar color an ended event keeps (app.css .past) */
   --scrim: rgba(255, 255, 255, 0.6);
 
   /* metrics (measured) */

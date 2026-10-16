@@ -130,12 +130,12 @@ for (const scheme of ["dark", "light"] as const) {
         // apart: the fill moves visibly toward the page
         const gap = dE(past.bg, next.bg);
         gaps.push(gap);
-        expect(gap, `${name}: past and future fills too alike`).toBeGreaterThanOrEqual(0.07);
+        expect(gap, `${name}: past and future fills too alike`).toBeGreaterThanOrEqual(0.08);
         expect(dE(past.bg, page0), `${name}: past fill faded into the page`).toBeLessThan(dE(next.bg, page0));
-        // but still that calendar's color: a tinted block, same hue, over a third of its chroma
-        expect(dE(past.bg, page0), `${name}: past fill vanished`).toBeGreaterThanOrEqual(0.05);
+        // but still that calendar's color: a tinted block, same hue, about a third of its chroma
+        expect(dE(past.bg, page0), `${name}: past fill vanished`).toBeGreaterThanOrEqual(0.045);
         if (chroma(next.bg) >= 0.04) {
-          expect(chroma(past.bg) / chroma(next.bg), `${name}: past fill lost its color`).toBeGreaterThanOrEqual(0.35);
+          expect(chroma(past.bg) / chroma(next.bg), `${name}: past fill lost its color`).toBeGreaterThanOrEqual(0.3);
           expect(chroma(past.bg), `${name}: past fill gone gray`).toBeGreaterThanOrEqual(0.015);
           const turn = Math.abs(((hue(past.bg) - hue(next.bg) + 540) % 360) - 180);
           expect(turn, `${name}: past fill changed hue`).toBeLessThanOrEqual(10);
@@ -145,7 +145,7 @@ for (const scheme of ["dark", "light"] as const) {
         expect(contrast(past.fg, past.bg), `${name}: past title unreadable`).toBeGreaterThanOrEqual(3);
       }
       const mean = gaps.reduce((a, b) => a + b, 0) / gaps.length;
-      expect(mean, "past and future fills too alike on average").toBeGreaterThanOrEqual(0.12);
+      expect(mean, "past and future fills too alike on average").toBeGreaterThanOrEqual(0.13);
     });
 
     test("every ended event fades: not yet reviewed (still dotted), sleep, all-day, clustered", async ({ page }) => {
@@ -161,7 +161,7 @@ for (const scheme of ["dark", "light"] as const) {
       const ahead = await colors(page, "Ahead all-day", ".chip-allday");
       expect(ended.cls).toContain("past");
       expect(ahead.cls).not.toContain("past");
-      expect(dE(ended.bg, ahead.bg)).toBeGreaterThanOrEqual(0.07);
+      expect(dE(ended.bg, ahead.bg)).toBeGreaterThanOrEqual(0.08);
       // a C-shape's outline (light theme) fades with its fill instead of keeping
       // the calendar's full color around a faded block
       const ring = async (t: string) => {

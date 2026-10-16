@@ -90,3 +90,4 @@ tracking: FEATURES.md for the parity matrix, e2e/QA-BACKLOG.md for QA items.)
 | 81 | /Applications/North Star.app should pick up every new build | done (now a symlink to target/release/bundle/macos/North Star.app, like the Desktop one) |
 | 82 | All README screenshots and the video in light mode | done `5a441f0d` |
 | 83 | A calendar's color changed in Google Calendar should show in the app | done `21677558` (colors and names always synced every 30s; the interface now reloads when only the calendar list changed) |
+| 84 | Past events at 35% instead of 40% | done `44773b99` |
