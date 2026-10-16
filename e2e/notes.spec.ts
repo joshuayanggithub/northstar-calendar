@@ -157,11 +157,11 @@ test("margin notes: a note travels with its event during a swipe, never blinking
   await page.waitForTimeout(400);
   const r = await page.evaluate(() => {
     const f = (window as any).__follow;
-    return { seen: f.seen, missing: f.missing, offsets: f.offsets.size };
+    return { seen: f.seen, missing: f.missing, offsets: [...f.offsets] as number[] };
   });
   expect(r.seen).toBeGreaterThan(10);
   expect(r.missing).toBe(0);
-  expect(r.offsets).toBe(1); // rigidly attached
+  expect(r.offsets, `note/chip offsets: ${r.offsets.join(", ")}`).toHaveLength(1); // rigidly attached
 });
 
 test("margin notes: the note's text is written in full, emphasis underlined, no stage directions", async ({ page }) => {

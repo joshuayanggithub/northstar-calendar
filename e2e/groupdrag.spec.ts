@@ -11,7 +11,10 @@ async function open(page: Page) {
   const cal = (id: string, summary: string, access_role = "owner") => ({
     id, summary, color: "#4986e7", is_primary: id === "p", hidden: false, access_role,
   });
-  const at = (d: number, h: number) => new Date(2026, 9, d, h).toISOString();
+  // Keep fixture construction independent of the Node host timezone. The
+  // Playwright browser is pinned to New York, which is UTC-04 in October.
+  const at = (d: number, h: number) =>
+    new Date(`2026-10-${String(d).padStart(2, "0")}T${String(h).padStart(2, "0")}:00:00-04:00`).toISOString();
   let n = 0;
   const ev = (calendar_id: string, summary: string, d: number, h0: number, h1: number) => ({
     id: `g${++n}`, calendar_id, etag: null, summary, description: null, location: null,

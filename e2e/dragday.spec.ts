@@ -8,7 +8,13 @@ import { expect, test, type Page } from "@playwright/test";
 const NOW = "2026-10-14T08:00:00"; // Wednesday; the week runs Sun 11 – Sat 17
 
 async function open(page: Page) {
-  const at = (d: number, h: number) => new Date(2026, 9, d, h).toISOString();
+  // The browser is pinned to America/New_York in playwright.config. Build
+  // fixture instants in that timezone too: using `new Date(y, m, ...)` here
+  // silently used the Node host timezone (Pacific on the Linux test box), so
+  // the same event rendered three hours later even though drag logic was
+  // correct.
+  const at = (d: number, h: number) =>
+    new Date(`2026-10-${String(d).padStart(2, "0")}T${String(h).padStart(2, "0")}:00:00-04:00`).toISOString();
   const fixture = {
     calendars: [{ id: "p", summary: "Personal", color: "#4986e7", is_primary: true, hidden: false, access_role: "owner" }],
     events: [{

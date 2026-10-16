@@ -310,7 +310,23 @@ export function MarginNotes(props: {
       if (seq !== lastRef.current.seq) return; // a newer page is on its way
       if (layerRef.current) layerRef.current.dataset.pending = "0";
       (window as unknown as { __marginMs?: number }).__marginMs = ms;
-      setPlaced({ places, anchors, colW, chipX });
+      setPlaced((cur) => {
+        if (!keepShown) return { places, anchors, colW, chipX };
+        // A swipe has already carried every visible note by exactly the
+        // distance its chip moved. The settled placement is still needed to
+        // add notes entering the viewport and discard notes that left, but
+        // replacing surviving notes with its newly chosen positions makes
+        // them snap after the user's fingers stop (often by a whole column).
+        // Keep each survivor's event-relative position; use fresh placement
+        // only for newly visible notes.
+        const surviving = new Map(cur.places.map((p) => [p.key, p]));
+        return {
+          places: places.map((p) => surviving.get(p.key) ?? p),
+          anchors,
+          colW,
+          chipX,
+        };
+      });
     };
     const wk = placer();
     if (wk) {
