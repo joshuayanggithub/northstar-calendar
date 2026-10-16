@@ -11,8 +11,11 @@ export interface NotePin {
   /** the text width the note was wrapped at */
   w: number;
   angle: number;
-  /** the hand's size when it was moved (1 = 12px) */
+  /** the hand's size (1 = 12px) */
   scale?: number;
+  /** set once the person sized the box: its height in px (0 = as tall as
+   *  its text), and `w` is then the box's text width exactly */
+  h?: number;
 }
 
 type Listener = () => void;

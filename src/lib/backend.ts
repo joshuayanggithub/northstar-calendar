@@ -42,7 +42,6 @@ async function tauriBackend(): Promise<Backend> {
       invoke<string>("split_series", { calendarId, masterId, recurrence, input }),
     moveSeriesMaster: (calendarId, masterId, destinationId) =>
       invoke("move_series_master", { calendarId, masterId, destinationId }),
-    mdRead: (which) => invoke("md_read", { which }),
     goalsRead: () => invoke("goals_read"),
     goalsWrite: (file) => invoke("goals_write", { file }),
     onGoalsChanged(cb) {
@@ -54,14 +53,6 @@ async function tauriBackend(): Promise<Backend> {
     getGoalClassifications: () => invoke("get_goal_classifications"),
     onGoalClassChanged(cb) {
       const un = listen("goal-class-changed", () => cb());
-      return () => {
-        un.then((f) => f());
-      };
-    },
-    mdWrite: (which, content, expectedMtimeMs) =>
-      invoke("md_write", { which, content, expectedMtimeMs }),
-    onMdChanged(cb) {
-      const un = listen<string>("md-changed", (e) => cb(e.payload));
       return () => {
         un.then((f) => f());
       };

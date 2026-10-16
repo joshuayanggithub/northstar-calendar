@@ -1705,11 +1705,100 @@ button {
 
 .panel-readonly {
   flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
   font-size: 11.5px;
   color: var(--fg-secondary);
   background: var(--bg-hover);
   border-radius: 6px;
-  padding: 6px 9px;
+  padding: 7px 9px 8px;
+}
+
+.panel-copy {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+}
+
+.panel-copy-btn {
+  color: var(--fg);
+  font-weight: 500;
+}
+
+.panel-copy .copy-targets {
+  align-self: stretch;
+}
+
+/* "Copy to my calendar": your calendars, in the panel and the right-click
+   menu (components/CopyTargets.tsx) */
+.copy-targets {
+  display: flex;
+  flex-direction: column;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.copy-targets-head {
+  padding: 3px 7px 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
+.copy-series {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 7px 6px;
+  font-size: 12px;
+  color: var(--fg-secondary);
+  cursor: pointer;
+}
+
+.copy-target,
+.ctx-menu .copy-target {
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  padding: 6px 7px;
+  cursor: pointer;
+}
+
+.copy-target:hover,
+.copy-target:focus-visible {
+  background: var(--bg-hover);
+}
+
+.copy-target .cal-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  flex: none;
+}
+
+.ctx-menu .copy-targets {
+  border: 0;
+  padding: 0;
+  max-height: 320px;
 }
 
 .panel-error {
@@ -1843,10 +1932,7 @@ button {
 }
 
 /* background sleeves: long container events as slim left-edge bands */
-/* ---------- goals chevron + weekly review ---------- */
-
-
-
+/* ---------- goals chevron ---------- */
 .goals-chevron {
   font-size: 9px;
   color: var(--fg-faint);
@@ -1866,110 +1952,6 @@ button {
 .cfull-label {
   position: absolute;
   inset: 0;
-}
-
-.review-hr {
-  border: none;
-  border-top: 1px solid var(--border);
-  margin: 10px 0;
-}
-
-
-.md-wikilink {
-  color: var(--accent-soft, #7aa2f7);
-  cursor: default;
-}
-
-.md-link {
-  color: var(--accent-soft, #7aa2f7);
-  text-decoration: none;
-}
-
-.md-link:hover {
-  text-decoration: underline;
-}
-
-
-
-.review-task .done {
-  color: var(--fg-faint);
-  text-decoration: line-through;
-}
-
-.reviewview {
-  flex: 1;
-  overflow-y: auto;
-  border-top: 1px solid var(--border);
-  padding: 20px 28px 40px;
-  max-width: 680px;
-  display: flex;
-  flex-direction: column;
-}
-
-.review-doc {
-  flex: 1;
-}
-
-.review-h {
-  margin: 18px 0 6px;
-}
-
-h1.review-h {
-  font-size: 20px;
-}
-
-h2.review-h {
-  font-size: 15px;
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 4px;
-}
-
-h3.review-h {
-  font-size: 13.5px;
-  color: var(--fg-secondary);
-}
-
-.review-task {
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
-  font-size: 13.5px;
-  padding: 2px 0;
-  cursor: pointer;
-}
-
-.review-bullet,
-.review-p {
-  font-size: 13.5px;
-  margin: 2px 0;
-  color: var(--fg);
-}
-
-.review-gap {
-  height: 8px;
-}
-
-.review-compose {
-  border-top: 1px solid var(--border);
-  padding-top: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.review-compose textarea {
-  border: 1px solid var(--border);
-  background: var(--bg-panel);
-  color: var(--fg);
-  border-radius: 8px;
-  padding: 8px 10px;
-  font: inherit;
-  font-size: 13px;
-  resize: vertical;
-}
-
-.review-compose .btn {
-  align-self: flex-end;
 }
 
 /* ---------- insights ---------- */
@@ -2067,10 +2049,6 @@ h3.review-h {
   overflow: hidden;
   background: var(--bg-hover);
   min-width: 160px;
-}
-
-.ins-report .btn {
-  margin-left: auto;
 }
 
 /* C-shape container segments: full-width pieces connected by the spine */
@@ -3040,6 +3018,11 @@ h3.review-h {
   cursor: grab;
   user-select: none;
   transform-origin: 50% 50%;
+  /* a box sized taller than its text keeps the text in its middle, where
+     the arrow leaves from */
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
 
 .margin-note .mn-gap {
@@ -3063,6 +3046,107 @@ h3.review-h {
 .margin-note:focus-visible {
   outline: 1px dashed color-mix(in srgb, var(--ink) 45%, transparent);
   outline-offset: 1px;
+}
+
+/* sizing the box (edges and corner) and the writing (A− A+): shown on the
+   note under the pointer or with focus */
+.margin-note:focus-within {
+  outline: 1px dashed color-mix(in srgb, var(--ink) 45%, transparent);
+  outline-offset: 1px;
+  z-index: 3;
+}
+
+.margin-note:hover,
+.margin-note.sizing {
+  z-index: 3;
+}
+
+.margin-note .mn-size,
+.margin-note .mn-tools {
+  display: none;
+}
+
+.margin-note:is(:hover, :focus-within, .sizing):not(.dragging) .mn-size {
+  display: block;
+}
+
+.margin-note:is(:hover, :focus-within):not(.dragging, .sizing) .mn-tools {
+  display: flex;
+}
+
+.mn-size {
+  position: absolute;
+  touch-action: none;
+}
+
+.mn-size-x {
+  top: 0;
+  bottom: 6px;
+  right: -5px;
+  width: 8px;
+  cursor: ew-resize;
+}
+
+.mn-size-y {
+  left: 0;
+  right: 6px;
+  bottom: -5px;
+  height: 8px;
+  cursor: ns-resize;
+}
+
+.mn-size-xy {
+  right: -5px;
+  bottom: -5px;
+  width: 8px;
+  height: 8px;
+  box-sizing: border-box;
+  border: 1.5px solid var(--ink);
+  border-radius: 2px;
+  background: var(--bg);
+  cursor: nwse-resize;
+}
+
+/* above the note; its padding bridges the gap so the pointer can travel
+   from the note to the buttons without the note losing its hover */
+.mn-tools {
+  position: absolute;
+  bottom: 100%;
+  right: -4px;
+  padding-bottom: 3px;
+  gap: 1px;
+  cursor: default;
+}
+
+.mn-tools button {
+  width: 22px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: var(--bg-panel);
+  box-shadow: 0 0 0 1px var(--border), 0 1px 3px rgba(0, 0, 0, 0.12);
+  color: var(--fg-secondary);
+  font: 600 10px/18px var(--font);
+  text-shadow: none;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.mn-tools button:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+/* labels drawn by CSS so they never join the note's text */
+.mn-font-down::before {
+  content: "A\2212";
+  font-size: 9px;
+}
+
+.mn-font-up::before {
+  content: "A+";
+  font-size: 12px;
 }
 
 @media (prefers-color-scheme: light) {

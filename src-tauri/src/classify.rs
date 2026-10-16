@@ -58,6 +58,20 @@ fn load_cache(app: &AppHandle) -> HashMap<String, GoalClass> {
     c
 }
 
+/// The "Other calendars": someone else's events, shown read-only. They are
+/// never the person's goal work; only a copy in one of their own calendars is.
+fn read_only_calendars(app: &AppHandle) -> std::collections::HashSet<String> {
+    app.state::<AppState>()
+        .db(|db| db.list_calendars())
+        .map(|cs| {
+            cs.into_iter()
+                .filter(|c| c.access_role != "owner" && c.access_role != "writer")
+                .map(|c| c.id)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn save_cache(app: &AppHandle, cache: &HashMap<String, GoalClass>) {
     *CACHE.lock().unwrap() = Some(cache.clone());
     if let Some(p) = cache_path(app) {
@@ -182,9 +196,10 @@ fn run_once(app: &AppHandle) {
     let Ok(events) = state.db(|db| db.list_events_between(&start, &end)) else { return };
 
     let mut cache = load_cache(app);
+    let read_only = read_only_calendars(app);
     let pending: Vec<_> = events
         .iter()
-        .filter(|e| !e.all_day && !e.summary.trim().is_empty())
+        .filter(|e| !e.all_day && !e.summary.trim().is_empty() && !read_only.contains(&e.calendar_id))
         .filter(|e| {
             let key = format!("{}/{}", e.calendar_id, e.id);
             match cache.get(&key) {
@@ -347,8 +362,10 @@ pub fn spawn(app: AppHandle) {
 #[tauri::command]
 pub fn get_goal_classifications(app: AppHandle) -> HashMap<String, String> {
     let Some((_, current)) = current_goals_hash(&app) else { return HashMap::new() };
+    let read_only = read_only_calendars(&app);
     load_cache(&app)
         .into_iter()
+        .filter(|(k, _)| k.split_once('/').map_or(true, |(cal, _)| !read_only.contains(cal)))
         .filter(|(_, v)| v.confidence == "high" && v.goals_hash == current)
         .filter(|(_, v)| v.goal.is_some())
         .filter_map(|(k, v)| v.goal.map(|g| (k, g)))

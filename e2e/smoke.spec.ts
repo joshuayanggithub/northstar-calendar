@@ -424,6 +424,8 @@ test("calendar picker keyboard navigation changes the draft without saving", asy
 });
 
 test("visual: calendar picker shows calendar colors in both themes", async ({ page }) => {
+  // no map preview: whether the geocoder answers must not change the picture
+  await page.route("https://photon.komoot.io/**", (r) => r.abort());
   await open(page);
   await page.locator(".chip-timed", { hasText: "Swim" }).click();
   const panel = page.getByTestId("event-panel");
@@ -2857,29 +2859,6 @@ test("cshape: a fully-covered slab is still clickable via its title band", async
   await page.keyboard.press("Escape");
 });
 
-// --- Obsidian bridge (weekly review / journal) ---
-
-test("obsidian: weekly review renders the journal and appends entries", async ({ page }) => {
-  await open(page);
-  await page.getByTestId("goals-section").getByRole("button", { name: "Weekly review" }).click();
-  const review = page.getByTestId("review-view");
-  await expect(review).toBeVisible();
-  await expect(review.locator("h2.review-h").first()).toContainText("Weekly Review — Oct 5");
-  await review.getByTestId("review-entry").fill("Shipped the calendar QA sprint. Sleep was stable.");
-  await review.getByRole("button", { name: "Add entry" }).click();
-  await expect(review.locator("h2.review-h").last()).toContainText("Weekly Review — Oct 14, 2026");
-  await expect(review.locator(".review-p", { hasText: "Shipped the calendar QA sprint" })).toBeVisible();
-});
-
-test("obsidian: journal task toggles write back through the review view", async ({ page }) => {
-  await open(page);
-  await page.getByTestId("goals-section").getByRole("button", { name: "Weekly review" }).click();
-  const review = page.getByTestId("review-view");
-  const task = review.locator(".review-task", { hasText: "Planned next week" });
-  await task.locator("input").check();
-  await expect(task.locator("span.done")).toBeVisible();
-});
-
 // --- insights (all 10, dense one-liners) ---
 
 test("insights: renders all ten stat rows with real numbers", async ({ page }) => {
@@ -2907,17 +2886,14 @@ test("insights: renders all ten stat rows with real numbers", async ({ page }) =
   await expect(v.getByTestId("ins-routines")).toContainText("LUNCH 2/2");
 });
 
-test("insights: week report appends into the Obsidian journal", async ({ page }) => {
+test("no Obsidian link: no journal view, nothing reads or writes a notes vault", async ({ page }) => {
   await open(page);
-  await page.keyboard.press("i");
-  await page.getByTestId("ins-report").getByRole("button", { name: "Append to journal" }).click();
-  await expect(page.getByTestId("toast")).toContainText("appended");
-  // verify it landed in the journal view
+  await expect(page.getByTestId("goals-section").getByRole("button", { name: "Weekly review" })).toHaveCount(0);
   await page.keyboard.press("ControlOrMeta+k");
-  await page.locator(".cmdk [cmdk-input]").fill("weekly review");
-  await page.locator(".cmdk").getByText("📓 Weekly review").click();
-  await expect(page.getByTestId("review-view").locator("h2.review-h").last()).toContainText(
-    "Oct 14, 2026",
-  );
-  await expect(page.getByTestId("review-view")).toContainText("Deep work");
+  await page.locator(".cmdk [cmdk-input]").fill("journal");
+  await expect(page.locator(".cmdk").getByText("Weekly review")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("i");
+  await expect(page.getByTestId("ins-report")).toBeVisible();
+  await expect(page.getByTestId("ins-report").getByRole("button")).toHaveCount(0);
 });

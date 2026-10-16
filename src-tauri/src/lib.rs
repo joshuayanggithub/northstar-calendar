@@ -1,6 +1,5 @@
 mod classify;
 mod goals;
-mod notes;
 mod notify;
 pub(crate) mod state;
 #[cfg(debug_assertions)]
@@ -633,11 +632,6 @@ async fn split_series(
 }
 
 #[tauri::command]
-fn md_read(app: AppHandle, which: String) -> CmdResult<notes::MdFile> {
-    notes::read(&app, &which)
-}
-
-#[tauri::command]
 fn goals_read(app: AppHandle) -> goals::GoalsFile {
     goals::read(&app)
 }
@@ -645,16 +639,6 @@ fn goals_read(app: AppHandle) -> goals::GoalsFile {
 #[tauri::command]
 fn goals_write(app: AppHandle, file: goals::GoalsFile) -> CmdResult<()> {
     goals::write(&app, &file)
-}
-
-#[tauri::command]
-fn md_write(
-    app: AppHandle,
-    which: String,
-    content: String,
-    expected_mtime_ms: u64,
-) -> CmdResult<u64> {
-    notes::write(&app, &which, &content, expected_mtime_ms)
 }
 
 /// Frontend console/error forwarding so browser-side failures land in the
@@ -696,7 +680,6 @@ pub fn run() {
             notify::setup_tray(app.handle())?;
             notify::spawn_scheduler(app.handle().clone(), db_path);
             notify::register_global_shortcut(app.handle());
-            notes::spawn_watcher(app.handle().clone());
             #[cfg(debug_assertions)]
             testhook::spawn(app.handle().clone());
             classify::spawn(app.handle().clone());
@@ -720,8 +703,6 @@ pub fn run() {
             update_series_master,
             move_series_master,
             split_series,
-            md_read,
-            md_write,
             goals_read,
             goals_write,
             classify::get_goal_classifications,

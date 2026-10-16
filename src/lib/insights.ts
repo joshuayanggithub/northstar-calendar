@@ -3,7 +3,7 @@
 // sentence, never a paragraph.
 
 import { eventDates, startOfDay } from "./dates";
-import type { Calendar, CalendarEvent } from "./types";
+import { readOnlyEvent, type Calendar, type CalendarEvent } from "./types";
 
 export interface DayBucket {
   date: Date;
@@ -362,7 +362,8 @@ export function focusScore(inp: FocusInput): FocusScore {
   type Item = { e: CalendarEvent; kind: Kind; s: number; en: number; proof: Proof };
   const items: Item[] = [];
   for (const e of inp.events) {
-    if (e.all_day) continue;
+    // someone else's calendar scores nothing until it's copied into yours
+    if (e.all_day || readOnlyEvent(e, inp.calendars)) continue;
     const { start, end } = eventDates(e);
     const s = start.getTime();
     const en = end.getTime();

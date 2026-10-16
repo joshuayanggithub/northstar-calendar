@@ -21,7 +21,8 @@ import {
   useEvents,
   useVisibleEvents,
 } from "../lib/useBackend";
-import { calendarEditable } from "../lib/types";
+import { calendarEditable, readOnlyEvent } from "../lib/types";
+import { copiedKeys, linkCopy } from "../lib/copies";
 import type { Calendar, CalendarEvent, EventInput } from "../lib/types";
 import { ScopeDialog, type PendingScope, type Scope } from "./ScopeDialog";
 import { dismissToast, onToast, recordUndo, showToast, undoLast } from "../lib/undo";
@@ -35,11 +36,10 @@ import { MonthView } from "./MonthView";
 import { AgendaView } from "./AgendaView";
 import { EventPanel, type PanelState } from "./EventPanel";
 import { QuickCreate } from "./QuickCreate";
-import { ReviewView } from "./ReviewView";
 import { InsightsView } from "./InsightsView";
 import { CommandMenu } from "./CommandMenu";
 
-export type View = "day" | "week" | "month" | "list" | "review" | "insights";
+export type View = "day" | "week" | "month" | "list" | "insights";
 
 function addBusinessDays(day: Date, offset: number): Date {
   let result = addDays(startOfDay(day), Math.trunc(offset / 5) * 7);
@@ -89,6 +89,9 @@ export interface EventActions {
    *  Undoable; never prompts for scope. */
   setNote(ev: CalendarEvent, note: string | null): Promise<void>;
   duplicate(ev: CalendarEvent): Promise<void>;
+  /** Copy an event from one of the "Other calendars" into one of yours —
+   *  with `series`, every occurrence of it — and open the copy. Undoable. */
+  copyTo(ev: CalendarEvent, calendarId: string, series?: boolean): Promise<void>;
 }
 
 function openExternal(url: string) {
@@ -205,7 +208,7 @@ export default function App() {
         : week.map((d) => addDays(d, panDays));
       return { start: days[0], end: addDays(days[days.length - 1], 1), days };
     }
-    if (view === "list" || view === "review") {
+    if (view === "list") {
       const s = startOfDay(anchor);
       return { start: s, end: addDays(s, 14), days: [] };
     }
@@ -229,7 +232,13 @@ export default function App() {
     [Math.floor(range.end.getTime() / (7 * 86400000))], // eslint-disable-line react-hooks/exhaustive-deps
   );
   const events = useEvents(backend, fetchStart, fetchEnd);
-  const visible = useVisibleEvents(events, calendars);
+  const shownCals = useVisibleEvents(events, calendars);
+  // an event copied in from someone else's calendar: the copy stands for it
+  const copied = useMemo(() => copiedKeys(events, (e) => readOnlyEvent(e, calendars)), [events, calendars]);
+  const visible = useMemo(
+    () => (copied.size ? shownCals.filter((e) => !copied.has(`${e.calendar_id}/${e.id}`)) : shownCals),
+    [shownCals, copied],
+  );
 
   // the selection follows its events: a move, an edit or a sync replaces the
   // event objects, and copy / duplicate / a second group drag must use the
@@ -399,8 +408,51 @@ export default function App() {
           await backend.deleteEvent(input.calendar_id, id);
         });
       },
+      async copyTo(ev, calendarId, series = false) {
+        const cal = calOf(calendarId);
+        if (!backend || !cal || !calendarEditable(cal)) return;
+        let input: EventInput = { ...inputOf(ev), calendar_id: calendarId };
+        let whole = false;
+        if (series && ev.recurring_event_id) {
+          // the series as its owner wrote it: first occurrence + the rule
+          const master = await backend.getSeriesMaster(ev.calendar_id, ev.recurring_event_id).catch(() => null);
+          const rule = (master?.recurrence ?? []).filter((r: string) => /^(RRULE|EXRULE|RDATE|EXDATE)/.test(r));
+          const s = master?.start?.dateTime ?? master?.start?.date;
+          const e = master?.end?.dateTime ?? master?.end?.date;
+          if (rule.length && s && e) {
+            input = { ...input, summary: master.summary ?? ev.summary, start: s, end: e, all_day: !!master.start.date, recurrence: rule };
+            whole = true;
+          } else {
+            showToast("Couldn't read the whole series — copied this event only", false);
+          }
+        }
+        const id = await backend.createEvent(input);
+        linkCopy(ev, { calendar_id: calendarId, id });
+        recordUndo(`Copied “${ev.summary}”${whole ? " (every occurrence)" : ""} to ${cal.summary}`, async () => {
+          await backend.deleteEvent(calendarId, id);
+        });
+        if (whole) return;
+        // open the copy: it's yours now, to retitle, move or note
+        const copy: CalendarEvent = {
+          ...ev,
+          ...input,
+          id,
+          etag: null,
+          description: input.description ?? null,
+          location: input.location ?? null,
+          timezone: null,
+          status: "confirmed",
+          recurrence: null,
+          recurring_event_id: null,
+          conference_url: null,
+          updated: null,
+          raw: {},
+        };
+        setSelected([copy]);
+        setPanel({ mode: "view", event: copy });
+      },
     }),
-    [backend, calendars, isReadOnly, askScope],
+    [backend, calendars, calOf, isReadOnly, askScope],
   );
 
   /** the open event as currently stored (the panel's own copy is the
@@ -695,7 +747,6 @@ export default function App() {
     },
     [view],
   );
-  const openReview = useCallback(() => setView("review"), []);
 
   const toggleWeekends = useCallback(() => {
     if (view === "week") {
@@ -935,7 +986,11 @@ export default function App() {
       }
       if (mod && e.key.toLowerCase() === "v" && clipboardRef.current?.length) {
         e.preventDefault();
-        for (const c of clipboardRef.current) {
+        // a copied event from someone else's calendar pastes into yours
+        const mine =
+          calendars.find((k) => calendarEditable(k) && k.is_primary) ?? calendars.find((k) => calendarEditable(k));
+        for (const c0 of clipboardRef.current) {
+          const c = calendarEditable(calOf(c0.calendar_id)) || !mine ? c0 : { ...c0, calendar_id: mine.id };
           if (c.all_day) {
             const d = toDateOnly(anchor);
             const d2 = toDateOnly(addDays(startOfDay(anchor), 1));
@@ -1074,7 +1129,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [step, anyOverlay, selected, selectedOne, actions, cycleSelection, sortedVisible, openEvent, bulkRemove, bulkDuplicate, toggleSelect, toggleWeekends]);
+  }, [step, anyOverlay, selected, selectedOne, actions, cycleSelection, sortedVisible, openEvent, bulkRemove, bulkDuplicate, toggleSelect, toggleWeekends, calendars, calOf]);
 
   // Clicking outside the open editor dismisses it; the grid stays live
   // (clicking another chip switches panels directly) — Google behavior.
@@ -1148,7 +1203,6 @@ export default function App() {
           authed={authed}
           events={visible}
           onPickDate={pickDate}
-          onOpenReview={openReview}
         />
         <div className="main">
           <TopBar
@@ -1217,7 +1271,6 @@ export default function App() {
               onOpenEvent={openEvent}
             />
           )}
-          {view === "review" && <ReviewView backend={backend} />}
           {view === "insights" && (
             <InsightsView backend={backend} events={events} calendars={calendars} />
           )}

@@ -100,12 +100,33 @@ fn parse_start(e: &Event) -> Option<DateTime<Local>> {
         .map(|d| d.with_timezone(&Local))
 }
 
+/// An event copied in from one of the "Other calendars" stands for its
+/// original (src/lib/copies.ts): the original is dropped when one of your own
+/// events has its title and times, so the list and reminders show it once.
+fn without_copied_originals(db: &Db, events: Vec<Event>) -> Vec<Event> {
+    let read_only: HashSet<String> = db
+        .list_calendars()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|c| c.access_role != "owner" && c.access_role != "writer")
+        .map(|c| c.id)
+        .collect();
+    if read_only.is_empty() {
+        return events;
+    }
+    let sig = |e: &Event| (parse_start(e), parse_end(e), e.summary.trim().to_string());
+    let yours: HashSet<_> = events.iter().filter(|e| !read_only.contains(&e.calendar_id)).map(sig).collect();
+    events
+        .into_iter()
+        .filter(|e| !read_only.contains(&e.calendar_id) || !yours.contains(&sig(e)))
+        .collect()
+}
+
 fn upcoming(db: &Db, horizon_hours: i64) -> Vec<Event> {
     let now = Local::now();
     let end = now + chrono::Duration::hours(horizon_hours);
-    let mut events = db
-        .list_events_between(&now.to_rfc3339(), &end.to_rfc3339())
-        .unwrap_or_default()
+    let found = db.list_events_between(&now.to_rfc3339(), &end.to_rfc3339()).unwrap_or_default();
+    let mut events = without_copied_originals(db, found)
         .into_iter()
         .filter(|e| !e.all_day)
         .filter_map(|e| parse_start(&e).map(|s| (s, e)))
@@ -127,8 +148,8 @@ fn tray_events(db: &Db) -> Vec<(DateTime<Local>, DateTime<Local>, String, String
         .filter(|c| c.hidden)
         .map(|c| c.id)
         .collect();
-    db.list_events_between(&now.to_rfc3339(), &end.to_rfc3339())
-        .unwrap_or_default()
+    let found = db.list_events_between(&now.to_rfc3339(), &end.to_rfc3339()).unwrap_or_default();
+    without_copied_originals(db, found)
         .into_iter()
         .filter(|e| !e.all_day && !hidden.contains(&e.calendar_id) && !is_sleep(e))
         .filter_map(|e| {
@@ -349,6 +370,49 @@ mod tests {
         assert_eq!(rows.len(), 2); // 23:30 is past the 12-hour horizon from 10:00
         assert_eq!(rows[0], ("ev:c/a".to_string(), "now – 11:00 AM    A".to_string()));
         assert_eq!(rows[1], ("ev:c/b".to_string(), "2:00 PM    B".to_string()));
+    }
+
+    #[test]
+    fn a_copied_original_shows_once_an_uncopied_one_stays() {
+        let db = Db::open_in_memory().unwrap();
+        let cal = |id: &str, role: &str| sync_core::models::Calendar {
+            id: id.into(),
+            summary: id.into(),
+            color: None,
+            is_primary: id == "me",
+            hidden: false,
+            access_role: role.into(),
+        };
+        db.upsert_calendar(&cal("me", "owner")).unwrap();
+        db.upsert_calendar(&cal("school", "reader")).unwrap();
+        let ev = |id: &str, cal: &str, title: &str, h: u32| Event {
+            id: id.into(),
+            calendar_id: cal.into(),
+            etag: None,
+            summary: title.into(),
+            description: None,
+            location: None,
+            start: at(h, 0).to_rfc3339(),
+            end: at(h + 1, 0).to_rfc3339(),
+            all_day: false,
+            timezone: None,
+            status: "confirmed".into(),
+            recurrence: None,
+            recurring_event_id: None,
+            conference_url: None,
+            updated: None,
+            raw: None,
+        };
+        let got = without_copied_originals(
+            &db,
+            vec![
+                ev("lec", "school", "Lecture", 10),
+                ev("copy", "me", "Lecture", 10),
+                ev("talk", "school", "Seminar", 14),
+            ],
+        );
+        let ids: Vec<&str> = got.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["copy", "talk"]);
     }
 
     #[test]

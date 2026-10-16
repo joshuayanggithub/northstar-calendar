@@ -12,6 +12,7 @@ import type { Backend, Calendar, CalendarEvent, EventInput } from "../lib/types"
 import type { DraftEvent } from "./WeekView";
 import type { EventActions } from "./App";
 import { colorOf } from "../lib/useBackend";
+import { CopyTargets } from "./CopyTargets";
 import { geocodeOne, gmapsUrl, osmEmbedUrl, searchPlaces, type Place } from "../lib/places";
 import { setStarGoal, starKey, starState, subscribeStars } from "../lib/stars";
 import { useGoals } from "../lib/goals";
@@ -211,7 +212,10 @@ export function EventPanel(props: {
   const [error, setError] = useState<string | null>(null);
   const dateRef = useRef<HTMLInputElement | null>(null);
   const defaultCalendarId =
-    calendars.find((c) => c.is_primary)?.id ?? calendars[0]?.id ?? "";
+    calendars.find((c) => c.is_primary && calendarEditable(c))?.id ?? calendars.find(calendarEditable)?.id ?? "";
+  const [copyOpen, setCopyOpen] = useState(false);
+  const openKey = state.mode === "view" ? `${state.event.calendar_id}/${state.event.id}` : state.mode;
+  useEffect(() => setCopyOpen(false), [openKey]);
 
   useEffect(() => {
     setError(null);
@@ -506,9 +510,32 @@ export function EventPanel(props: {
         onChange={(e) => setTitle(e.target.value)}
       />
 
-      {readOnly && (
+      {readOnly && state.mode === "view" && (
         <div className="panel-readonly" data-testid="panel-readonly">
-          Read-only calendar — events here can’t be edited
+          <span>
+            Read-only calendar{cal ? ` (${cal.summary})` : ""} — copy it into one of yours to make it your own
+          </span>
+          <span className="panel-copy">
+            <button
+              type="button"
+              className="btn panel-copy-btn"
+              data-testid="panel-copy"
+              aria-expanded={copyOpen}
+              onClick={() => setCopyOpen((o) => !o)}
+            >
+              Copy to my calendar…
+            </button>
+            {copyOpen && (
+              <CopyTargets
+                calendars={calendars}
+                recurring={!!state.event.recurring_event_id}
+                onPick={(id, series) => {
+                  setCopyOpen(false);
+                  void props.actions.copyTo(state.event, id, series);
+                }}
+              />
+            )}
+          </span>
         </div>
       )}
 
@@ -804,7 +831,7 @@ export function EventPanel(props: {
         </div>
       </div>
 
-      {state.mode === "view" && (
+      {state.mode === "view" && !readOnly && (
         <div className="panel-section">
           <span className="panel-icon panel-star-icon">★</span>
           <div className="panel-section-body">

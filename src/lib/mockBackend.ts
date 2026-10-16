@@ -164,21 +164,6 @@ const dbListeners = new Set<() => void>();
 const authListeners = new Set<(a: boolean) => void>();
 const notifyDb = () => dbListeners.forEach((cb) => cb());
 
-const mdFiles: Record<string, { content: string; mtime: number }> = {
-  journal: {
-    mtime: 1,
-    content: `# Journal
-
-## Weekly Review — Oct 5, 2026
-Good momentum on the problem sets. Distractions crept up on Thursday.
-
-- [x] Reviewed last week's goals
-- [ ] Planned next week
-`,
-  },
-};
-const mdListeners = new Set<(which: string) => void>();
-
 // demo goals (made up: the mock never shows anyone's real goals); a
 // fixture may bring its own (fixtureGoals, above)
 let goalsFile: GoalsFile | null = null;
@@ -430,21 +415,6 @@ export const mockBackend: Backend = {
     goalsListeners.add(cb);
     return () => goalsListeners.delete(cb);
   },
-  async mdRead(which) {
-    const f = mdFiles[which];
-    if (!f) return { content: "", mtime_ms: 0, exists: false };
-    return { content: f.content, mtime_ms: f.mtime, exists: true };
-  },
-  async mdWrite(which, content, expectedMtimeMs) {
-    const f = mdFiles[which];
-    if (!f) throw new Error("unknown notes file");
-    if (expectedMtimeMs !== 0 && f.mtime !== expectedMtimeMs)
-      throw new Error("conflict: the file changed on disk");
-    f.content = content;
-    f.mtime += 1;
-    mdListeners.forEach((cb) => cb(which));
-    return f.mtime;
-  },
   async getGoalClassifications() {
     // fixture: the classifier would tag research reading as goal work
     const tagged: Record<string, string> = {};
@@ -457,10 +427,6 @@ export const mockBackend: Backend = {
   },
   onGoalClassChanged() {
     return () => {};
-  },
-  onMdChanged(cb) {
-    mdListeners.add(cb);
-    return () => mdListeners.delete(cb);
   },
   onDbChanged(cb) {
     dbListeners.add(cb);

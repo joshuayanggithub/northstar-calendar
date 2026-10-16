@@ -273,6 +273,9 @@ the window on an existing display (e.g. SSH X forwarding) instead.
 
 ## Shipped log (newest first)
 
+- `a0ea5055` Other calendars read-only by default + Copy to my calendar (picker, series), copied originals step aside
+- `69537ede` Obsidian link removed (journal bridge, weekly-review view, goals import)
+- `56ab03a1` Margin notes: size the box from its edges/corner, A−/A+ writing size
 - `4352f531` App icon "Polaris is today" + north-star menu bar glyph
 - `9e9f91a1` Drag day switching by sideways travel with slack (no more accidental day hops)
 - `d3166cdd` Group drag: all selected events move together with live ghosts

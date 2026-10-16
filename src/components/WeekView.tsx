@@ -24,9 +24,10 @@ import { blockBandPx } from "../lib/chipText";
 import { planText, visibleRegions, type PlacedText, type ShapeBox, type TextSpec } from "../lib/labelPlace";
 import { FOCUS, DEEP_CALENDARS, focusScore, fmtClock, fmtH, type FocusScore } from "../lib/insights";
 import { starKey, starState, subscribeStars, toggleStar } from "../lib/stars";
-import { reconKey, reconOf, reconSince, reconState, setRecon, subscribeRecon } from "../lib/recon";
+import { reconExempt, reconKey, reconOf, reconSince, reconState, setRecon, subscribeRecon } from "../lib/recon";
 import { colorOf } from "../lib/useBackend";
 import { MarginNotes } from "./MarginNotes";
+import { CopyTargets } from "./CopyTargets";
 import { calendarEditable } from "../lib/types";
 import type { Backend, Calendar, CalendarEvent } from "../lib/types";
 import type { EventActions } from "./App";
@@ -74,6 +75,8 @@ interface CtxMenu {
   x: number;
   y: number;
   event: CalendarEvent;
+  /** showing the calendars to copy a read-only event into */
+  copying?: boolean;
 }
 
 function snap(min: number): number {
@@ -147,6 +150,19 @@ export function WeekView(props: {
   const gridRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [ctx, setCtx] = useState<CtxMenu | null>(null);
+  // Escape closes the right-click menu (and only that: the selection and the
+  // open event stay)
+  useEffect(() => {
+    if (!ctx) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      setCtx(null);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [ctx]);
   /** the focus-score explanation being hovered: its day and badge position */
   const [scorePop, setScorePop] = useState<{ day: Date; x: number; y: number } | null>(null);
   const [, forceTick] = useState(0);
@@ -1544,11 +1560,22 @@ export function WeekView(props: {
             className="ctx-menu"
             data-testid="ctx-menu"
             style={{
-              left: Math.min(ctx.x, window.innerWidth - 180),
-              top: Math.min(ctx.y, window.innerHeight - 140),
+              left: Math.min(ctx.x, window.innerWidth - 200),
+              top: Math.max(8, Math.min(ctx.y, window.innerHeight - (ctx.copying ? 340 : 140))),
             }}
             onPointerDown={(e) => e.stopPropagation()}
           >
+            {ctx.copying ? (
+              <CopyTargets
+                calendars={calendars}
+                recurring={!!ctx.event.recurring_event_id}
+                onPick={(id, series) => {
+                  void props.actions.copyTo(ctx.event, id, series);
+                  setCtx(null);
+                }}
+              />
+            ) : (
+            <>
             <button
               onClick={() => {
                 props.onOpenEvent(ctx.event, { x: ctx.x, y: ctx.y });
@@ -1557,15 +1584,21 @@ export function WeekView(props: {
             >
               Open
             </button>
-            <button
-              onClick={() => {
-                props.actions.duplicate(ctx.event);
-                setCtx(null);
-              }}
-            >
-              {editableCal(ctx.event.calendar_id) ? "Duplicate" : "Copy to my calendar"} <kbd>⌘D</kbd>
-            </button>
-            {eventDates(ctx.event).end.getTime() < nowDate.getTime() && !ctx.event.all_day && (
+            {editableCal(ctx.event.calendar_id) ? (
+              <button
+                onClick={() => {
+                  props.actions.duplicate(ctx.event);
+                  setCtx(null);
+                }}
+              >
+                Duplicate <kbd>⌘D</kbd>
+              </button>
+            ) : (
+              <button data-testid="ctx-copy-to" onClick={() => setCtx({ ...ctx, copying: true })}>
+                Copy to my calendar… <kbd>›</kbd>
+              </button>
+            )}
+            {eventDates(ctx.event).end.getTime() < nowDate.getTime() && !reconExempt(ctx.event, calendars) && (
               <>
                 <button
                   onClick={() => {
@@ -1593,14 +1626,16 @@ export function WeekView(props: {
                 </button>
               </>
             )}
-            <button
-              onClick={() => {
-                toggleStar(starKey(ctx.event));
-                setCtx(null);
-              }}
-            >
-              {starState(starKey(ctx.event))?.kind === "manual" ? "Unstar" : "Star as goal work"} <kbd>★</kbd>
-            </button>
+            {editableCal(ctx.event.calendar_id) && (
+              <button
+                onClick={() => {
+                  toggleStar(starKey(ctx.event));
+                  setCtx(null);
+                }}
+              >
+                {starState(starKey(ctx.event))?.kind === "manual" ? "Unstar" : "Star as goal work"} <kbd>★</kbd>
+              </button>
+            )}
             {props.onClipboard && editableCal(ctx.event.calendar_id) && (
               <button
                 onClick={() => {
@@ -1653,6 +1688,8 @@ export function WeekView(props: {
               >
                 Delete series
               </button>
+            )}
+            </>
             )}
           </div>
         </div>

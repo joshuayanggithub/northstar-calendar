@@ -150,6 +150,9 @@ export async function probeInPage(): Promise<ProbeResult> {
                   // edge for a moment after each scroll: system UI, not ours
                   if (x > gr.right - 16) continue;
                   const hit = document.elementFromPoint(x, y) as HTMLElement | null;
+                  // a note the person dragged there is theirs to place (the
+                  // placer's own spots are judged by the notes law below)
+                  if (hit?.closest(".margin-note.pinned")) continue;
                   const who = hit?.closest(OWNER) as HTMLElement | null;
                   if (who !== owner) {
                     why = `covered at y=${Math.round(y - cr.top)} by ${who ? label(who) : `nothing (clipped; hit ${hit ? hit.tagName.toLowerCase() + "." + String(hit.className).split(" ").join(".") : "none"} at ${Math.round(x)},${Math.round(y)} in ${innerWidth}x${innerHeight})`}`;
@@ -249,6 +252,9 @@ export async function probeInPage(): Promise<ProbeResult> {
     const meet = (a: DOMRect, b: DOMRect, pad = 0) =>
       a.left < b.right + pad && a.right > b.left - pad && a.top < b.bottom + pad && a.bottom > b.top - pad;
     const inks = noteEls.map(noteInk);
+    // where the person put (or sized) a note is theirs to choose: only the
+    // placer's own spots must keep off text, other notes and the grid edge
+    const mine = (n: HTMLElement) => n.classList.contains("pinned");
     noteEls.forEach((n, i) => {
       const name = `"${(n.textContent || "").slice(0, 30)}"`;
       // whole: every line laid out in full, nothing hidden
@@ -257,14 +263,14 @@ export async function probeInPage(): Promise<ProbeResult> {
       }
       if ((n.textContent || "").includes("…")) notesBad.push(`${name} is shortened`);
       // inside the grid
-      if (lr) {
+      if (lr && !mine(n)) {
         const nb = n.getBoundingClientRect();
         if (nb.left < lr.left - 1 || nb.right > lr.right + 1 || nb.top < lr.top - 1 || nb.bottom > lr.bottom + 1) {
           notesBad.push(`${name} leaves the grid`);
         }
       }
       // never on printed text (the ink, rotated boxes included)
-      for (const r of inks[i]) {
+      for (const r of mine(n) ? [] : inks[i]) {
         const hit = inkRects.find((t) => meet(r, t.r));
         if (hit) {
           const f = (q: DOMRect) => `${Math.round(q.left)},${Math.round(q.top)}..${Math.round(q.right)},${Math.round(q.bottom)}`;
@@ -274,6 +280,7 @@ export async function probeInPage(): Promise<ProbeResult> {
       }
       // never on another note
       for (let j = i + 1; j < noteEls.length; j++) {
+        if (mine(n) && mine(noteEls[j])) continue;
         if (inks[i].some((a) => inks[j].some((b) => meet(a, b)))) {
           notesBad.push(`${name} overlaps "${(noteEls[j].textContent || "").slice(0, 30)}"`);
         }

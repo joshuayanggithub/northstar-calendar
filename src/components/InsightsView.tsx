@@ -14,11 +14,8 @@ import {
   topDistraction,
 } from "../lib/insights";
 import { eventDates } from "../lib/dates";
-import { appendReviewEntry } from "../lib/markdown";
-import { useMd } from "../lib/useMd";
 import { useGoals } from "../lib/goals";
-import { showToast } from "../lib/undo";
-import type { Backend, Calendar, CalendarEvent } from "../lib/types";
+import { readOnlyEvent, type Backend, type Calendar, type CalendarEvent } from "../lib/types";
 import { colorOf } from "../lib/useBackend";
 import { reconKey, reconOf, reconSince, subscribeRecon } from "../lib/recon";
 
@@ -38,10 +35,13 @@ export function InsightsView(props: {
   events: CalendarEvent[];
   calendars: Calendar[];
 }) {
-  const { events, calendars } = props;
+  const { calendars } = props;
+  // only your calendars count: someone else's events count once copied in
+  const events = useMemo(
+    () => props.events.filter((e) => !readOnlyEvent(e, calendars)),
+    [props.events, calendars],
+  );
   const goals = useGoals(props.backend);
-  const journal = useMd(props.backend, "journal");
-  const [copied, setCopied] = useState(false);
   // the day score credits reviewed events: recompute when a review lands
   const [reconTick, setReconTick] = useState(0);
   useEffect(() => subscribeRecon(() => setReconTick((t) => t + 1)), []);
@@ -170,18 +170,6 @@ export function InsightsView(props: {
     goalTasks.length ? `Goals ${goalsDone}/${goalTasks.length} checked` : "",
   ].filter(Boolean);
 
-  const copyToJournal = async () => {
-    await journal.mutate((c) =>
-      appendReviewEntry(
-        c,
-        format(now(), "MMM d, yyyy"),
-        reportLines().map((l) => `- ${l}`).join("\n"),
-      ),
-    );
-    setCopied(true);
-    showToast("Week report appended to your Obsidian journal", false);
-  };
-
   return (
     <div className="insightsview" data-testid="insights-view">
       <div className="ins-grid">
@@ -294,9 +282,6 @@ export function InsightsView(props: {
           <span className="ins-note ins-wrap">
             {reportLines().join("  ·  ")}
           </span>
-          <button className="btn" onClick={copyToJournal} disabled={copied}>
-            {copied ? "Added ✓" : "Append to journal"}
-          </button>
         </section>
       </div>
     </div>

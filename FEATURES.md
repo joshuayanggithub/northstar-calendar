@@ -70,7 +70,7 @@ Calendar account, manual = user confirms in the running app.
 | Calendar colors = Google Calendar's displayed palette (legacy API hex mapped), tinted translucent | tested (2026-10-16, `10efe30e`) | e2e/color.spec.ts; checked against the live Google sidebar |
 | Multi-select drag: shift-click / shift-drag several events, drag one, all move (ghost each, wall-clock shift, selection kept) | tested (2026-10-16, `d3166cdd`) | e2e/groupdrag.spec.ts |
 | Past events faded: every ended event (unconfirmed, sleep, all-day, clustered too) at 30% of its calendar's tint, hue kept | tested (2026-10-16, `04135f78`, `8ef1d0f7`) | e2e/pastfade.spec.ts (all 24 Google colors, both themes: past/future gap, hue, chroma, title contrast) |
-| Margin notes: your red-pen notes placed in free space (any column, event bodies), arrows to the event, always whole, draggable (spot remembered), placed by annealing in a worker | tested (2026-10-16, `7180685a`, `e1a55b97`) | e2e/marginnotes.spec.ts (property + captured real pages), e2e/notes.spec.ts (drag/reload/reset), textprobe law 5 in Chromium + real window (7 views) |
+| Margin notes: your red-pen notes placed in free space (any column, event bodies), arrows to the event, always whole, draggable (spot remembered), box sizable from its edges/corner and writing size A−/A+ (remembered), placed by annealing in a worker | tested (2026-10-16, `7180685a`, `e1a55b97`, `56ab03a1`) | e2e/marginnotes.spec.ts (property + captured real pages), e2e/notes.spec.ts (drag/size/font/reload/reset), textprobe law 5 in Chromium + real window (7 views; hand-placed notes exempt) |
 | Goals in the sidebar (daily / weekly / long-term, kept by the app; ticks reset per day / week) | tested (2026-10-16, `f940f148`) | e2e/goals.spec.ts; Rust migration test |
 | Pessimistic focus score: deep work = Homework / Learning and Research / Enrichment only; clean stretches, interruptions, distraction, sleep duration/timing/regularity, late nights | tested (2026-10-16, `31c58084`) | e2e/focus.spec.ts (incl. gaming attempts); design/focus-score.md |
 
@@ -108,7 +108,7 @@ keyboard-opened panels anchor top-right.
 |---|---|---|
 | Respond to invitations (RSVP yes/no/maybe from the app) | todo | live |
 | Invite guests + track responses on own events | todo | live |
-| Holiday / birthday / subscribed calendars display (read-only cals) | todo | live |
+| Holiday / birthday / subscribed calendars display (read-only cals); "Other calendars" read-only by default: no reconciliation, score, stars or goal suggestions; "Copy to my calendar…" picks the calendar (one occurrence or the series); a copied original steps aside for its copy (grid, menu bar, reminders); ⌘V pastes into yours | tested (2026-10-16, `a0ea5055`) | e2e/othercals.spec.ts, smoke readonly tests, cargo notify test; live data: 12 reader calendars |
 | Per-event color override | todo | e2e + live |
 | Event visibility (busy/free, private/public) on events | todo | live |
 | Working hours display | todo | e2e |
