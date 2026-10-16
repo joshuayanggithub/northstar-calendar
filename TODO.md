@@ -111,7 +111,8 @@ browser server now runs independently. The 15:59 run had one transient
 - [ ] Continue the 15-minute full-suite stress loop and inspect every failure.
   A fresh Linux continuation is running through 2026-10-16 19:03 PT; results
   are preserved under `logs/stress-2026-10-17/`. Before it began, the complete
-  suite passed 269 with 62 intentional skips and zero failures.
+  suite passed 269 with 62 intentional skips and zero failures. Continuation
+  run 1 passed 179 with 42 intentional skips.
 
 ## Overlap text placement — 2026-10-15 evening (committed `2fc384d8`)
 
@@ -241,11 +242,14 @@ saved before the merge. Its own tests, run against the merged code:
 - [x] **Drag after a partial horizontal pan lands in the wrong day**: the
   WIP's column math (day-clip width + pan offset) is in `9e9f91a1`, along with
   day switching by sideways travel with slack.
-- [ ] **All-day COUNT series can't do "this and following"** (test fails on
-  main). The WIP drops App.tsx's guard (`canSplit` excluded all-day). Needs
-  a live check that splitting an all-day series is right against Google
-  (UNTIL as a date, COUNT carried) before enabling; `e2e/live_series_split.py`
-  in the WIP covers it.
+- [x] **All-day COUNT series couldn't do "this and following"** (`bb0113b`).
+  Reproduced at App.tsx's `canSplit` guard: the scope option was disabled
+  before any service/backend call. It is enabled now; truncation emits the
+  date-valued `UNTIL` required for an all-day DTSTART, and the new series
+  keeps the remaining `COUNT`. The old mock accepted only UTC date-times and
+  now mirrors both RFC 5545 forms. Focused timed/all-day COUNT cases pass.
+- [ ] Run the disposable all-day COUNT split against live Google on the Mac;
+  the current `e2e/live_series_split.py` probe covers the timed form.
 - [ ] **Policy: a local delete vs a concurrent Google edit.** The WIP makes
   the delete win (fetch the current etag, retry); the engine's rule is
   412 → remote wins. Its first test (delete queued after our own edit) already
@@ -279,6 +283,7 @@ and `sudo -n` requires a password, so native setup cannot finish unattended.
 
 ## Shipped log (newest first)
 
+- `bb0113b` All-day fixed-count series can edit “this and following” with date-valued `UNTIL`
 - `2d122b3` Reviewed Linux visual baselines for both themes
 - `237f33d` Margin notes stay rigid after swipe settlement; drag E2E fixtures are host-timezone independent
 - `4352f531` App icon "Polaris is today" + north-star menu bar glyph

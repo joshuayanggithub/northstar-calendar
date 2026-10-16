@@ -52,6 +52,7 @@ Calendar account, manual = user confirms in the running app.
 | Recurring events: move entire series to another calendar | tested (live 2026-10-15) | e2e + disposable two-instance Google round-trip |
 | Recurring events: convert whole series timed ↔ all-day or shift its dates | tested (2026-10-15, `03b55d3`) | mock E2E + disposable two-instance live Google conversion both ways |
 | Recurring events: edit “this and following” on fixed-count series | tested (2026-10-15, `a72e439`) | E2E edit/delete/first-instance cases + disposable live Google COUNT=3 split into 1+2 instances |
+| Recurring all-day events: edit “this and following” on fixed-count series | in testing (2026-10-16, `bb0113b`) | mock E2E verifies date-valued `UNTIL` + remaining `COUNT`; disposable live Google all-day probe pending |
 | Recurring events: change guests, busy/free, visibility, reminders for whole series | tested (mock 2026-10-15) | two-instance e2e |
 | Delete event with undo toast (⌘Z); delete series for recurring | tested (e2e + live) | e2e + live |
 | Timezone-correct display incl. DST boundaries | building | unit |

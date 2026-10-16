@@ -10,7 +10,7 @@ tracking: FEATURES.md for the parity matrix, e2e/QA-BACKLOG.md for QA items.)
 | 3 | Rigorous end-to-end UX testing vs ground truth | ongoing (Linux full suite: 269 passed, 62 intentional skips, zero failures; both-theme Linux baselines reviewed in `2d122b3`; 15-minute stress continuation scheduled through 2026-10-16 19:03 PT) |
 | 4 | Fix drag text-selection, panel placement, calendar show/hide, add/subscribe calendars | done |
 | 5 | Read-only calendars (subscribed feeds not movable/editable) | done |
-| 6 | Recurring edit scope popup (this / this+following / all) | done (`a72e439` also enables safe fixed-count splits; native Google COUNT=3 round trip passed) |
+| 6 | Recurring edit scope popup (this / this+following / all) | done (`a72e439` enables timed fixed-count splits with a native Google COUNT=3 round trip; `bb0113b` enables all-day fixed-count splits with live all-day verification pending) |
 | 7 | Better app icon (generic, no hardcoded date) | done |
 | 8 | Shift/⌘ multi-select, marquee, ⌘A, bulk ops, group drag | done |
 | 9 | Ghost/selection colors must keep the calendar color (no generic blue) | done |
