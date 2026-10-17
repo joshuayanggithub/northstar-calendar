@@ -245,6 +245,7 @@ export function EventPanel(props: {
   useEffect(() => setCopyOpen(false), [openKey]);
 
   useEffect(() => {
+    setBusy(false);
     setError(null);
     setWithMeet(false);
     setMenuOpen(false);
@@ -459,6 +460,9 @@ export function EventPanel(props: {
       props.onClose();
     } catch (e) {
       setError(String(e));
+    } finally {
+      // the panel stays mounted between events: a busy flag left on here
+      // disabled Save and Delete on every event opened after a delete
       setBusy(false);
     }
   };

@@ -916,7 +916,7 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
       const typing =
-        target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable;
+        target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable;
       const mod = e.metaKey || e.ctrlKey;
       // ignore global shortcuts while a grid drag is in progress (Esc is
       // handled by the drag itself)
@@ -1041,6 +1041,14 @@ export default function App() {
       }
       if (mod) return;
 
+      // the open event's panel: Delete / Backspace delete it (Notion), unless
+      // a field in it has the focus (that's editing text, handled above)
+      if ((e.key === "Backspace" || e.key === "Delete") && panel.mode === "view" && !quickOpen && !cmdOpen) {
+        e.preventDefault();
+        void actions.remove(panel.event);
+        return;
+      }
+
       if (anyOverlay) return;
 
       switch (e.key) {
@@ -1141,7 +1149,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [step, anyOverlay, selected, selectedOne, actions, cycleSelection, sortedVisible, openEvent, bulkRemove, bulkDuplicate, toggleSelect, toggleWeekends, calendars, calOf]);
+  }, [step, anyOverlay, selected, selectedOne, actions, cycleSelection, sortedVisible, openEvent, bulkRemove, bulkDuplicate, toggleSelect, toggleWeekends, calendars, calOf, panel, quickOpen, cmdOpen]);
 
   // Pinch on the trackpad zooms how many days are shown: spreading the
   // fingers shows fewer (each wider), squeezing shows more, 1 to 9, in
