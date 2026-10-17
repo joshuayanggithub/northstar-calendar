@@ -21,7 +21,8 @@ import {
   useEvents,
   useVisibleEvents,
 } from "../lib/useBackend";
-import { calendarEditable } from "../lib/types";
+import { calendarEditable, readOnlyEvent } from "../lib/types";
+import { copiedKeys, linkCopy } from "../lib/copies";
 import type { Calendar, CalendarEvent, EventInput } from "../lib/types";
 import { ScopeDialog, type PendingScope, type Scope } from "./ScopeDialog";
 import { dismissToast, onToast, recordUndo, showToast, undoLast } from "../lib/undo";
@@ -35,11 +36,11 @@ import { MonthView } from "./MonthView";
 import { AgendaView } from "./AgendaView";
 import { EventPanel, type PanelState } from "./EventPanel";
 import { QuickCreate } from "./QuickCreate";
-import { ReviewView } from "./ReviewView";
 import { InsightsView } from "./InsightsView";
+import { PANEL_PANE, PaneResize, SIDEBAR_PANE, usePaneWidth } from "./PaneResize";
 import { CommandMenu } from "./CommandMenu";
 
-export type View = "day" | "week" | "month" | "list" | "review" | "insights";
+export type View = "day" | "week" | "month" | "list" | "insights";
 
 function addBusinessDays(day: Date, offset: number): Date {
   let result = addDays(startOfDay(day), Math.trunc(offset / 5) * 7);
@@ -89,6 +90,9 @@ export interface EventActions {
    *  Undoable; never prompts for scope. */
   setNote(ev: CalendarEvent, note: string | null): Promise<void>;
   duplicate(ev: CalendarEvent): Promise<void>;
+  /** Copy an event from one of the "Other calendars" into one of yours —
+   *  with `series`, every occurrence of it — and open the copy. Undoable. */
+  copyTo(ev: CalendarEvent, calendarId: string, series?: boolean): Promise<void>;
 }
 
 function openExternal(url: string) {
@@ -111,6 +115,8 @@ export default function App() {
   const [connecting, setConnecting] = useState(false);
   const [selected, setSelected] = useState<CalendarEvent[]>([]);
   const [sidebarHidden, setSidebarHidden] = useState(false);
+  const [sidebarW, setSidebarW] = usePaneWidth(SIDEBAR_PANE);
+  const [panelW, setPanelW] = usePaneWidth(PANEL_PANE);
   const [dayCount, setDayCount] = useState(1); // 1-9 day view width (Notion 2-9)
   const [hourPx, setHourPx] = useState(48); // hour zoom (shift+cmd+. / , / 0)
   const [secondaryTz, setSecondaryTz] = useState<string | null>(() => {
@@ -205,7 +211,7 @@ export default function App() {
         : week.map((d) => addDays(d, panDays));
       return { start: days[0], end: addDays(days[days.length - 1], 1), days };
     }
-    if (view === "list" || view === "review") {
+    if (view === "list") {
       const s = startOfDay(anchor);
       return { start: s, end: addDays(s, 14), days: [] };
     }
@@ -229,7 +235,13 @@ export default function App() {
     [Math.floor(range.end.getTime() / (7 * 86400000))], // eslint-disable-line react-hooks/exhaustive-deps
   );
   const events = useEvents(backend, fetchStart, fetchEnd);
-  const visible = useVisibleEvents(events, calendars);
+  const shownCals = useVisibleEvents(events, calendars);
+  // an event copied in from someone else's calendar: the copy stands for it
+  const copied = useMemo(() => copiedKeys(events, (e) => readOnlyEvent(e, calendars)), [events, calendars]);
+  const visible = useMemo(
+    () => (copied.size ? shownCals.filter((e) => !copied.has(`${e.calendar_id}/${e.id}`)) : shownCals),
+    [shownCals, copied],
+  );
 
   // the selection follows its events: a move, an edit or a sync replaces the
   // event objects, and copy / duplicate / a second group drag must use the
@@ -399,8 +411,51 @@ export default function App() {
           await backend.deleteEvent(input.calendar_id, id);
         });
       },
+      async copyTo(ev, calendarId, series = false) {
+        const cal = calOf(calendarId);
+        if (!backend || !cal || !calendarEditable(cal)) return;
+        let input: EventInput = { ...inputOf(ev), calendar_id: calendarId };
+        let whole = false;
+        if (series && ev.recurring_event_id) {
+          // the series as its owner wrote it: first occurrence + the rule
+          const master = await backend.getSeriesMaster(ev.calendar_id, ev.recurring_event_id).catch(() => null);
+          const rule = (master?.recurrence ?? []).filter((r: string) => /^(RRULE|EXRULE|RDATE|EXDATE)/.test(r));
+          const s = master?.start?.dateTime ?? master?.start?.date;
+          const e = master?.end?.dateTime ?? master?.end?.date;
+          if (rule.length && s && e) {
+            input = { ...input, summary: master.summary ?? ev.summary, start: s, end: e, all_day: !!master.start.date, recurrence: rule };
+            whole = true;
+          } else {
+            showToast("Couldn't read the whole series — copied this event only", false);
+          }
+        }
+        const id = await backend.createEvent(input);
+        linkCopy(ev, { calendar_id: calendarId, id });
+        recordUndo(`Copied “${ev.summary}”${whole ? " (every occurrence)" : ""} to ${cal.summary}`, async () => {
+          await backend.deleteEvent(calendarId, id);
+        });
+        if (whole) return;
+        // open the copy: it's yours now, to retitle, move or note
+        const copy: CalendarEvent = {
+          ...ev,
+          ...input,
+          id,
+          etag: null,
+          description: input.description ?? null,
+          location: input.location ?? null,
+          timezone: null,
+          status: "confirmed",
+          recurrence: null,
+          recurring_event_id: null,
+          conference_url: null,
+          updated: null,
+          raw: {},
+        };
+        setSelected([copy]);
+        setPanel({ mode: "view", event: copy });
+      },
     }),
-    [backend, calendars, isReadOnly, askScope],
+    [backend, calendars, calOf, isReadOnly, askScope],
   );
 
   /** the open event as currently stored (the panel's own copy is the
@@ -704,7 +759,6 @@ export default function App() {
     },
     [view],
   );
-  const openReview = useCallback(() => setView("review"), []);
 
   const toggleWeekends = useCallback(() => {
     if (view === "week") {
@@ -944,7 +998,11 @@ export default function App() {
       }
       if (mod && e.key.toLowerCase() === "v" && clipboardRef.current?.length) {
         e.preventDefault();
-        for (const c of clipboardRef.current) {
+        // a copied event from someone else's calendar pastes into yours
+        const mine =
+          calendars.find((k) => calendarEditable(k) && k.is_primary) ?? calendars.find((k) => calendarEditable(k));
+        for (const c0 of clipboardRef.current) {
+          const c = calendarEditable(calOf(c0.calendar_id)) || !mine ? c0 : { ...c0, calendar_id: mine.id };
           if (c.all_day) {
             const d = toDateOnly(anchor);
             const d2 = toDateOnly(addDays(startOfDay(anchor), 1));
@@ -1083,7 +1141,81 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [step, anyOverlay, selected, selectedOne, actions, cycleSelection, sortedVisible, openEvent, bulkRemove, bulkDuplicate, toggleSelect, toggleWeekends]);
+  }, [step, anyOverlay, selected, selectedOne, actions, cycleSelection, sortedVisible, openEvent, bulkRemove, bulkDuplicate, toggleSelect, toggleWeekends, calendars, calOf]);
+
+  // Pinch on the trackpad zooms how many days are shown: spreading the
+  // fingers shows fewer (each wider), squeezing shows more, 1 to 9, in
+  // proportion to the pinch; the day under the fingers stays where it is.
+  // Chromium reports a pinch as a ctrl+wheel; WebKit (the app's webview) as
+  // gesturestart/gesturechange with a scale.
+  const mainRef = useRef<HTMLDivElement>(null);
+  const zoomStateRef = useRef({ view, dayCount, days: range.days });
+  zoomStateRef.current = { view, dayCount, days: range.days };
+  useEffect(() => {
+    const el = mainRef.current;
+    if (!el) return;
+    type Pinch = { base: number; dayUnder: Date; frac: number; scale: number; t: number };
+    let pinch: Pinch | null = null;
+    let gesture = false;
+    const begin = (clientX: number): Pinch | null => {
+      const { view: v, dayCount: n, days } = zoomStateRef.current;
+      if ((v !== "week" && v !== "day") || !days.length) return null;
+      // the visible days (the strip also holds a column either side)
+      const clip = (el.querySelector(".day-clip") ?? el).getBoundingClientRect();
+      const shown = v === "week" ? days.length : n;
+      const frac = Math.min(0.999, Math.max(0, (clientX - clip.left) / Math.max(1, clip.width)));
+      return { base: shown, dayUnder: days[Math.min(days.length - 1, Math.floor(frac * shown))], frac, scale: 1, t: 0 };
+    };
+    const apply = (p: Pinch) => {
+      const n = Math.min(9, Math.max(1, Math.round(p.base / p.scale)));
+      const { view: v, dayCount: cur, days } = zoomStateRef.current;
+      if (n === (v === "week" ? days.length : cur)) return;
+      // keep the day under the fingers in the same place across the view
+      const first = addDays(startOfDay(p.dayUnder), -Math.min(n - 1, Math.floor(p.frac * n)));
+      setPanDays(0);
+      setAnchor(first);
+      setDayCount(n);
+      setView("day");
+    };
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey || gesture) return;
+      e.preventDefault(); // not the page's own zoom
+      const tNow = performance.now();
+      if (!pinch || tNow - pinch.t > 300) pinch = begin(e.clientX);
+      if (!pinch) return;
+      pinch.t = tNow;
+      pinch.scale *= Math.exp(-e.deltaY / 100);
+      apply(pinch);
+    };
+    type GestureLike = Event & { scale?: number; clientX?: number };
+    const onGestureStart = (e: Event) => {
+      e.preventDefault();
+      gesture = true;
+      pinch = begin((e as GestureLike).clientX ?? el.getBoundingClientRect().left + el.clientWidth / 2);
+    };
+    const onGestureChange = (e: Event) => {
+      e.preventDefault();
+      const sc = (e as GestureLike).scale;
+      if (!pinch || !sc) return;
+      pinch.scale = sc;
+      apply(pinch);
+    };
+    const onGestureEnd = (e: Event) => {
+      e.preventDefault();
+      gesture = false;
+      pinch = null;
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    el.addEventListener("gesturestart", onGestureStart);
+    el.addEventListener("gesturechange", onGestureChange);
+    el.addEventListener("gestureend", onGestureEnd);
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("gesturestart", onGestureStart);
+      el.removeEventListener("gesturechange", onGestureChange);
+      el.removeEventListener("gestureend", onGestureEnd);
+    };
+  }, []);
 
   // Clicking outside the open editor dismisses it; the grid stays live
   // (clicking another chip switches panels directly) — Google behavior.
@@ -1091,6 +1223,8 @@ export default function App() {
     if (panel.mode === "closed") return;
     const onDown = (ev: PointerEvent) => {
       const el = document.querySelector(".event-panel");
+      // resizing a side pane is not leaving the event
+      if ((ev.target as Element | null)?.closest?.(".pane-resize")) return;
       if (el && !el.contains(ev.target as Node)) {
         // Mark this gesture so the grid treats it as dismiss-only: React may
         // flush the close before the grid's own pointerdown handler runs.
@@ -1149,7 +1283,10 @@ export default function App() {
 
   return (
     <BackendContext.Provider value={backend}>
-      <div className={"app" + (sidebarHidden ? " sidebar-hidden" : "")}>
+      <div
+        className={"app" + (sidebarHidden ? " sidebar-hidden" : "")}
+        style={{ "--sidebar-w": `${sidebarW}px`, "--panel-w": `${panelW}px` } as React.CSSProperties}
+      >
         <Sidebar
           backend={backend}
           calendars={calendars}
@@ -1157,9 +1294,18 @@ export default function App() {
           authed={authed}
           events={visible}
           onPickDate={pickDate}
-          onOpenReview={openReview}
         />
-        <div className="main">
+        {!sidebarHidden && (
+          <PaneResize
+            pane={SIDEBAR_PANE}
+            width={sidebarW}
+            onWidth={setSidebarW}
+            paneSide="left"
+            className="pane-resize-sidebar"
+            label="Resize the sidebar"
+          />
+        )}
+        <div className="main" ref={mainRef}>
           <TopBar
             anchor={range.days.length > 0 ? range.days[0] : anchor}
             rangeEnd={range.days.length > 0 ? range.days[range.days.length - 1] : undefined}
@@ -1226,7 +1372,6 @@ export default function App() {
               onOpenEvent={openEvent}
             />
           )}
-          {view === "review" && <ReviewView backend={backend} />}
           {view === "insights" && (
             <InsightsView backend={backend} events={events} calendars={calendars} />
           )}
@@ -1240,6 +1385,16 @@ export default function App() {
           actions={actions}
           onClose={() => setPanel({ mode: "closed" })}
         />
+        {panel.mode !== "closed" && (
+          <PaneResize
+            pane={PANEL_PANE}
+            width={panelW}
+            onWidth={setPanelW}
+            paneSide="right"
+            className="pane-resize-panel"
+            label="Resize the event panel"
+          />
+        )}
         {quickOpen && (
           <QuickCreate
             backend={backend}

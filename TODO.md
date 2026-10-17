@@ -286,6 +286,11 @@ and `sudo -n` requires a password, so native setup cannot finish unattended.
 - `bb0113b` All-day fixed-count series can edit “this and following” with date-valued `UNTIL`
 - `2d122b3` Reviewed Linux visual baselines for both themes
 - `237f33d` Margin notes stay rigid after swipe settlement; drag E2E fixtures are host-timezone independent
+- `b65701d8` Pinch zooms the day count; `996b84d1` note corner scales; `4794edc6` overnight drag previews; `dbb37e81` resizable panes + growing description
+- `b69ccc3b` C-shape title moves below events at its top (overnight tails start on the 12 AM line)
+- `a0ea5055` Other calendars read-only by default + Copy to my calendar (picker, series), copied originals step aside
+- `69537ede` Obsidian link removed (journal bridge, weekly-review view, goals import)
+- `56ab03a1` Margin notes: size the box from its edges/corner, A−/A+ writing size
 - `4352f531` App icon "Polaris is today" + north-star menu bar glyph
 - `9e9f91a1` Drag day switching by sideways travel with slack (no more accidental day hops)
 - `d3166cdd` Group drag: all selected events move together with live ghosts

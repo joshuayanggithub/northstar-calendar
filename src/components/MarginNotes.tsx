@@ -1,8 +1,10 @@
 // Your red-pen notes as margin annotations over the week.
 // This layer reads where the chips and their text actually landed, hands
 // that to lib/marginNotes.ts to place every note in the free space around
-// them, and draws the arrows. A note can be dragged to adjust it; the spot
-// is remembered relative to its event (lib/notePins.ts). Double-clicking a
+// them, and draws the arrows. A note can be dragged to adjust it, its box
+// sized by its edges (width, height), and the whole note scaled — writing
+// and box together — by its corner (or −/+ while it has focus); all of it is
+// remembered relative to its event (lib/notePins.ts). Double-clicking a
 // moved note gives it back to the placer.
 
 import { Fragment, useLayoutEffect, useRef, useState } from "react";
@@ -13,13 +15,15 @@ import {
   lineH,
   NOTE_PADX,
   noteWords,
+  pinnedShape,
   placeNotes,
   type Field,
   type NotePlace,
   type NoteSpec,
   type Rect,
+  type Shape,
 } from "../lib/marginNotes";
-import { notePin, setNotePin, subscribeNotePins } from "../lib/notePins";
+import { notePin, setNotePin, subscribeNotePins, type NotePin } from "../lib/notePins";
 import PlaceWorker from "../lib/marginNotes.worker?worker";
 import type { CalendarEvent } from "../lib/types";
 
@@ -80,6 +84,19 @@ type Placed = { places: NotePlace[]; anchors: Map<string, Rect>; colW: number; c
 const EMPTY: Placed = { places: [], anchors: new Map(), colW: 1, chipX: new Map() };
 /** how long the strip must rest after a swipe step before notes re-place */
 const PAN_SETTLE_MS = 160;
+/** the sizes −/+ step through (1 = 12px); the placer's own crowded sizes
+ *  (lib/marginNotes NOTE_SCALES) are among them. The corner scales freely
+ *  between the ends. */
+const FONT_STEPS = [0.6, 0.72, 0.85, 1, 1.15, 1.3, 1.5, 1.75, 2, 2.4];
+const MIN_SCALE = FONT_STEPS[0];
+const MAX_SCALE = FONT_STEPS[FONT_STEPS.length - 1];
+/** a dragged-out box ending this close under its text fits the text again */
+const FIT_SNAP_PX = 3;
+
+/** `q` drawn in another shape, from the same top-left */
+function reshaped(q: NotePlace, s: Shape): NotePlace {
+  return { ...q, w: s.w, h: s.h, lines: s.lines, scale: s.scale, box: { x0: q.x, y0: q.y, x1: q.x + s.w, y1: q.y + s.h } };
+}
 
 /** one placement worker for the app; null where workers aren't available */
 let worker: Worker | null | undefined;
@@ -115,6 +132,8 @@ export function MarginNotes(props: {
   /** the measured page last sent off, and the latest request number */
   const lastRef = useRef<{ page: string; notes: string; seq: number }>({ page: "", notes: "", seq: 0 });
   const [drag, setDrag] = useState<{ key: string; dx: number; dy: number } | null>(null);
+  /** the box being sized, as it is under the pointer */
+  const [sizing, setSizing] = useState<{ key: string; shape: Shape } | null>(null);
   const [pinTick, bumpPins] = useState(0);
   useLayoutEffect(() => subscribeNotePins(() => bumpPins((n) => n + 1)), []);
   const [fontTick, bumpFont] = useState(0);
@@ -277,6 +296,7 @@ export function MarginNotes(props: {
           w: pin.w,
           angle: pin.angle,
           scale: pin.scale ?? 1,
+          h: pin.h,
         },
       });
     }
@@ -416,13 +436,7 @@ export function MarginNotes(props: {
               : q,
           ),
         }));
-        setNotePin(p.key, {
-          dxCol: (p.x + e.clientX - sx - a.x0) / placed.colW,
-          dyMin: (p.y + e.clientY - sy - a.y0) / props.pxPerMin,
-          w: p.w - 1 - 2 * NOTE_PADX,
-          angle: p.angle,
-          scale: p.scale,
-        });
+        setNotePin(p.key, pinOf({ ...p, x: p.x + dx, y: p.y + dy }));
       } else if (!moved) {
         const n = notesOf.get(p.key);
         if (n) {
@@ -438,7 +452,107 @@ export function MarginNotes(props: {
     el.addEventListener("pointercancel", end);
   };
 
+  /** the pin holding `p` where it is now, keeping what the person set */
+  const pinOf = (p: NotePlace): NotePin | null => {
+    const a = placed.anchors.get(p.key);
+    if (!a) return null;
+    const was = notePin(p.key);
+    return {
+      dxCol: (p.x - a.x0) / placed.colW,
+      dyMin: (p.y - a.y0) / props.pxPerMin,
+      w: was?.w ?? p.w - 1 - 2 * NOTE_PADX,
+      angle: p.angle,
+      scale: was?.scale ?? p.scale,
+      ...(was?.h != null ? { h: was.h } : {}),
+    };
+  };
+
+  /** pin `key` as `pin` and draw it that way now, not when the placer is back */
+  const commitShape = (key: string, pin: NotePin) => {
+    const words = noteWords(notesOf.get(key)?.text ?? "");
+    const shape = pinnedShape(words, pin, measure);
+    setPlaced((cur) => ({
+      ...cur,
+      places: cur.places.map((q) => (q.key === key ? { ...reshaped(q, shape), pinned: true } : q)),
+    }));
+    setNotePin(key, pin);
+  };
+
+  /** Size the box from an edge: the text re-wraps to the width live; the
+   *  height can't go under the text, and stopping just short of it fits the
+   *  box to the text again. Or scale the whole note from its corner: the
+   *  writing and the box grow or shrink together along the box's diagonal,
+   *  so the lines break where they did. */
+  const startSize = (pe: React.PointerEvent<HTMLDivElement>, p: NotePlace, axes: "x" | "y" | "xy") => {
+    if (pe.button !== 0) return;
+    pe.stopPropagation();
+    pe.preventDefault();
+    const handle = pe.currentTarget;
+    const noteEl = handle.closest<HTMLElement>(".margin-note");
+    handle.setPointerCapture(pe.pointerId);
+    const base = pinOf(p);
+    const text = notesOf.get(p.key)?.text;
+    if (!base || !text) return;
+    const words = noteWords(text);
+    const sx = pe.clientX;
+    const sy = pe.clientY;
+    // the box is turned a little: measure along its own sides
+    const t = (p.angle * Math.PI) / 180;
+    const w0 = p.w - 1 - 2 * NOTE_PADX;
+    const h0 = p.h;
+    const pinAt = (e: PointerEvent): NotePin => {
+      const dx = e.clientX - sx;
+      const dy = e.clientY - sy;
+      if (axes === "xy") {
+        // the pointer's travel along the box's diagonal, as a share of it
+        const dw = dx * Math.cos(t) + dy * Math.sin(t);
+        const dh = -dx * Math.sin(t) + dy * Math.cos(t);
+        const k0 = 1 + (dw * p.w + dh * p.h) / (p.w * p.w + p.h * p.h);
+        const s0 = base.scale ?? 1;
+        const s1 = Math.round(Math.min(MAX_SCALE, Math.max(MIN_SCALE, s0 * k0)) * 100) / 100;
+        const k = s1 / s0;
+        return { ...base, scale: s1, w: base.w * k, ...(base.h ? { h: base.h * k } : {}) };
+      }
+      const w = axes === "y" ? w0 : Math.min(800, Math.max(8, w0 + dx * Math.cos(t) + dy * Math.sin(t)));
+      let h = axes === "x" ? (base.h ?? 0) : Math.max(0, h0 - dx * Math.sin(t) + dy * Math.cos(t));
+      const fit = pinnedShape(words, { ...base, w, h: 0 }, measure);
+      if (h <= fit.h + FIT_SNAP_PX) h = 0;
+      return { ...base, w, h };
+    };
+    let moved = false;
+    const move = (e: PointerEvent) => {
+      if (!moved && Math.hypot(e.clientX - sx, e.clientY - sy) < 2) return;
+      moved = true;
+      setSizing({ key: p.key, shape: pinnedShape(words, pinAt(e), measure) });
+    };
+    const end = (e: PointerEvent) => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", end);
+      handle.removeEventListener("pointercancel", end);
+      setSizing(null);
+      noteEl?.focus({ preventScroll: true });
+      if (e.type === "pointercancel" || !moved) return;
+      commitShape(p.key, pinAt(e));
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", end);
+    handle.addEventListener("pointercancel", end);
+  };
+
+  /** one step bigger or smaller writing; the box grows or shrinks with it,
+   *  so the lines break where they did */
+  const stepFont = (p: NotePlace, dir: 1 | -1) => {
+    const base = pinOf(p);
+    if (!base) return;
+    const s0 = base.scale ?? 1;
+    const s1 = dir > 0 ? FONT_STEPS.find((s) => s > s0 + 1e-3) : [...FONT_STEPS].reverse().find((s) => s < s0 - 1e-3);
+    if (s1 === undefined) return;
+    const k = s1 / s0;
+    commitShape(p.key, { ...base, scale: s1, w: base.w * k, ...(base.h ? { h: base.h * k } : {}) });
+  };
+
   const pct = 100 / props.extN;
+  const shown = (p: NotePlace) => (sizing?.key === p.key ? reshaped(p, sizing.shape) : p);
   return (
     <div
       className="margin-notes"
@@ -447,7 +561,8 @@ export function MarginNotes(props: {
       data-testid="margin-notes"
     >
       <svg className="mn-leaders" aria-hidden>
-        {placed.places.map((p) => {
+        {placed.places.map((p0) => {
+          const p = shown(p0);
           const a = placed.anchors.get(p.key);
           if (!a || p.inside) return null;
           const d = drag?.key === p.key ? drag : null;
@@ -463,19 +578,36 @@ export function MarginNotes(props: {
           );
         })}
       </svg>
-      {placed.places.map((p) => {
+      {placed.places.map((p0) => {
+        const p = shown(p0);
         const d = drag?.key === p.key ? drag : null;
+        const sized = sizing?.key === p.key;
+        /** the handles: no click on them is a click on the note (two quick
+         *  drags are not a double-click reset) */
+        const own = {
+          onClick: (e: React.MouseEvent) => e.stopPropagation(),
+          onDoubleClick: (e: React.MouseEvent) => e.stopPropagation(),
+        };
         return (
           <div
             key={p.key}
-            className={"margin-note" + (p.pinned ? " pinned" : "") + (d ? " dragging" : "") + (p.forced ? " forced" : "")}
+            className={
+              "margin-note" +
+              (p.pinned ? " pinned" : "") +
+              (d ? " dragging" : "") +
+              (sized ? " sizing" : "") +
+              (p.forced ? " forced" : "")
+            }
             data-testid="margin-note"
             data-ek={p.key}
             data-inside={p.inside ? 1 : 0}
             tabIndex={0}
             role="button"
             aria-label={`Annotation for ${notesOf.get(p.key)?.e.summary ?? "event"}`}
-            title={p.pinned ? "Drag to move · double-click to let it find its own spot" : "Drag to move"}
+            title={
+              "Drag to move · edges: width and height · corner: scale the writing" +
+              (p.pinned ? " · double-click to let it find its own spot" : "")
+            }
             style={{
               left: p.x + (d?.dx ?? 0),
               top: p.y + (d?.dy ?? 0),
@@ -487,6 +619,15 @@ export function MarginNotes(props: {
             }}
             onPointerDown={(pe) => startDrag(pe, p)}
             onKeyDown={(e) => {
+              if (e.target !== e.currentTarget) return;
+              const bigger = e.key === "+" || e.key === "=";
+              const smaller = e.key === "-" || e.key === "_";
+              if ((bigger || smaller) && !e.metaKey && !e.ctrlKey && !e.altKey) {
+                e.preventDefault();
+                e.stopPropagation();
+                stepFont(p0, bigger ? 1 : -1);
+                return;
+              }
               if (e.key !== "Delete" && e.key !== "Backspace") return;
               e.preventDefault();
               e.stopPropagation();
@@ -511,6 +652,9 @@ export function MarginNotes(props: {
                 {i < p.lines.length - 1 && <span className="mn-gap"> </span>}
               </div>
             ))}
+            <div className="mn-size mn-size-x" data-testid="note-size-w" {...own} onPointerDown={(e) => startSize(e, p0, "x")} />
+            <div className="mn-size mn-size-y" data-testid="note-size-h" {...own} onPointerDown={(e) => startSize(e, p0, "y")} />
+            <div className="mn-size mn-size-xy" data-testid="note-size" {...own} onPointerDown={(e) => startSize(e, p0, "xy")} />
           </div>
         );
       })}

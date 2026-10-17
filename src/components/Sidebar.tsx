@@ -68,7 +68,6 @@ function MiniMonth(props: { anchor: Date; onPick: (d: Date) => void }) {
  *  emptying the text deletes it. */
 function GoalsSection(props: {
   backend: Backend | null;
-  onOpenReview: () => void;
   events?: CalendarEvent[];
 }) {
   const goals = useGoals(props.backend);
@@ -134,9 +133,6 @@ function GoalsSection(props: {
       <div className="sidebar-head">
         <span className="sidebar-label">Goals</span>
         <span className="sidebar-head-actions">
-          <button className="cal-add" title="Weekly review" aria-label="Weekly review" onClick={props.onOpenReview}>
-            ↗
-          </button>
           <button
             className="cal-add"
             title="New goal"
@@ -270,7 +266,6 @@ export const Sidebar = memo(function Sidebar(props: {
   authed: boolean | null;
   accountEmail?: string;
   onPickDate: (d: Date) => void;
-  onOpenReview: () => void;
   events?: CalendarEvent[];
 }) {
   const { calendars } = props;
@@ -401,7 +396,7 @@ export const Sidebar = memo(function Sidebar(props: {
           );
         })()}
       </div>
-      <GoalsSection backend={props.backend} onOpenReview={props.onOpenReview} events={props.events} />
+      <GoalsSection backend={props.backend} events={props.events} />
       {!runningInTauri && <div className="mock-badge">browser mock mode</div>}
     </aside>
   );

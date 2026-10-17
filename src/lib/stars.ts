@@ -1,4 +1,4 @@
-// Goal stars: mark an event as advancing one of the Obsidian goals (or just
+// Goal stars: mark an event as advancing one of your goals (or just
 // star it). v1 persists locally (localStorage) — single-device by design;
 // syncing through Google extendedProperties is the logged follow-up. Keys are
 // `${calendar_id}/${event_id}` so recurring instances star individually.

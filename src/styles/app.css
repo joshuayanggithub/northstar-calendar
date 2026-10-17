@@ -28,6 +28,53 @@ button {
   overflow: hidden;
 }
 
+/* ---------- resizable side panes (components/PaneResize.tsx) ---------- */
+.pane-resize {
+  flex: none;
+  position: relative;
+  z-index: 20;
+  width: 7px;
+  margin: 0 -4px 0 -3px;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+
+.pane-resize::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: transparent;
+  transition: background 0.12s;
+}
+
+.pane-resize:hover::after,
+.pane-resize.active::after,
+.pane-resize:focus-visible::after {
+  left: 2px;
+  width: 3px;
+  background: color-mix(in srgb, var(--focus) 70%, transparent);
+}
+
+/* the event panel floats over the grid: its handle rides its left edge */
+.pane-resize-panel {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  right: calc(var(--panel-w, 316px) - 4px);
+  margin: 0;
+  z-index: 61;
+}
+
+html.pane-resizing,
+html.pane-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
 /* ---------- sidebar ---------- */
 .sidebar {
   width: var(--sidebar-w);
@@ -932,7 +979,8 @@ button {
   right: 0;
   bottom: 0;
   z-index: 60;
-  width: 316px;
+  /* PaneResize: dragged by its left edge */
+  width: var(--panel-w, 316px);
   background: var(--bg);
   border-left: 1px solid var(--border);
   box-shadow: -12px 0 32px rgba(0, 0, 0, 0.18);
@@ -1067,7 +1115,8 @@ button {
 
 /* responsive discipline (mobile-consciousness) */
 @media (max-width: 700px) {
-  .sidebar {
+  .sidebar,
+  .pane-resize {
     display: none;
   }
   .event-panel {
@@ -1609,6 +1658,9 @@ button {
 .panel-desc {
   resize: none;
   min-height: 60px;
+  /* GrowingTextarea: as tall as its text, the panel scrolls */
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .panel-cal {
@@ -1705,11 +1757,100 @@ button {
 
 .panel-readonly {
   flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
   font-size: 11.5px;
   color: var(--fg-secondary);
   background: var(--bg-hover);
   border-radius: 6px;
-  padding: 6px 9px;
+  padding: 7px 9px 8px;
+}
+
+.panel-copy {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+}
+
+.panel-copy-btn {
+  color: var(--fg);
+  font-weight: 500;
+}
+
+.panel-copy .copy-targets {
+  align-self: stretch;
+}
+
+/* "Copy to my calendar": your calendars, in the panel and the right-click
+   menu (components/CopyTargets.tsx) */
+.copy-targets {
+  display: flex;
+  flex-direction: column;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.copy-targets-head {
+  padding: 3px 7px 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
+.copy-series {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 7px 6px;
+  font-size: 12px;
+  color: var(--fg-secondary);
+  cursor: pointer;
+}
+
+.copy-target,
+.ctx-menu .copy-target {
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  padding: 6px 7px;
+  cursor: pointer;
+}
+
+.copy-target:hover,
+.copy-target:focus-visible {
+  background: var(--bg-hover);
+}
+
+.copy-target .cal-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  flex: none;
+}
+
+.ctx-menu .copy-targets {
+  border: 0;
+  padding: 0;
+  max-height: 320px;
 }
 
 .panel-error {
@@ -1843,10 +1984,7 @@ button {
 }
 
 /* background sleeves: long container events as slim left-edge bands */
-/* ---------- goals chevron + weekly review ---------- */
-
-
-
+/* ---------- goals chevron ---------- */
 .goals-chevron {
   font-size: 9px;
   color: var(--fg-faint);
@@ -1866,110 +2004,6 @@ button {
 .cfull-label {
   position: absolute;
   inset: 0;
-}
-
-.review-hr {
-  border: none;
-  border-top: 1px solid var(--border);
-  margin: 10px 0;
-}
-
-
-.md-wikilink {
-  color: var(--accent-soft, #7aa2f7);
-  cursor: default;
-}
-
-.md-link {
-  color: var(--accent-soft, #7aa2f7);
-  text-decoration: none;
-}
-
-.md-link:hover {
-  text-decoration: underline;
-}
-
-
-
-.review-task .done {
-  color: var(--fg-faint);
-  text-decoration: line-through;
-}
-
-.reviewview {
-  flex: 1;
-  overflow-y: auto;
-  border-top: 1px solid var(--border);
-  padding: 20px 28px 40px;
-  max-width: 680px;
-  display: flex;
-  flex-direction: column;
-}
-
-.review-doc {
-  flex: 1;
-}
-
-.review-h {
-  margin: 18px 0 6px;
-}
-
-h1.review-h {
-  font-size: 20px;
-}
-
-h2.review-h {
-  font-size: 15px;
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 4px;
-}
-
-h3.review-h {
-  font-size: 13.5px;
-  color: var(--fg-secondary);
-}
-
-.review-task {
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
-  font-size: 13.5px;
-  padding: 2px 0;
-  cursor: pointer;
-}
-
-.review-bullet,
-.review-p {
-  font-size: 13.5px;
-  margin: 2px 0;
-  color: var(--fg);
-}
-
-.review-gap {
-  height: 8px;
-}
-
-.review-compose {
-  border-top: 1px solid var(--border);
-  padding-top: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.review-compose textarea {
-  border: 1px solid var(--border);
-  background: var(--bg-panel);
-  color: var(--fg);
-  border-radius: 8px;
-  padding: 8px 10px;
-  font: inherit;
-  font-size: 13px;
-  resize: vertical;
-}
-
-.review-compose .btn {
-  align-self: flex-end;
 }
 
 /* ---------- insights ---------- */
@@ -2067,10 +2101,6 @@ h3.review-h {
   overflow: hidden;
   background: var(--bg-hover);
   min-width: 160px;
-}
-
-.ins-report .btn {
-  margin-left: auto;
 }
 
 /* C-shape container segments: full-width pieces connected by the spine */
@@ -3040,6 +3070,11 @@ h3.review-h {
   cursor: grab;
   user-select: none;
   transform-origin: 50% 50%;
+  /* a box sized taller than its text keeps the text in its middle, where
+     the arrow leaves from */
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
 
 .margin-note .mn-gap {
@@ -3063,6 +3098,60 @@ h3.review-h {
 .margin-note:focus-visible {
   outline: 1px dashed color-mix(in srgb, var(--ink) 45%, transparent);
   outline-offset: 1px;
+}
+
+/* sizing the box (edges) and scaling the note (corner): shown on the note
+   under the pointer or with focus */
+.margin-note:focus-within {
+  outline: 1px dashed color-mix(in srgb, var(--ink) 45%, transparent);
+  outline-offset: 1px;
+  z-index: 3;
+}
+
+.margin-note:hover,
+.margin-note.sizing {
+  z-index: 3;
+}
+
+.margin-note .mn-size {
+  display: none;
+}
+
+.margin-note:is(:hover, :focus-within, .sizing):not(.dragging) .mn-size {
+  display: block;
+}
+
+.mn-size {
+  position: absolute;
+  touch-action: none;
+}
+
+.mn-size-x {
+  top: 0;
+  bottom: 6px;
+  right: -5px;
+  width: 8px;
+  cursor: ew-resize;
+}
+
+.mn-size-y {
+  left: 0;
+  right: 6px;
+  bottom: -5px;
+  height: 8px;
+  cursor: ns-resize;
+}
+
+.mn-size-xy {
+  right: -5px;
+  bottom: -5px;
+  width: 8px;
+  height: 8px;
+  box-sizing: border-box;
+  border: 1.5px solid var(--ink);
+  border-radius: 2px;
+  background: var(--bg);
+  cursor: nwse-resize;
 }
 
 @media (prefers-color-scheme: light) {

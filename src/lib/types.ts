@@ -12,6 +12,13 @@ export function calendarEditable(c: Calendar | undefined): boolean {
   return !!c && (c.access_role === "owner" || c.access_role === "writer");
 }
 
+/** An event on one of the "Other calendars" (someone else's, shown read-only):
+ *  there to look at and copy into one of yours, never to reconcile, score,
+ *  star or annotate. The copy is yours and gets all of that. */
+export function readOnlyEvent(e: { calendar_id: string }, calendars: Calendar[]): boolean {
+  return !calendarEditable(calendars.find((c) => c.id === e.calendar_id));
+}
+
 export interface CalendarEvent {
   id: string;
   calendar_id: string;
@@ -88,10 +95,6 @@ export interface Backend {
   goalsRead(): Promise<import("./goals").GoalsFile>;
   goalsWrite(file: import("./goals").GoalsFile): Promise<void>;
   onGoalsChanged(cb: () => void): () => void;
-  /** Obsidian bridge for the journal ("journal"). CAS write via mtime. */
-  mdRead(which: string): Promise<{ content: string; mtime_ms: number; exists: boolean }>;
-  mdWrite(which: string, content: string, expectedMtimeMs: number): Promise<number>;
-  onMdChanged(cb: (which: string) => void): () => void;
   /** key `${calendar_id}/${id}` -> goal text, from the local classifier */
   getGoalClassifications(): Promise<Record<string, string>>;
   onGoalClassChanged(cb: () => void): () => void;

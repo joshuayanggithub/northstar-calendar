@@ -36,13 +36,14 @@ export interface Word {
 }
 
 /** where the person put a note by hand: the box's top-left, the text width
- *  they had, and the angle */
+ *  they had, and the angle; `h` when they sized the box themselves */
 export interface Pin {
   x: number;
   y: number;
   w: number;
   angle: number;
   scale?: number;
+  h?: number | null;
 }
 
 export interface NoteSpec {
@@ -157,7 +158,7 @@ export function wrapWords(
   return { lines, w: mw };
 }
 
-interface Shape {
+export interface Shape {
   w: number;
   h: number;
   lines: Word[][];
@@ -179,6 +180,21 @@ const shapeOf = (r: { lines: Word[][]; w: number }, scale: number): Shape => ({
   lines: r.lines,
   scale,
 });
+
+/** A hand-placed note's box. Moved only: wrapped at the width it had,
+ *  shrink-wrapped to its text. Sized by the person (`h` set; 0 = as tall as
+ *  the text): exactly the width they gave it and at least the height, never
+ *  narrower than its longest word or shorter than its text. */
+export function pinnedShape(
+  words: Word[],
+  pin: { w: number; h?: number | null; scale?: number },
+  measure: (s: string) => number,
+): Shape {
+  const sc = pin.scale ?? 1;
+  const s = shapeOf(wrapWords(words, pin.w + 0.01, (x) => measure(x) * sc), sc);
+  if (pin.h == null) return s;
+  return { ...s, w: Math.max(s.w, Math.ceil(pin.w) + 1 + 2 * NOTE_PADX), h: Math.max(s.h, Math.round(pin.h)) };
+}
 
 /** the note wrapped to 1, 2, … 6 lines, each at its narrowest width */
 function shapes(words: Word[], measure0: (s: string) => number, maxW: number, scale: number): Shape[] {
@@ -734,11 +750,7 @@ export function placeNotes(
   // hand-placed notes first, exactly where the person left them
   for (const spec of specs) {
     if (!spec.pin) continue;
-    const sc = spec.pin.scale ?? 1;
-    const shape = shapeOf(
-      wrapWords(spec.words, spec.pin.w + 0.01, (x) => measure(x) * sc),
-      sc,
-    );
+    const shape = pinnedShape(spec.words, spec.pin, measure);
     const fp = footprint(spec.pin.x + shape.w / 2, spec.pin.y + shape.h / 2, shape.w, shape.h, spec.pin.angle);
     const c = baseCost(spec, fp, shape, spec.pin.angle);
     commit(spec, toPlace(spec, c, c.base, true, false, fullCost(spec, c).bend));

@@ -424,6 +424,8 @@ test("calendar picker keyboard navigation changes the draft without saving", asy
 });
 
 test("visual: calendar picker shows calendar colors in both themes", async ({ page }) => {
+  // no map preview: whether the geocoder answers must not change the picture
+  await page.route("https://photon.komoot.io/**", (r) => r.abort());
   await open(page);
   await page.locator(".chip-timed", { hasText: "Swim" }).click();
   const panel = page.getByTestId("event-panel");
@@ -2085,7 +2087,7 @@ test("cshape: shift-click selects the container as one shape", async ({ page }) 
   expect(shadow).not.toContain("10px"); // no per-rectangle elevation pop
 });
 
-test("cshape: a container's title sits at its top; a child flush with its start moves below it", async ({ page }) => {
+test("cshape: a child flush with the container's start keeps its start; the container's title goes below it", async ({ page }) => {
   await open(page);
   // Thursday 'afternoon admin' 2-5 PM starts together with the 1:1 (2-2:30)
   const slab = page.locator('[title^="afternoon admin ("]');
@@ -2094,37 +2096,40 @@ test("cshape: a container's title sits at its top; a child flush with its start 
   await expect(title).toHaveText("afternoon admin");
   const slabBox = (await slab.boundingBox())!;
   const titleBox = (await title.boundingBox())!;
-  expect(titleBox.y - slabBox.y).toBeLessThan(6); // at the top
   const childBox = (await page.locator(".chip-timed", { hasText: "1:1 with manager" }).boundingBox())!;
-  expect(childBox.y).toBeGreaterThanOrEqual(titleBox.y + titleBox.height - 1); // below the title
-  expect(childBox.y - slabBox.y).toBeLessThan(20); // pushed only one title band
+  expect(Math.abs(childBox.y - slabBox.y)).toBeLessThanOrEqual(1); // at 2 PM, not pushed down
+  expect(titleBox.y).toBeGreaterThanOrEqual(childBox.y + childBox.height - 1); // the title, right below it
+  expect(titleBox.y - (childBox.y + childBox.height)).toBeLessThan(8);
+  expect(titleBox.y + titleBox.height).toBeLessThanOrEqual(slabBox.y + slabBox.height);
 });
 
-test("cshape: contained events start below the container's title band (Study hall)", async ({ page }) => {
+test("cshape: contained events keep their start; the container's title goes in its first open stretch (Study hall)", async ({ page }) => {
   await open(page);
   // Sunday 'Study hall' 10-1 with 'quiz review' flush at 10
   const slab = page.locator('[title^="Study hall ("]');
   const label = slab.locator(".cfull-label");
   await expect(label.locator(".chip-title")).toHaveText("Study hall");
   const slabBox = (await slab.boundingBox())!;
-  const labelBox = (await label.boundingBox())!;
-  expect(labelBox.y - slabBox.y).toBeLessThan(6);
+  // .cfull-label covers the whole shape; the text is its title
+  const labelBox = (await label.locator(".chip-title").boundingBox())!;
   const quiz = (await page.locator(".chip-timed", { hasText: "quiz review" }).boundingBox())!;
-  expect(quiz.y).toBeGreaterThanOrEqual(labelBox.y + 14);
-  // room only fits the title line, so no time line is squeezed in
-  await expect(label.locator(".chip-time")).toHaveCount(0);
+  expect(Math.abs(quiz.y - slabBox.y)).toBeLessThanOrEqual(1);
+  expect(labelBox.y).toBeGreaterThanOrEqual(quiz.y + quiz.height - 1);
 });
 
-test("cshape: zoomed out, the container title still sits on top with contents below", async ({ page }) => {
+test("cshape: zoomed out, contents keep their start and the container title sits below them", async ({ page }) => {
   await open(page);
   await page.keyboard.press("ControlOrMeta+Shift+,");
   await page.keyboard.press("ControlOrMeta+Shift+,");
   const slab = page.locator('[title^="Study hall ("]');
   const label = slab.locator(".cfull-label");
   await expect(label.locator(".chip-title")).toHaveText("Study hall");
-  const labelBox = (await label.boundingBox())!;
+  const slabBox = (await slab.boundingBox())!;
+  // .cfull-label covers the whole shape; the text is its title
+  const labelBox = (await label.locator(".chip-title").boundingBox())!;
   const quiz = (await page.locator(".chip-timed", { hasText: "quiz review" }).boundingBox())!;
-  expect(quiz.y).toBeGreaterThanOrEqual(labelBox.y + 14);
+  expect(Math.abs(quiz.y - slabBox.y)).toBeLessThanOrEqual(1);
+  expect(labelBox.y).toBeGreaterThanOrEqual(quiz.y + quiz.height - 1);
   // tooltip always carries the full range regardless of what text fits
   await expect(slab).toHaveAttribute("title", /Study hall \(10 AM – 1 PM\)/);
 });
@@ -2912,29 +2917,6 @@ test("cshape: a fully-covered slab is still clickable via its title band", async
   await page.keyboard.press("Escape");
 });
 
-// --- Obsidian bridge (weekly review / journal) ---
-
-test("obsidian: weekly review renders the journal and appends entries", async ({ page }) => {
-  await open(page);
-  await page.getByTestId("goals-section").getByRole("button", { name: "Weekly review" }).click();
-  const review = page.getByTestId("review-view");
-  await expect(review).toBeVisible();
-  await expect(review.locator("h2.review-h").first()).toContainText("Weekly Review — Oct 5");
-  await review.getByTestId("review-entry").fill("Shipped the calendar QA sprint. Sleep was stable.");
-  await review.getByRole("button", { name: "Add entry" }).click();
-  await expect(review.locator("h2.review-h").last()).toContainText("Weekly Review — Oct 14, 2026");
-  await expect(review.locator(".review-p", { hasText: "Shipped the calendar QA sprint" })).toBeVisible();
-});
-
-test("obsidian: journal task toggles write back through the review view", async ({ page }) => {
-  await open(page);
-  await page.getByTestId("goals-section").getByRole("button", { name: "Weekly review" }).click();
-  const review = page.getByTestId("review-view");
-  const task = review.locator(".review-task", { hasText: "Planned next week" });
-  await task.locator("input").check();
-  await expect(task.locator("span.done")).toBeVisible();
-});
-
 // --- insights (all 10, dense one-liners) ---
 
 test("insights: renders all ten stat rows with real numbers", async ({ page }) => {
@@ -2962,17 +2944,14 @@ test("insights: renders all ten stat rows with real numbers", async ({ page }) =
   await expect(v.getByTestId("ins-routines")).toContainText("LUNCH 2/2");
 });
 
-test("insights: week report appends into the Obsidian journal", async ({ page }) => {
+test("no Obsidian link: no journal view, nothing reads or writes a notes vault", async ({ page }) => {
   await open(page);
-  await page.keyboard.press("i");
-  await page.getByTestId("ins-report").getByRole("button", { name: "Append to journal" }).click();
-  await expect(page.getByTestId("toast")).toContainText("appended");
-  // verify it landed in the journal view
+  await expect(page.getByTestId("goals-section").getByRole("button", { name: "Weekly review" })).toHaveCount(0);
   await page.keyboard.press("ControlOrMeta+k");
-  await page.locator(".cmdk [cmdk-input]").fill("weekly review");
-  await page.locator(".cmdk").getByText("📓 Weekly review").click();
-  await expect(page.getByTestId("review-view").locator("h2.review-h").last()).toContainText(
-    "Oct 14, 2026",
-  );
-  await expect(page.getByTestId("review-view")).toContainText("Deep work");
+  await page.locator(".cmdk [cmdk-input]").fill("journal");
+  await expect(page.locator(".cmdk").getByText("Weekly review")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("i");
+  await expect(page.getByTestId("ins-report")).toBeVisible();
+  await expect(page.getByTestId("ins-report").getByRole("button")).toHaveCount(0);
 });

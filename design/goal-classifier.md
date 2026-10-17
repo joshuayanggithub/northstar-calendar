@@ -1,7 +1,7 @@
 # Local goal-work classification — design
 
-Goal: events that advance the user's goals (sidebar, from the Obsidian goals
-file) get recognized automatically, with zero cloud calls. The model
+Goal: events that advance the user's goals (the Goals sidebar, kept by the
+app) get recognized automatically, with zero cloud calls. The model
 *suggests*; the user *ratifies*. A misclassification must never loudly
 congratulate the user.
 

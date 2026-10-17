@@ -151,9 +151,6 @@ export function CommandMenu(props: {
                 ▦ {v[0].toUpperCase() + v.slice(1)} view
               </Command.Item>
             ))}
-            <Command.Item value="weekly review journal goals obsidian" onSelect={() => { props.onView("review" as View); props.onClose(); }}>
-              📓 Weekly review
-            </Command.Item>
             <Command.Item value="insights stats productivity sleep distraction" onSelect={() => { props.onView("insights" as View); props.onClose(); }}>
               📈 Insights
             </Command.Item>

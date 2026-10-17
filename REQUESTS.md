@@ -24,7 +24,7 @@ tracking: FEATURES.md for the parity matrix, e2e/QA-BACKLOG.md for QA items.)
 | 21 | Draft "New event" chip: single clean line, no overlapped text | done |
 | 22 | Clicking chrome outside the grid deselects (not just Escape) | done |
 | 23 | Location: shows on week chips + list rows (saving verified live against Google) | done |
-| 24 | Goals sidebar renders the whole Obsidian file inline — grouped by heading, ordered/nested items, wiki-links, collapsible groups; checklist toggles kept | done |
+| 24 | Goals sidebar renders the whole Obsidian file inline — grouped by heading, ordered/nested items, wiki-links, collapsible groups; checklist toggles kept | done; superseded by #66, removed `69537ede` (#91) |
 | 32 | All-day lane multi-day drag-create (Notion) | done |
 | 33 | Sidebar: My calendars / Other calendars split (Google), collapsible + persisted | done |
 | 34 | Single Notion-style view dropdown (Day/Week/Month/List/Insights/# days) with shortcut hints | done |
@@ -44,8 +44,8 @@ tracking: FEATURES.md for the parity matrix, e2e/QA-BACKLOG.md for QA items.)
 | 27 | No text collisions in layered overlaps: slab label seeks the first uncovered gap that fits the title, drops the time line in tight gaps, tooltip-only if nothing fits | done |
 | 25 | Location field: Google-Maps-style place autocomplete (keyless OSM/Photon), embedded map preview with dark-mode tiles, Open-in-Google-Maps link | done |
 | 19 | C-shape bug pass (user: "very very buggy"): per-event spine inset instead of whole-day, quieter container tint + hairline ring so same-color children stay legible, square-join/rounded-free corners, whole-shape hover, title moves off the spine to the first full segment | done (6 regression tests; visual snapshot tolerance tightened 10x) |
-| 15 | Obsidian bridge (option B): goals sidebar + weekly review, CAS write-back | done |
-| 16 | Insights tab: all 10 ideas as dense one-line stats; report appends to journal | done |
+| 15 | Obsidian bridge (option B): goals sidebar + weekly review, CAS write-back | done; removed `69537ede` (#91) |
+| 16 | Insights tab: all 10 ideas as dense one-line stats; report appends to journal | done; journal append removed `69537ede` (#91) |
 | 17 | Editor sidebar must match Notion row-for-row, verified side-by-side | done |
 | 43 | Fix dense event overlap gaps, covered or ellipsized titles, narrow week header alignment, and horizontal pan snap | done (`03b55d3` removes idle springback and forced wheel render; browser/native pan probes and 210-case full suite passed) |
 | 44 | Show each calendar's color in the event editor dropdown | fixed in working tree; both browser themes and native WebDriver screenshot verified; commit pending |
@@ -96,3 +96,11 @@ tracking: FEATURES.md for the parity matrix, e2e/QA-BACKLOG.md for QA items.)
 | 87 | Drag multiple selected events at once | done `d3166cdd` (ghost per event while dragging, wall-clock shift, selection kept; view-only/all-day stay) |
 | 88 | Dragging an event jumps to the next/previous day; lateral day switching too sensitive | done `9e9f91a1` (day follows sideways travel with 70% slack; swipe offset counted) |
 | 89 | A better app icon for North Star (ideas; C, then calendar variations of C; picked C3) | done `4352f531` ("Polaris is today"; menu bar star; source in design/icon/) |
+| 90 | Resize annotation boxes (width/height) and their font size | done `56ab03a1` (edges + corner size the box, text re-wraps live, snaps back to fit; A−/A+ or −/+ step the writing; remembered per note; double-click resets) |
+| 91 | Remove all Obsidian linking (also from the public repo) | done `69537ede` (notes.rs + md commands + watcher + vault paths, Weekly review view, markdown/useMd, Insights journal append, one-time goals import; public snapshot pushed) |
+| 92 | Other calendars' events are read-only by default: no reconciliation; a feature to duplicate them into my calendar and recategorize | done `a0ea5055` (Copy to my calendar… with a calendar picker in the panel and right-click menu, every-occurrence option; kept out of recon, focus score, Insights, stars and the classifier; copied originals step aside; Escape closes the right-click menu) |
+| 93 | An event running past midnight starts below the 12 AM line on the next day (under Sleep, which starts at midnight); move Sleep's title down instead | done `b69ccc3b` (a C-shape whose enclosed events start at its top writes its title in its first open stretch below them; they keep their true start) |
+| 94 | Resize each sidebar (left/right); the description box is too small for long descriptions | done `dbb37e81` (drag the sidebar's and the event panel's inner edges; remembered, double-click resets, arrow keys nudge; description grows with its text) |
+| 95 | No preview when dragging an event that crosses midnight | done `4794edc6` (previews cut into a piece per day touched: moves, resizes, group drags); his /Applications copy was stale, re-linked to the build |
+| 96 | Notes: the corner (diagonal drag) should scale the font instead of A−/A+ icons | done `996b84d1` (corner scales writing + box together, lines unchanged; edges keep width/height; −/+ keys kept) |
+| 97 | Pinch in/out on the trackpad changes the number of days shown | done `b65701d8` (WebKit gesture events + Chromium ctrl+wheel; 1–9 days; the day under the fingers stays put) |

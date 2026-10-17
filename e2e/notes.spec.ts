@@ -174,3 +174,139 @@ test("margin notes: the note's text is written in full, emphasis underlined, no 
   expect(clipped).toBe(false);
   await expect(note).not.toContainText("*");
 });
+
+/** the note's box, its line count and its writing size */
+async function shapeOf(page: Page) {
+  const n = tikTok(page);
+  const b = (await n.boundingBox())!;
+  return {
+    ...b,
+    lines: await n.locator(".mn-line").count(),
+    font: await n.evaluate((el) => parseFloat(getComputedStyle(el).fontSize)),
+    // unrotated size (the box is turned a degree or two)
+    ow: await n.evaluate((el) => (el as HTMLElement).offsetWidth),
+    oh: await n.evaluate((el) => (el as HTMLElement).offsetHeight),
+  };
+}
+
+/** drag a sizing handle of the note by (dx, dy) */
+async function pull(page: Page, id: string, dx: number, dy: number) {
+  const n = tikTok(page);
+  await n.hover();
+  const h = (await n.getByTestId(id).boundingBox())!;
+  const x = h.x + h.width / 2;
+  const y = h.y + h.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x + dx / 2, y + dy / 2, { steps: 4 });
+  await page.mouse.move(x + dx, y + dy, { steps: 4 });
+  await page.mouse.up();
+  await expect(page.locator("[data-testid=margin-notes][data-pending='0']")).toHaveCount(1);
+}
+
+test("margin notes: size a note's box from its edges and corner; the text re-wraps, the size survives a reload, double-click gives it back", async ({ page }) => {
+  await open(page);
+  const note = tikTok(page);
+  const key = (await note.getAttribute("data-ek"))!;
+  const before = await shapeOf(page);
+
+  // hidden until the note is pointed at
+  await expect(note.getByTestId("note-size")).toBeHidden();
+  await note.hover();
+  await expect(note.getByTestId("note-size")).toBeVisible();
+
+  // narrower from the right edge: more lines, the top-left stays put
+  await pull(page, "note-size-w", -Math.round(before.ow * 0.4), 0);
+  const narrow = await shapeOf(page);
+  await expect(note).toHaveClass(/pinned/);
+  expect(narrow.lines).toBeGreaterThan(before.lines);
+  expect(narrow.ow).toBeLessThan(before.ow - 10);
+  expect(Math.abs(narrow.x - before.x)).toBeLessThan(3);
+  expect(Math.abs(narrow.y - before.y)).toBeLessThan(3);
+  expect(narrow.oh).toBe(narrow.lines * 14 + 6); // as tall as its text
+
+  // taller from the bottom edge: room under the text, text in the middle
+  await pull(page, "note-size-h", 0, 40);
+  const tall = await shapeOf(page);
+  expect(tall.oh).toBeGreaterThan(narrow.oh + 34);
+  expect(tall.lines).toBe(narrow.lines);
+  const mid = await note.evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    const ls = [...el.querySelectorAll(".mn-line")].map((l) => l.getBoundingClientRect());
+    return { box: (r.top + r.bottom) / 2, text: (ls[0].top + ls[ls.length - 1].bottom) / 2 };
+  });
+  expect(Math.abs(mid.box - mid.text)).toBeLessThan(3);
+
+  // wider again, and the bottom back up under the text, which fits it
+  await pull(page, "note-size-w", Math.round(before.ow * 0.4), 0);
+  await pull(page, "note-size-h", 0, -80);
+  const back = await shapeOf(page);
+  expect(back.lines).toBeLessThan(narrow.lines);
+  expect(back.oh).toBe(back.lines * 14 + 6);
+
+  const pin = (await page.evaluate(() => JSON.parse(localStorage.getItem("note-pins") ?? "{}")))[key];
+  expect(pin.h).toBe(0);
+  expect(pin.w).toBeGreaterThan(0);
+
+  // a sized note keeps its size through a reload
+  await pull(page, "note-size-w", -Math.round(before.ow * 0.4), 0);
+  const sized = await shapeOf(page);
+  await page.reload();
+  await expect(page.locator(".mock-badge")).toHaveText("browser mock mode");
+  await page.getByTestId("week-grid").evaluate((el) => (el.scrollTop = 19 * 48));
+  await expect(page.locator("[data-testid=margin-notes][data-pending='0']")).toHaveCount(1);
+  const reloaded = await shapeOf(page);
+  expect(reloaded.lines).toBe(sized.lines);
+  expect(Math.abs(reloaded.ow - sized.ow)).toBeLessThan(2);
+  expect(Math.abs(reloaded.x - sized.x)).toBeLessThan(2);
+
+  // double-click: the placer takes it back at its own size
+  await tikTok(page).dblclick();
+  await expect(tikTok(page)).not.toHaveClass(/pinned/);
+  await expect(page.locator("[data-testid=margin-notes][data-pending='0']")).toHaveCount(1);
+  const reset = await shapeOf(page);
+  expect(reset.lines).toBe(before.lines);
+  expect(Math.abs(reset.ow - before.ow)).toBeLessThan(2);
+});
+
+test("margin notes: the corner scales the whole note — writing and box together, lines unchanged", async ({ page }) => {
+  await open(page);
+  const note = tikTok(page);
+  const key = (await note.getAttribute("data-ek"))!;
+  const before = await shapeOf(page);
+  expect(before.font).toBe(12);
+  // no size buttons: the corner is the control
+  await note.hover();
+  await expect(note.locator("button")).toHaveCount(0);
+
+  // out along the diagonal: bigger
+  await pull(page, "note-size", Math.round(before.ow * 0.5), Math.round(before.oh * 0.5));
+  const big = await shapeOf(page);
+  await expect(note).toHaveClass(/pinned/);
+  expect(big.font).toBeGreaterThan(15);
+  expect(big.lines, "the lines break where they did").toBe(before.lines);
+  expect(big.ow).toBeGreaterThan(before.ow * 1.3);
+  expect(big.oh).toBeGreaterThan(before.oh * 1.3);
+  expect(Math.abs(big.x - before.x)).toBeLessThan(4);
+  const pin = (await page.evaluate(() => JSON.parse(localStorage.getItem("note-pins") ?? "{}")))[key];
+  expect(pin.scale).toBeGreaterThan(1.25);
+
+  // back in, past where it started: smaller than at first
+  await pull(page, "note-size", -Math.round(big.ow * 0.6), -Math.round(big.oh * 0.6));
+  const small = await shapeOf(page);
+  expect(small.font).toBeLessThan(12);
+  expect(small.font).toBeGreaterThanOrEqual(12 * 0.6 - 0.01); // never below the smallest hand
+  expect(small.lines).toBe(before.lines);
+
+  // survives a reload
+  await page.reload();
+  await expect(page.locator(".mock-badge")).toHaveText("browser mock mode");
+  await page.getByTestId("week-grid").evaluate((el) => (el.scrollTop = 19 * 48));
+  await expect(page.locator("[data-testid=margin-notes][data-pending='0']")).toHaveCount(1);
+  expect((await shapeOf(page)).font).toBeCloseTo(small.font, 1);
+
+  // −/+ with the note focused still step it
+  await tikTok(page).click();
+  await page.keyboard.press("+");
+  await expect.poll(async () => (await shapeOf(page)).font).toBeGreaterThan(small.font);
+});

@@ -7,7 +7,7 @@
 
 import { classify, RECON_WINDOW_MS } from "./insights";
 import { eventDates } from "./dates";
-import type { Calendar, CalendarEvent } from "./types";
+import { readOnlyEvent, type Calendar, type CalendarEvent } from "./types";
 
 export type ReconStatus = "done" | "canceled";
 
@@ -84,9 +84,10 @@ export function subscribeRecon(fn: () => void): () => void {
   return () => listeners.delete(fn);
 }
 
-/** sleep and all-day events reconcile themselves; nothing to check off */
+/** sleep and all-day events reconcile themselves; nothing to check off.
+ *  Neither does anything on someone else's calendar: only your copy of it. */
 export function reconExempt(e: CalendarEvent, calendars: Calendar[]): boolean {
-  return e.all_day || classify(e, calendars) === "sleep";
+  return e.all_day || classify(e, calendars) === "sleep" || readOnlyEvent(e, calendars);
 }
 
 export type ReconState = ReconStatus | "unsettled" | null;
