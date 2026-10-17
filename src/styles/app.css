@@ -28,6 +28,53 @@ button {
   overflow: hidden;
 }
 
+/* ---------- resizable side panes (components/PaneResize.tsx) ---------- */
+.pane-resize {
+  flex: none;
+  position: relative;
+  z-index: 20;
+  width: 7px;
+  margin: 0 -4px 0 -3px;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+
+.pane-resize::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: transparent;
+  transition: background 0.12s;
+}
+
+.pane-resize:hover::after,
+.pane-resize.active::after,
+.pane-resize:focus-visible::after {
+  left: 2px;
+  width: 3px;
+  background: color-mix(in srgb, var(--focus) 70%, transparent);
+}
+
+/* the event panel floats over the grid: its handle rides its left edge */
+.pane-resize-panel {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  right: calc(var(--panel-w, 316px) - 4px);
+  margin: 0;
+  z-index: 61;
+}
+
+html.pane-resizing,
+html.pane-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
 /* ---------- sidebar ---------- */
 .sidebar {
   width: var(--sidebar-w);
@@ -932,7 +979,8 @@ button {
   right: 0;
   bottom: 0;
   z-index: 60;
-  width: 316px;
+  /* PaneResize: dragged by its left edge */
+  width: var(--panel-w, 316px);
   background: var(--bg);
   border-left: 1px solid var(--border);
   box-shadow: -12px 0 32px rgba(0, 0, 0, 0.18);
@@ -1067,7 +1115,8 @@ button {
 
 /* responsive discipline (mobile-consciousness) */
 @media (max-width: 700px) {
-  .sidebar {
+  .sidebar,
+  .pane-resize {
     display: none;
   }
   .event-panel {
@@ -1609,6 +1658,9 @@ button {
 .panel-desc {
   resize: none;
   min-height: 60px;
+  /* GrowingTextarea: as tall as its text, the panel scrolls */
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .panel-cal {
@@ -3048,8 +3100,8 @@ button {
   outline-offset: 1px;
 }
 
-/* sizing the box (edges and corner) and the writing (A− A+): shown on the
-   note under the pointer or with focus */
+/* sizing the box (edges) and scaling the note (corner): shown on the note
+   under the pointer or with focus */
 .margin-note:focus-within {
   outline: 1px dashed color-mix(in srgb, var(--ink) 45%, transparent);
   outline-offset: 1px;
@@ -3061,17 +3113,12 @@ button {
   z-index: 3;
 }
 
-.margin-note .mn-size,
-.margin-note .mn-tools {
+.margin-note .mn-size {
   display: none;
 }
 
 .margin-note:is(:hover, :focus-within, .sizing):not(.dragging) .mn-size {
   display: block;
-}
-
-.margin-note:is(:hover, :focus-within):not(.dragging, .sizing) .mn-tools {
-  display: flex;
 }
 
 .mn-size {
@@ -3105,48 +3152,6 @@ button {
   border-radius: 2px;
   background: var(--bg);
   cursor: nwse-resize;
-}
-
-/* above the note; its padding bridges the gap so the pointer can travel
-   from the note to the buttons without the note losing its hover */
-.mn-tools {
-  position: absolute;
-  bottom: 100%;
-  right: -4px;
-  padding-bottom: 3px;
-  gap: 1px;
-  cursor: default;
-}
-
-.mn-tools button {
-  width: 22px;
-  height: 18px;
-  padding: 0;
-  border: none;
-  border-radius: 4px;
-  background: var(--bg-panel);
-  box-shadow: 0 0 0 1px var(--border), 0 1px 3px rgba(0, 0, 0, 0.12);
-  color: var(--fg-secondary);
-  font: 600 10px/18px var(--font);
-  text-shadow: none;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.mn-tools button:hover {
-  background: var(--bg-hover);
-  color: var(--fg);
-}
-
-/* labels drawn by CSS so they never join the note's text */
-.mn-font-down::before {
-  content: "A\2212";
-  font-size: 9px;
-}
-
-.mn-font-up::before {
-  content: "A+";
-  font-size: 12px;
 }
 
 @media (prefers-color-scheme: light) {

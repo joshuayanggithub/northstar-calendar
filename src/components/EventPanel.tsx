@@ -165,6 +165,33 @@ function TimeField(props: {
   );
 }
 
+/** A textarea as tall as its text (never shorter than `rows`): a long
+ *  description reads in full, the panel scrolls instead of the box. It
+ *  re-fits when the panel is resized, since the lines re-wrap. */
+function GrowingTextarea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
+  const ref = useRef<HTMLTextAreaElement | null>(null);
+  const fit = () => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  };
+  useLayoutEffect(fit, [props.value]);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let w = el.clientWidth;
+    const ro = new ResizeObserver(() => {
+      if (el.clientWidth === w) return;
+      w = el.clientWidth;
+      fit();
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return <textarea ref={ref} {...props} />;
+}
+
 export function EventPanel(props: {
   backend: Backend | null;
   calendars: Calendar[];
@@ -885,7 +912,7 @@ export function EventPanel(props: {
           }}
         />
       )}
-      <textarea
+      <GrowingTextarea
         className="panel-plain panel-desc"
         placeholder="Description"
         rows={7}

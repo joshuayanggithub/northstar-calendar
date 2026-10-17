@@ -874,7 +874,10 @@ export function WeekView(props: {
     const shift = groupShiftOf(drag);
     if (!shift || !drag?.event) return null;
     const moving = new Set<string>();
-    const ghosts = new Map<number, { key: string; title: string; color: string; startMin: number; endMin: number }[]>();
+    const ghosts = new Map<
+      number,
+      { key: string; title: string; color: string; startMin: number; endMin: number; full: { startMin: number; endMin: number } }[]
+    >();
     for (const sel of props.selected) {
       const k = keyOf(sel);
       if (k === keyOf(drag.event)) continue;
@@ -883,17 +886,58 @@ export function WeekView(props: {
       moving.add(k);
       const { start, end } = eventDates(e);
       const s = shiftWallClock(start, shift);
-      const di = days.findIndex((dd) => isSameDay(dd, s));
-      if (di < 0) continue;
+      // its day counted from the first column (it may land off screen and
+      // still run into it past midnight)
+      const day = Math.round((startOfDay(s).getTime() - startOfDay(days[0]).getTime()) / 86400000);
       const startMin = minutesOfDay(s);
-      const endMin = Math.min(DAY_MIN, startMin + Math.max(15, (end.getTime() - start.getTime()) / 60000));
-      if (!ghosts.has(di)) ghosts.set(di, []);
-      ghosts.get(di)!.push({ key: k, title: e.summary, color: colorOf(calendars, e.calendar_id), startMin, endMin });
+      const endMin = startMin + Math.max(15, (end.getTime() - start.getTime()) / 60000);
+      for (const p of ghostPieces(day, startMin, endMin, days.length)) {
+        if (!ghosts.has(p.di)) ghosts.set(p.di, []);
+        ghosts.get(p.di)!.push({
+          key: k,
+          title: e.summary,
+          color: colorOf(calendars, e.calendar_id),
+          startMin: p.startMin,
+          endMin: p.endMin,
+          full: { startMin, endMin },
+        });
+      }
     }
     return { moving, ghosts };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drag, props.selected, timed, days, calendars]);
   const selectedKey = props.selected.length === 1 ? keyOf(props.selected[0]) : null;
+
+  /** where the dragged event lands: minutes from day `day`'s midnight (either
+   *  end may run into the next or previous day), cut into a piece per column */
+  const dragGhost = (() => {
+    if (!drag || !drag.moved) return null;
+    let day = drag.curDayIndex;
+    let startMin: number;
+    let endMin: number;
+    if (drag.kind === "create") {
+      day = drag.dayIndex;
+      startMin = snap(Math.min(drag.anchorMin, drag.curMin));
+      endMin = Math.max(snap(Math.max(drag.anchorMin, drag.curMin)), startMin + 30);
+    } else if (drag.kind === "move") {
+      startMin = snap(drag.curMin - (drag.grabOffsetMin ?? 0));
+      endMin = startMin + (drag.durationMin ?? 60);
+    } else {
+      // resize keeps the start and moves the end on the day it was grabbed
+      // (endDrag); the start may be on the day before
+      day = drag.dayIndex;
+      const dayStart = days[day] ? startOfDay(days[day]).getTime() : 0;
+      startMin = drag.event ? (eventDates(drag.event).start.getTime() - dayStart) / 60000 : 0;
+      endMin = Math.max(snap(drag.curMin), Math.max(startMin, 0) + SNAP_MIN);
+    }
+    const pieces = new Map<number, { startMin: number; endMin: number }>();
+    for (const p of ghostPieces(day, startMin, endMin, days.length)) pieces.set(p.di, p);
+    const color = colorOf(
+      calendars,
+      drag.event?.calendar_id ?? (calendars.find((c) => c.is_primary) ?? calendars[0])?.id ?? "",
+    );
+    return { pieces, full: { startMin, endMin }, title: drag.event?.summary ?? "New event", color };
+  })();
 
   // keep the keyboard-selected event visible (n/b cycling)
   useEffect(() => {
@@ -1183,9 +1227,7 @@ export function WeekView(props: {
               layoutCacheRef.current.text.set(cacheKey, placedText);
             }
             const { containers, regular, clusters } = packed;
-            const isDragTarget =
-              live &&
-              drag && drag.moved && (drag.kind === "create" ? drag.dayIndex === di : drag.curDayIndex === di);
+            const ghostHere = live ? dragGhost?.pieces.get(di) : undefined;
             const draftHere =
               live && props.draft && !props.draft.allDay && isSameDay(props.draft.start, day) && !drag;
             return (
@@ -1435,40 +1477,24 @@ export function WeekView(props: {
 
                 {live &&
                   groupDrag?.ghosts.get(di)?.map((g) => (
-                    <div
+                    <GhostPiece
                       key={"group-" + g.key}
-                      className="chip chip-ghost"
-                      data-testid="group-ghost"
-                      data-ek={g.key}
-                      style={{
-                        ...chipStyle(g.color),
-                        top: g.startMin * pxPerMin,
-                        height: Math.max((g.endMin - g.startMin) * pxPerMin, 17),
-                        left: 0,
-                        width: "calc(100% - 2px)",
-                      }}
-                    >
-                      <span className="chip-title">{g.title}</span>
-                      {(g.endMin - g.startMin) * pxPerMin >= 28 && (
-                        <span className="chip-time">
-                          {fmtChipRange(
-                            new Date(2000, 0, 1, Math.floor(g.startMin / 60), g.startMin % 60),
-                            new Date(2000, 0, 1, Math.floor(g.endMin / 60) % 24, g.endMin % 60),
-                          )}
-                        </span>
-                      )}
-                    </div>
+                      title={g.title}
+                      color={g.color}
+                      piece={g}
+                      full={g.full}
+                      pxPerMin={pxPerMin}
+                      testId="group-ghost"
+                      ek={g.key}
+                    />
                   ))}
-                {isDragTarget && drag && (
-                  <GhostChip
-                    drag={drag}
+                {ghostHere && dragGhost && (
+                  <GhostPiece
+                    title={dragGhost.title}
+                    color={dragGhost.color}
+                    piece={ghostHere}
+                    full={dragGhost.full}
                     pxPerMin={pxPerMin}
-                    color={colorOf(
-                      calendars,
-                      drag.event?.calendar_id ??
-                        (calendars.find((c) => c.is_primary) ?? calendars[0])?.id ??
-                        "",
-                    )}
                   />
                 )}
 
@@ -1842,49 +1868,68 @@ function ChipText({ e, p }: { e: CalendarEvent; p: PlacedText | null | undefined
   );
 }
 
-function GhostChip({
-  drag,
-  pxPerMin,
-  color,
-}: {
-  drag: DragState;
-  pxPerMin: number;
-  color: string;
-}) {
-  let startMin: number, endMin: number;
-  if (drag.kind === "create") {
-    startMin = snap(Math.min(drag.anchorMin, drag.curMin));
-    endMin = Math.max(snap(Math.max(drag.anchorMin, drag.curMin)), startMin + 30);
-  } else if (drag.kind === "move") {
-    startMin = snap(drag.curMin - (drag.grabOffsetMin ?? 0));
-    endMin = startMin + (drag.durationMin ?? 60);
-  } else {
-    const evStart = drag.event ? minutesOfDay(eventDates(drag.event).start) : 0;
-    startMin = evStart;
-    endMin = Math.max(snap(drag.curMin), evStart + SNAP_MIN);
+/** A ghost (where a dragged event will land) cut into one piece per day
+ *  column it touches: an event running past midnight shows on both days,
+ *  and its part on the next day starts on the 12 AM line. `startMin` and
+ *  `endMin` are minutes from day `day`'s midnight and may run off either
+ *  end of it. */
+function ghostPieces(
+  day: number,
+  startMin: number,
+  endMin: number,
+  nDays: number,
+): { di: number; startMin: number; endMin: number }[] {
+  const a = day * DAY_MIN + startMin;
+  const b = day * DAY_MIN + endMin;
+  const out: { di: number; startMin: number; endMin: number }[] = [];
+  for (let di = Math.max(0, Math.floor(a / DAY_MIN)); di < nDays && di * DAY_MIN < b; di++) {
+    const s0 = Math.max(a, di * DAY_MIN) - di * DAY_MIN;
+    const e0 = Math.min(b, (di + 1) * DAY_MIN) - di * DAY_MIN;
+    if (e0 > s0) out.push({ di, startMin: s0, endMin: e0 });
   }
-  const title = drag.event?.summary ?? "New event";
-  const heightPx = Math.max((endMin - startMin) * pxPerMin, 17);
+  return out;
+}
+
+/** clock text for minutes from a midnight (any day: wraps) */
+const clockOf = (min: number) => {
+  const m = ((Math.round(min) % DAY_MIN) + DAY_MIN) % DAY_MIN;
+  return new Date(2000, 0, 1, Math.floor(m / 60), m % 60);
+};
+
+function GhostPiece({
+  title,
+  color,
+  piece,
+  full,
+  pxPerMin,
+  testId,
+  ek,
+}: {
+  title: string;
+  color: string;
+  piece: { startMin: number; endMin: number };
+  /** the whole event, for the time it shows */
+  full: { startMin: number; endMin: number };
+  pxPerMin: number;
+  testId?: string;
+  ek?: string;
+}) {
+  const heightPx = Math.max((piece.endMin - piece.startMin) * pxPerMin, 17);
   return (
     <div
       className="chip chip-ghost"
+      data-testid={testId}
+      data-ek={ek}
       style={{
         ...chipStyle(color),
-        top: startMin * pxPerMin,
+        top: piece.startMin * pxPerMin,
         height: heightPx,
         left: 0,
         width: "calc(100% - 2px)",
       }}
     >
       <span className="chip-title">{title}</span>
-      {heightPx >= 28 && (
-        <span className="chip-time">
-          {fmtChipRange(
-            new Date(2000, 0, 1, Math.floor(startMin / 60), startMin % 60),
-            new Date(2000, 0, 1, Math.floor(endMin / 60) % 24, endMin % 60),
-          )}
-        </span>
-      )}
+      {heightPx >= 28 && <span className="chip-time">{fmtChipRange(clockOf(full.startMin), clockOf(full.endMin))}</span>}
     </div>
   );
 }

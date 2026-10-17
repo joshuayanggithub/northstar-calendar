@@ -2,9 +2,10 @@
 // This layer reads where the chips and their text actually landed, hands
 // that to lib/marginNotes.ts to place every note in the free space around
 // them, and draws the arrows. A note can be dragged to adjust it, its box
-// sized by its edges and its writing made bigger or smaller (A−/A+, or −/+
-// while it has focus); all of it is remembered relative to its event
-// (lib/notePins.ts). Double-clicking a moved note gives it back to the placer.
+// sized by its edges (width, height), and the whole note scaled — writing
+// and box together — by its corner (or −/+ while it has focus); all of it is
+// remembered relative to its event (lib/notePins.ts). Double-clicking a
+// moved note gives it back to the placer.
 
 import { Fragment, useLayoutEffect, useRef, useState } from "react";
 import { cleanDrill, splitDrill } from "../lib/drill";
@@ -83,9 +84,12 @@ type Placed = { places: NotePlace[]; anchors: Map<string, Rect>; colW: number; c
 const EMPTY: Placed = { places: [], anchors: new Map(), colW: 1, chipX: new Map() };
 /** how long the strip must rest after a swipe step before notes re-place */
 const PAN_SETTLE_MS = 160;
-/** the sizes A−/A+ step through (1 = 12px); the placer's own crowded sizes
- *  (lib/marginNotes NOTE_SCALES) are among them */
+/** the sizes −/+ step through (1 = 12px); the placer's own crowded sizes
+ *  (lib/marginNotes NOTE_SCALES) are among them. The corner scales freely
+ *  between the ends. */
 const FONT_STEPS = [0.6, 0.72, 0.85, 1, 1.15, 1.3, 1.5, 1.75, 2, 2.4];
+const MIN_SCALE = FONT_STEPS[0];
+const MAX_SCALE = FONT_STEPS[FONT_STEPS.length - 1];
 /** a dragged-out box ending this close under its text fits the text again */
 const FIT_SNAP_PX = 3;
 
@@ -458,9 +462,11 @@ export function MarginNotes(props: {
     setNotePin(key, pin);
   };
 
-  /** Size the box from an edge or the corner. The text re-wraps to the width
-   *  live; the height can't go under the text, and stopping just short of it
-   *  fits the box to the text again. */
+  /** Size the box from an edge: the text re-wraps to the width live; the
+   *  height can't go under the text, and stopping just short of it fits the
+   *  box to the text again. Or scale the whole note from its corner: the
+   *  writing and the box grow or shrink together along the box's diagonal,
+   *  so the lines break where they did. */
   const startSize = (pe: React.PointerEvent<HTMLDivElement>, p: NotePlace, axes: "x" | "y" | "xy") => {
     if (pe.button !== 0) return;
     pe.stopPropagation();
@@ -481,6 +487,16 @@ export function MarginNotes(props: {
     const pinAt = (e: PointerEvent): NotePin => {
       const dx = e.clientX - sx;
       const dy = e.clientY - sy;
+      if (axes === "xy") {
+        // the pointer's travel along the box's diagonal, as a share of it
+        const dw = dx * Math.cos(t) + dy * Math.sin(t);
+        const dh = -dx * Math.sin(t) + dy * Math.cos(t);
+        const k0 = 1 + (dw * p.w + dh * p.h) / (p.w * p.w + p.h * p.h);
+        const s0 = base.scale ?? 1;
+        const s1 = Math.round(Math.min(MAX_SCALE, Math.max(MIN_SCALE, s0 * k0)) * 100) / 100;
+        const k = s1 / s0;
+        return { ...base, scale: s1, w: base.w * k, ...(base.h ? { h: base.h * k } : {}) };
+      }
       const w = axes === "y" ? w0 : Math.min(800, Math.max(8, w0 + dx * Math.cos(t) + dy * Math.sin(t)));
       let h = axes === "x" ? (base.h ?? 0) : Math.max(0, h0 - dx * Math.sin(t) + dy * Math.cos(t));
       const fit = pinnedShape(words, { ...base, w, h: 0 }, measure);
@@ -550,8 +566,8 @@ export function MarginNotes(props: {
         const p = shown(p0);
         const d = drag?.key === p.key ? drag : null;
         const sized = sizing?.key === p.key;
-        /** handles and the size buttons: no click on them is a click on
-         *  the note (a quick A+ A+ is not a double-click reset) */
+        /** the handles: no click on them is a click on the note (two quick
+         *  drags are not a double-click reset) */
         const own = {
           onClick: (e: React.MouseEvent) => e.stopPropagation(),
           onDoubleClick: (e: React.MouseEvent) => e.stopPropagation(),
@@ -573,7 +589,7 @@ export function MarginNotes(props: {
             role="button"
             aria-label={`Annotation for ${notesOf.get(p.key)?.e.summary ?? "event"}`}
             title={
-              "Drag to move · drag its edges to size it · A−/A+ (or −/+) for the writing" +
+              "Drag to move · edges: width and height · corner: scale the writing" +
               (p.pinned ? " · double-click to let it find its own spot" : "")
             }
             style={{
@@ -623,41 +639,6 @@ export function MarginNotes(props: {
             <div className="mn-size mn-size-x" data-testid="note-size-w" {...own} onPointerDown={(e) => startSize(e, p0, "x")} />
             <div className="mn-size mn-size-y" data-testid="note-size-h" {...own} onPointerDown={(e) => startSize(e, p0, "y")} />
             <div className="mn-size mn-size-xy" data-testid="note-size" {...own} onPointerDown={(e) => startSize(e, p0, "xy")} />
-            <div
-              className="mn-tools"
-              {...own}
-              onPointerDown={(e) => {
-                // keep the focus on the note, so −/+ and Delete still reach it
-                e.stopPropagation();
-                e.preventDefault();
-                e.currentTarget.parentElement?.focus({ preventScroll: true });
-              }}
-            >
-              <button
-                type="button"
-                className="mn-font-down"
-                data-testid="note-font-down"
-                aria-label="Smaller writing"
-                title="Smaller writing (−)"
-                tabIndex={-1}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  stepFont(p0, -1);
-                }}
-              />
-              <button
-                type="button"
-                className="mn-font-up"
-                data-testid="note-font-up"
-                aria-label="Bigger writing"
-                title="Bigger writing (+)"
-                tabIndex={-1}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  stepFont(p0, 1);
-                }}
-              />
-            </div>
           </div>
         );
       })}

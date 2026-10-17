@@ -237,8 +237,9 @@ test("margin notes: size a note's box from its edges and corner; the text re-wra
   });
   expect(Math.abs(mid.box - mid.text)).toBeLessThan(3);
 
-  // the corner does both: wider and back up under the text, which fits it
-  await pull(page, "note-size", Math.round(before.ow * 0.4), -80);
+  // wider again, and the bottom back up under the text, which fits it
+  await pull(page, "note-size-w", Math.round(before.ow * 0.4), 0);
+  await pull(page, "note-size-h", 0, -80);
   const back = await shapeOf(page);
   expect(back.lines).toBeLessThan(narrow.lines);
   expect(back.oh).toBe(back.lines * 14 + 6);
@@ -268,34 +269,44 @@ test("margin notes: size a note's box from its edges and corner; the text re-wra
   expect(Math.abs(reset.ow - before.ow)).toBeLessThan(2);
 });
 
-test("margin notes: A+/A− (and +/− with the note focused) step the writing size; the lines break where they did", async ({ page }) => {
+test("margin notes: the corner scales the whole note — writing and box together, lines unchanged", async ({ page }) => {
   await open(page);
   const note = tikTok(page);
+  const key = (await note.getAttribute("data-ek"))!;
   const before = await shapeOf(page);
   expect(before.font).toBe(12);
-
+  // no size buttons: the corner is the control
   await note.hover();
-  await note.getByTestId("note-font-up").click();
-  await note.getByTestId("note-font-up").click(); // twice quickly: not a double-click reset
-  await expect.poll(async () => (await shapeOf(page)).font).toBeCloseTo(15.6, 1);
+  await expect(note.locator("button")).toHaveCount(0);
+
+  // out along the diagonal: bigger
+  await pull(page, "note-size", Math.round(before.ow * 0.5), Math.round(before.oh * 0.5));
   const big = await shapeOf(page);
   await expect(note).toHaveClass(/pinned/);
-  expect(big.lines).toBe(before.lines);
-  expect(big.ow).toBeGreaterThan(before.ow * 1.2);
-  expect(big.oh).toBe(big.lines * Math.round(14 * 1.3) + 6);
-  expect(Math.abs(big.x - before.x)).toBeLessThan(3);
+  expect(big.font).toBeGreaterThan(15);
+  expect(big.lines, "the lines break where they did").toBe(before.lines);
+  expect(big.ow).toBeGreaterThan(before.ow * 1.3);
+  expect(big.oh).toBeGreaterThan(before.oh * 1.3);
+  expect(Math.abs(big.x - before.x)).toBeLessThan(4);
+  const pin = (await page.evaluate(() => JSON.parse(localStorage.getItem("note-pins") ?? "{}")))[key];
+  expect(pin.scale).toBeGreaterThan(1.25);
 
-  // the buttons left the focus on the note: the keys work straight away
-  await page.keyboard.press("-");
-  await page.keyboard.press("-");
-  await expect.poll(async () => (await shapeOf(page)).font).toBe(12);
-  await page.keyboard.press("-");
-  await expect.poll(async () => (await shapeOf(page)).font).toBeCloseTo(10.2, 1);
+  // back in, past where it started: smaller than at first
+  await pull(page, "note-size", -Math.round(big.ow * 0.6), -Math.round(big.oh * 0.6));
+  const small = await shapeOf(page);
+  expect(small.font).toBeLessThan(12);
+  expect(small.font).toBeGreaterThanOrEqual(12 * 0.6 - 0.01); // never below the smallest hand
+  expect(small.lines).toBe(before.lines);
+
+  // survives a reload
+  await page.reload();
+  await expect(page.locator(".mock-badge")).toHaveText("browser mock mode");
+  await page.getByTestId("week-grid").evaluate((el) => (el.scrollTop = 19 * 48));
+  await expect(page.locator("[data-testid=margin-notes][data-pending='0']")).toHaveCount(1);
+  expect((await shapeOf(page)).font).toBeCloseTo(small.font, 1);
+
+  // −/+ with the note focused still step it
+  await tikTok(page).click();
   await page.keyboard.press("+");
-  await expect.poll(async () => (await shapeOf(page)).font).toBe(12);
-  expect((await shapeOf(page)).lines).toBe(before.lines);
-
-  // and it is the same note: the event wasn't touched, nothing else moved
-  await expect(note).toHaveCount(1);
-  await expect(note).not.toContainText("A+");
+  await expect.poll(async () => (await shapeOf(page)).font).toBeGreaterThan(small.font);
 });
