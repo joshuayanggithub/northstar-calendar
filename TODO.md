@@ -273,6 +273,7 @@ the window on an existing display (e.g. SSH X forwarding) instead.
 
 ## Shipped log (newest first)
 
+- `a7242463` Save/Delete no longer go dead after a delete; Delete key deletes the open event
 - `b65701d8` Pinch zooms the day count; `996b84d1` note corner scales; `4794edc6` overnight drag previews; `dbb37e81` resizable panes + growing description
 - `b69ccc3b` C-shape title moves below events at its top (overnight tails start on the 12 AM line)
 - `a0ea5055` Other calendars read-only by default + Copy to my calendar (picker, series), copied originals step aside

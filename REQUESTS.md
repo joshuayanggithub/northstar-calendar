@@ -104,3 +104,4 @@ tracking: FEATURES.md for the parity matrix, e2e/QA-BACKLOG.md for QA items.)
 | 95 | No preview when dragging an event that crosses midnight | done `4794edc6` (previews cut into a piece per day touched: moves, resizes, group drags); his /Applications copy was stale, re-linked to the build |
 | 96 | Notes: the corner (diagonal drag) should scale the font instead of A−/A+ icons | done `996b84d1` (corner scales writing + box together, lines unchanged; edges keep width/height; −/+ keys kept) |
 | 97 | Pinch in/out on the trackpad changes the number of days shown | done `b65701d8` (WebKit gesture events + Chromium ctrl+wheel; 1–9 days; the day under the fingers stays put) |
+| 98 | Delete button in event details and the delete shortcut don't work; Save doesn't either | done `a7242463` (a delete left the panel's busy flag on, disabling Save/Delete on every later event; Delete/Backspace now delete the open event) |
