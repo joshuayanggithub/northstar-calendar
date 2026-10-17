@@ -349,6 +349,7 @@ test("correctness: end before start clamps on save", async ({ page }) => {
   await page.locator(".chip-timed", { hasText: "Swim" }).click(); // 18-20
   const panel = page.getByTestId("event-panel");
   await panel.locator('input[type="time"]').nth(1).fill("17:00"); // before start
+  await expect(panel.locator(".panel-dur")).toContainText("30min");
   await panel.getByRole("button", { name: /Save/ }).click();
   // 30-min chips are too short to show inline time; verify by reopening.
   await page.locator(".chip-timed", { hasText: "Swim" }).click();
@@ -374,6 +375,7 @@ test("correctness: switching calendars in the panel recolors the event", async (
   await expect(panel.getByTestId("panel-cal-trigger")).toContainText("Work");
   await panel.getByRole("button", { name: /Save/ }).click();
   const chip = page.locator(".chip-timed", { hasText: "Swim" });
+  await expect(chip, "the selected event should remain highlighted after its calendar move").toHaveClass(/selected/);
   const calNow = await chip.evaluate((el) => getComputedStyle(el).getPropertyValue("--cal").trim());
   const vg = parseInt(calNow.slice(1), 16);
   expect((vg >> 8) & 255).toBeGreaterThan(vg & 255); // green-dominant (Work)
@@ -897,6 +899,148 @@ test("bug: editing a cross-midnight event preserves its next-day end", async ({ 
   await expect(page.locator(".chip-timed", { hasText: "Swim night" })).toHaveCount(2);
 });
 
+test("bug: changing the start of an overnight event preserves its duration", async ({ page }) => {
+  await open(page);
+  // Move Swim from 6–8 PM to 11 PM–1 AM using the same real canvas path.
+  const chip = page.locator(".chip-timed", { hasText: "Swim" });
+  const box = (await chip.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + 8);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2, box.y + 8 + 5 * 48, { steps: 5 });
+  await page.mouse.up();
+  await page.locator(".chip-timed", { hasText: "Swim" }).first().click();
+  const panel = page.getByTestId("event-panel");
+  await expect(panel.getByTestId("time-start")).toHaveValue("23:00");
+  await expect(panel.getByTestId("time-end")).toHaveValue("01:00");
+  await expect(panel.locator(".panel-nextday")).toBeVisible();
+
+  // Shifting the start by 30 minutes must keep the 2-hour duration.
+  await panel.getByTestId("time-start").fill("23:30");
+  await expect(panel.getByTestId("time-end")).toHaveValue("01:30");
+  await expect(panel.locator(".panel-nextday")).toBeVisible();
+
+  // Editing the end clock on the already-overnight event keeps its date.
+  await panel.getByTestId("time-end").fill("00:30");
+  await expect(panel.locator(".panel-nextday")).toBeVisible();
+  await panel.getByRole("button", { name: /Save/ }).click();
+  await page.locator(".chip-timed", { hasText: "Swim" }).first().click();
+  await expect(panel.getByTestId("time-start")).toHaveValue("23:30");
+  await expect(panel.getByTestId("time-end")).toHaveValue("00:30");
+  await expect(panel.locator(".panel-nextday")).toBeVisible();
+});
+
+test("bug: saving a timed event that spans multiple days preserves its full end", async ({ page }) => {
+  const fixture = {
+    calendars: [{ id: "primary", summary: "Personal", color: "#4f8cff", is_primary: true, hidden: false, access_role: "owner" }],
+    events: [{
+      id: "multi-day-timed", calendar_id: "primary", etag: null, summary: "Offsite",
+      description: null, location: null,
+      start: "2026-10-14T09:00:00-04:00", end: "2026-10-16T10:00:00-04:00",
+      all_day: false, timezone: "America/New_York", status: "confirmed",
+      recurrence: null, recurring_event_id: null, conference_url: null, updated: null, raw: null,
+    }],
+  };
+  await page.addInitScript((fx) => { (globalThis as any).__calFixture = fx; }, fixture);
+  await open(page);
+  await page.locator(".chip-timed", { hasText: "Offsite" }).first().click();
+  const panel = page.getByTestId("event-panel");
+  await expect(panel.locator(".panel-nextday")).toHaveText("+2d");
+  await panel.getByTestId("time-start").fill("09:30");
+  await expect(panel.getByTestId("time-end")).toHaveValue("10:30");
+  await expect(panel.locator(".panel-nextday")).toHaveText("+2d");
+  await panel.locator(".panel-title").fill("Offsite revised");
+  await panel.getByRole("button", { name: /Save/ }).click();
+  const end = await page.evaluate(async () => {
+    const rows = await (window as any).__mockBackend.listEvents("2026-10-14", "2026-10-18");
+    return rows.find((event: any) => event.id === "multi-day-timed")?.end;
+  });
+  expect(end).toBe("2026-10-16T10:30:00-04:00");
+});
+
+test("event editor preserves multi-day elapsed duration across the DST fall-back", async ({ page }) => {
+  await page.addInitScript((fx) => { (globalThis as any).__calFixture = fx; }, {
+    calendars: [{ id: "primary", summary: "Personal", color: "#4f8cff", is_primary: true, hidden: false, access_role: "owner" }],
+    events: [{
+      id: "dst-multi-day", calendar_id: "primary", etag: null, summary: "DST offsite",
+      description: null, location: null,
+      start: "2026-10-31T23:00:00-04:00", end: "2026-11-02T01:00:00-05:00",
+      all_day: false, timezone: "America/New_York", status: "confirmed",
+      recurrence: null, recurring_event_id: null, conference_url: null, updated: null, raw: null,
+    }],
+  });
+  await page.goto(`/?now=${encodeURIComponent("2026-10-31T09:00:00")}`);
+  await expect(page.locator(".mock-badge")).toHaveText("browser mock mode");
+  await page.locator(".chip-timed", { hasText: "DST offsite" }).first().click();
+  const panel = page.getByTestId("event-panel");
+  await expect(panel.locator(".panel-nextday")).toHaveText("+2d");
+  await expect(panel.locator(".panel-dur")).toContainText("27h");
+  await panel.getByTestId("time-start").fill("23:30");
+  await expect(panel.getByTestId("time-end")).toHaveValue("01:30");
+  await expect(panel.locator(".panel-nextday")).toHaveText("+2d");
+  await expect(panel.locator(".panel-dur")).toContainText("27h");
+  await panel.getByRole("button", { name: /Save/ }).click();
+  const saved = await page.evaluate(async () => {
+    const rows = await (window as any).__mockBackend.listEvents("2026-10-31", "2026-11-04");
+    const event = rows.find((row: any) => row.id === "dst-multi-day");
+    return { start: event?.start, end: event?.end };
+  });
+  expect(saved).toEqual({ start: "2026-10-31T23:30:00-04:00", end: "2026-11-02T01:30:00-05:00" });
+});
+
+test("bug: shifting a multi-day all-day event keeps its covered span", async ({ page }) => {
+  await page.addInitScript((fx) => { (globalThis as any).__calFixture = fx; }, {
+    calendars: [{ id: "primary", summary: "Personal", color: "#4f8cff", is_primary: true, hidden: false, access_role: "owner" }],
+    events: [{
+      id: "multi-day-all-day", calendar_id: "primary", etag: null, summary: "Planning retreat",
+      description: null, location: null, start: "2026-10-14", end: "2026-10-17",
+      all_day: true, timezone: null, status: "confirmed", recurrence: null,
+      recurring_event_id: null, conference_url: null, updated: null, raw: null,
+    }],
+  });
+  await open(page);
+  await page.getByTestId("allday-row").getByRole("button", { name: "Planning retreat" }).first().click();
+  const panel = page.getByTestId("event-panel");
+  await panel.locator(".panel-date-pretty").click();
+  const date = panel.locator('input[type="date"]:not(.allday-end)');
+  await date.fill("2026-10-16");
+  await date.blur();
+  await expect(panel.getByTestId("allday-end")).toHaveValue("2026-10-18");
+  await panel.getByRole("button", { name: /Save/ }).click();
+  const savedRange = async () => page.evaluate(async () => {
+    const rows = await (window as any).__mockBackend.listEvents("2026-10-14", "2026-10-21");
+    const event = rows.find((row: any) => row.id === "multi-day-all-day");
+    return { start: event?.start, end: event?.end };
+  });
+  expect(await savedRange()).toEqual({ start: "2026-10-16", end: "2026-10-19" });
+
+  await page.getByTestId("allday-row").getByRole("button", { name: "Planning retreat" }).first().click();
+  const reopened = page.getByTestId("event-panel");
+  await reopened.locator(".panel-date-pretty").click();
+  const reopenedDate = reopened.locator('input[type="date"]:not(.allday-end)');
+  await reopenedDate.fill("2026-10-12");
+  await reopenedDate.blur();
+  await expect(reopened.getByTestId("allday-end")).toHaveValue("2026-10-14");
+  await reopened.getByRole("button", { name: /Save/ }).click();
+  expect(await savedRange()).toEqual({ start: "2026-10-12", end: "2026-10-15" });
+
+  // Move the same three-day event across the fall-back clock change. Its span
+  // is in calendar days, not 24-hour elapsed-time chunks.
+  await page.getByTestId("allday-row").getByRole("button", { name: "Planning retreat" }).first().click();
+  const dstPanel = page.getByTestId("event-panel");
+  await dstPanel.locator(".panel-date-pretty").click();
+  const dstDate = dstPanel.locator('input[type="date"]:not(.allday-end)');
+  await dstDate.fill("2026-10-31");
+  await dstDate.blur();
+  await expect(dstPanel.getByTestId("allday-end")).toHaveValue("2026-11-02");
+  await dstPanel.getByRole("button", { name: /Save/ }).click();
+  const dstSaved = await page.evaluate(async () => {
+    const rows = await (window as any).__mockBackend.listEvents("2026-10-31", "2026-11-05");
+    const event = rows.find((row: any) => row.id === "multi-day-all-day");
+    return { start: event?.start, end: event?.end };
+  });
+  expect(dstSaved).toEqual({ start: "2026-10-31", end: "2026-11-03" });
+});
+
 test("correctness: DST fall-back week renders sanely", async ({ page }) => {
   await page.goto(`/?now=${encodeURIComponent("2026-11-01T09:00:00")}`); // DST ends Nov 1 2026
   await expect(page.locator(".mock-badge")).toHaveText("browser mock mode");
@@ -1352,9 +1496,13 @@ test("recurring: 'all events' shifts every instance's time", async ({ page }) =>
   await expect(page.getByTestId("toast")).toContainText("Updated all");
 });
 
-test("recurring: 'all events' moves the whole series to the chosen calendar", async ({ page }) => {
+test("recurring: 'all events' moves the whole series to the chosen calendar", async ({ page }, testInfo) => {
   await open(page);
   await page.getByTestId("week-grid").evaluate((el) => (el.scrollTop = 4 * 48));
+  await page.evaluate(async () => {
+    const all = await (window as any).__mockBackend.listEvents("2026-10-01", "2026-11-01");
+    (window as any).__preMoveSeriesSnapshots = all.filter((e: any) => e.recurring_event_id === "sleep-master");
+  });
   const sleep = page.locator(".chip-timed:not(.chip-cfull)").filter({
     has: page.locator(".chip-title", { hasText: /^Sleep$/ }),
   });
@@ -1367,8 +1515,17 @@ test("recurring: 'all events' moves the whole series to the chosen calendar", as
   await page.getByTestId("scope-dialog").getByTestId("scope-all").click();
   await expect(page.getByTestId("toast")).toContainText("Updated all");
   await expect(sleep).toHaveCSS("--cal", "#2fbf71");
+  await expect(sleep, "the selected event should remain highlighted after its calendar move").toHaveClass(/selected/);
+  await page.screenshot({ path: testInfo.outputPath("series-calendar-move-selected.png") });
   await expect(page.getByTestId("cshape-seg").filter({ hasText: "Sleep" }))
     .toHaveCSS("--cal", "#2fbf71");
+  const snapshotsStayedImmutable = await page.evaluate(async () => {
+    const previous = (window as any).__preMoveSeriesSnapshots;
+    const current = await (window as any).__mockBackend.listEvents("2026-10-01", "2026-11-01");
+    return previous.every((e: any) => e.calendar_id === "primary") &&
+      previous.every((e: any) => !current.includes(e));
+  });
+  expect(snapshotsStayedImmutable, "a backend update must not mutate objects held by stale UI state").toBe(true);
   await sleep.click();
   await expect(page.getByTestId("event-panel").getByTestId("panel-cal-trigger"))
     .toContainText("Work");
@@ -1519,6 +1676,20 @@ test("recurring: 'all events' never copies one occurrence's note onto the series
     return all.filter((e: any) => e.recurring_event_id === "sleep-master").map((e: any) => e.description);
   });
   expect(descriptions.filter((d) => d?.includes("Only this night."))).toHaveLength(1);
+
+  // A shared body edit is applied to the series but must not clear the
+  // occurrence-specific annotation stored alongside each expanded instance.
+  await page.locator(`.chip-timed[data-ek="${key}"]`).click();
+  await panel.getByPlaceholder("Description").fill("Shared series description");
+  await panel.getByRole("button", { name: /Save/ }).click();
+  await page.getByTestId("scope-dialog").getByTestId("scope-all").click();
+  await expect(page.getByTestId("toast")).toContainText("Updated all");
+  const updatedDescriptions: (string | null)[] = await page.evaluate(async () => {
+    const all = await (window as any).__mockBackend.listEvents("2026-10-01", "2026-11-01");
+    return all.filter((e: any) => e.recurring_event_id === "sleep-master").map((e: any) => e.description);
+  });
+  expect(updatedDescriptions.every((d) => d?.includes("Shared series description"))).toBe(true);
+  expect(updatedDescriptions.filter((d) => d?.includes("Only this night."))).toHaveLength(1);
 });
 
 test("recurring: the scope dialog opens before the series master has loaded", async ({ page }) => {
@@ -1723,6 +1894,21 @@ test("multiselect: shift-click builds a selection; backspace deletes all; undo r
   await page.keyboard.press("ControlOrMeta+z");
   await expect(page.locator(".chip-timed", { hasText: "Morning run" })).toHaveCount(1);
   await expect(page.locator(".chip-timed", { hasText: "Standup" })).toHaveCount(1);
+});
+
+test("multiselect delete clears selection and closes a panel for a deleted event", async ({ page }) => {
+  await open(page);
+  await page.locator(".chip-timed", { hasText: "Morning run" }).click();
+  const panel = page.getByTestId("event-panel");
+  await expect(panel).toBeVisible();
+  // Shift-click adds to the current selection without replacing the open panel.
+  await page.locator(".chip-timed", { hasText: "Standup" }).click({ modifiers: ["Shift"] });
+  await expect(page.locator(".chip-timed.selected")).toHaveCount(2);
+  await page.keyboard.press("Backspace");
+  await expect(page.locator(".chip-timed.selected")).toHaveCount(0);
+  await expect(page.getByTestId("event-panel")).toHaveCount(0);
+  await expect(page.locator(".chip-timed", { hasText: "Morning run" })).toHaveCount(0);
+  await expect(page.locator(".chip-timed", { hasText: "Standup" })).toHaveCount(0);
 });
 
 test("multiselect: shift-click again removes from the selection", async ({ page }) => {
@@ -2602,6 +2788,86 @@ test("gesture: horizontal scroll slides the window day by day, proportional to t
   // Explicit navigation returns to the current week.
   await page.keyboard.press("t");
   await expect(firstHead).toContainText("11");
+});
+
+test("gesture: horizontal pan keeps dx when later trackpad packets contain vertical noise", async ({ page }) => {
+  await open(page);
+  const grid = page.getByTestId("week-grid");
+  const gridBox = (await grid.boundingBox())!;
+  const startDay = Number(await grid.locator(".day-head .dnum").first().textContent());
+  await page.mouse.move(gridBox.x + gridBox.width / 2, gridBox.y + 220);
+  // The first sample establishes clear horizontal intent. Later trackpad
+  // packets can carry a larger cross-axis component as fingers wobble.
+  await page.mouse.wheel(4, 0);
+  for (let i = 0; i < 29; i++) await page.mouse.wheel(4, 5);
+  const moved = await grid.evaluate(async (grid, startDay) => {
+    const clip = grid.querySelector<HTMLElement>(".day-clip")!;
+    const strip = grid.querySelector<HTMLElement>(".day-headers .pan-strip")!;
+    const colWidth = clip.clientWidth / document.querySelectorAll(".day-head").length;
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    const match = /([+-]) ([\d.]+)px/.exec(strip.style.transform);
+    const residual = match ? Number(match[2]) * (match[1] === "-" ? 1 : -1) : 0;
+    const currentDay = Number(document.querySelector(".day-head .dnum")!.textContent);
+    return (currentDay - startDay) * colWidth + residual;
+  }, startDay);
+  expect(Math.abs(moved - 120), "all horizontal deltas from the locked swipe should reach the viewport").toBeLessThan(1);
+});
+
+test("gesture: horizontal pan retains its leading dx before axis lock", async ({ page }) => {
+  await open(page);
+  const grid = page.getByTestId("week-grid");
+  const gridBox = (await grid.boundingBox())!;
+  const startDay = Number(await grid.locator(".day-head .dnum").first().textContent());
+  await page.mouse.move(gridBox.x + gridBox.width / 2, gridBox.y + 220);
+  // A diagonal first packet can be slightly Y-dominant before the gesture
+  // settles into horizontal motion; its X component must not be thrown away.
+  await page.mouse.wheel(8, 10);
+  for (let i = 0; i < 29; i++) await page.mouse.wheel(8, 6);
+  const moved = await grid.evaluate(async (grid, startDay) => {
+    const clip = grid.querySelector<HTMLElement>(".day-clip")!;
+    const strip = grid.querySelector<HTMLElement>(".day-headers .pan-strip")!;
+    const colWidth = clip.clientWidth / document.querySelectorAll(".day-head").length;
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    const match = /([+-]) ([\d.]+)px/.exec(strip.style.transform);
+    const residual = match ? Number(match[2]) * (match[1] === "-" ? 1 : -1) : 0;
+    const currentDay = Number(document.querySelector(".day-head .dnum")!.textContent);
+    return (currentDay - startDay) * colWidth + residual;
+  }, startDay);
+  expect(Math.abs(moved - 240), "the leading x component should join the swipe after its axis locks").toBeLessThan(1);
+});
+
+test("gesture: ambiguous X movement expires when its wheel stream idles", async ({ page }) => {
+  await open(page);
+  const grid = page.getByTestId("week-grid");
+  const gridBox = (await grid.boundingBox())!;
+  const startDay = Number(await grid.locator(".day-head .dnum").first().textContent());
+  await page.mouse.move(gridBox.x + gridBox.width / 2, gridBox.y + 220);
+  await page.mouse.wheel(8, 10); // candidate X, but not enough to lock
+  await page.waitForTimeout(220); // candidate must expire with the wheel stream
+  await page.mouse.wheel(8, 0); // new, clearly horizontal gesture
+  const moved = await grid.evaluate(async (grid, startDay) => {
+    const clip = grid.querySelector<HTMLElement>(".day-clip")!;
+    const strip = grid.querySelector<HTMLElement>(".day-headers .pan-strip")!;
+    const colWidth = clip.clientWidth / document.querySelectorAll(".day-head").length;
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    const match = /([+-]) ([\d.]+)px/.exec(strip.style.transform);
+    const residual = match ? Number(match[2]) * (match[1] === "-" ? 1 : -1) : 0;
+    const currentDay = Number(document.querySelector(".day-head .dnum")!.textContent);
+    return (currentDay - startDay) * colWidth + residual;
+  }, startDay);
+  expect(Math.abs(moved - 8), "a new swipe must not inherit an expired X candidate").toBeLessThan(1);
+});
+
+test("gesture: vertical scrolling resumes after a horizontal swipe idles", async ({ page }) => {
+  await open(page);
+  const grid = page.getByTestId("week-grid");
+  const box = (await grid.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + 220);
+  await page.mouse.wheel(12, 0); // establish a horizontal lock
+  await page.waitForTimeout(220); // the gesture's idle window expires
+  const before = await grid.evaluate((el) => el.scrollTop);
+  await page.mouse.wheel(0, 160);
+  await expect.poll(() => grid.evaluate((el) => el.scrollTop)).toBeGreaterThan(before);
 });
 
 test("gesture: narrow week headers stay aligned with their day columns while panning", async ({ page }) => {

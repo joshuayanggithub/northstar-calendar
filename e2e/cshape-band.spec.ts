@@ -40,7 +40,11 @@ test("layout: an event at a C-shape's top keeps its start; the C-shape's band go
 
 async function openNight(page: Page) {
   const cal = (id: string, summary: string) => ({ id, summary, color: "#5484ed", is_primary: id === "work", hidden: false, access_role: "owner" });
-  const at = (d: number, h: number, min = 0) => new Date(2026, 9, d, h, min).toISOString();
+  // Match playwright.config's America/New_York browser zone. `new Date(y,
+  // m, ...)` would use the Linux host's Pacific zone and move the fixtures
+  // three hours later in the browser.
+  const at = (d: number, h: number, min = 0) =>
+    new Date(`2026-10-${String(d).padStart(2, "0")}T${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}:00-04:00`).toISOString();
   let n = 0;
   const ev = (calendar_id: string, summary: string, s: string, e: string) => ({
     id: `n${++n}`, calendar_id, etag: null, summary, description: null, location: null, start: s, end: e,

@@ -29,7 +29,7 @@ Calendar account, manual = user confirms in the running app.
 | Day view | tested (e2e) | e2e |
 | Agenda/schedule list (List view, kept per user preference) | tested (e2e) | e2e |
 | Jump to today / date navigation (t, arrows) | tested (e2e) | e2e |
-| Continuous horizontal pan in week and custom day-count views | tested (2026-10-16, `03b55d3`, `237f33d`) | e2e step-by-step + native WKWebView across day boundaries with zero backward steps; partial swipes stay put; hidden weekends stay five business days; annotations remain rigid during and after settlement |
+| Continuous horizontal pan in week and custom day-count views | mixed-axis and leading-packet loss fixes verified in working tree (2026-10-17; commit pending); physical-device performance remains under investigation | `WeekView` locks after horizontal intent, buffers lead-in `deltaX` until then, and clears candidates at 180 ms idle. Red tests proved prior packet loss of 116/120px in a noisy stream and 8px in a Y-dominant first packet; 7 focused gesture tests and build pass, final 15:32 suite 301/365 (64 skipped). Physical trackpad/WebKitGTK still unverified |
 | Mini-month navigator in sidebar | tested (e2e) | e2e |
 | Calendar visibility toggles (hover Hide/Show affordance, Google selected-flag seeding) | tested (e2e) | e2e |
 | Notion chip anatomy: inline times, wrapped titles, capsule accent, ghosted past, weekend wash, tz gutter label | tested | e2e both themes |
@@ -44,7 +44,11 @@ Calendar account, manual = user confirms in the running app.
 |---|---|---|
 | Click-drag to create event in grid | tested (e2e) | e2e |
 | Drag to move, edge-drag to resize | tested (e2e + manual QA; sync listener fix) | e2e |
-| Event editor: title, time, calendar, description, location | tested (live calendar move 2026-10-15) | e2e + live Google round-trip |
+| Event editor: title, time, calendar, description, location; selection follows a moved event; Delete/Backspace and repeat-delete scope are safe | tested (live calendar move 2026-10-15; selection + upstream delete fixes full-suite verified 2026-10-17, commit pending) | e2e + live Google round-trip; 11:16 suite 291 passed / 63 skipped; panel-delete 3/3 |
+| Multi-select delete clears selection and closes a panel for a deleted event | verified in working tree (2026-10-17) | regression opens an event, shift-adds a second, then deletes both; focused Playwright 1/1 at 14:12 and full suites 301/365 at 14:17, 14:32, 14:47, 15:02, 15:17, and 15:32 |
+| Overnight time edits preserve duration when shifting start | tested in working tree (2026-10-17; commit pending) | regression fails before and passes after; same-day clamp + cross-midnight + overnight focused tests pass 3/3; production build and 13:02 full browser suite (297 passed / 64 skipped) pass after final guard alignment |
+| Multi-day timed event edits preserve end date and duration | verified in working tree (2026-10-17; commit pending) | test reproduced ordinary title-save truncating 49h event to 25h; editor now stores calendar-day offset, displays +Nd and preserves duration on start-time change; DST fall-back badge reports actual elapsed 27h; focused checks pass 6/6, build passes, 13:02 full browser suite passes 297/64 |
+| Multi-day all-day event date edits preserve the covered span | verified in working tree (2026-10-17; commit pending) | test reproduced moving a three-day event's start without its inclusive end, saving it as one day; date edit now shifts the end by the same calendar-day offset. Forward/backward edits and fall-back DST crossing test pass; the DST case passed focused Playwright 1/1 at 14:54 and full suites 301/365 at 15:02, 15:17, and 15:32. Four related date/conversion/drag checks pass |
 | Guests/attendees (add emails, see RSVP status) | todo | live |
 | Recurring events: display instances | tested (live: singleEvents sync, 29k instances) | unit + live |
 | Recurring events: create (NL: daily/weekly/weekday/per-day) | tested (live: series create/edit/delete) | live |
@@ -54,6 +58,10 @@ Calendar account, manual = user confirms in the running app.
 | Recurring events: edit “this and following” on fixed-count series | tested (2026-10-15, `a72e439`) | E2E edit/delete/first-instance cases + disposable live Google COUNT=3 split into 1+2 instances |
 | Recurring all-day events: edit “this and following” on fixed-count series | in testing (2026-10-16, `bb0113b`) | mock E2E verifies date-valued `UNTIL` + remaining `COUNT`; disposable live Google all-day probe pending |
 | Recurring events: change guests, busy/free, visibility, reminders for whole series | tested (mock 2026-10-15) | two-instance e2e |
+| Recurring-series edit responsiveness | browser/mock + sync-core tested in working tree (2026-10-17) | delayed 5-second regressions for “all”, unbounded “this and following”, and COUNT-limited splits; COUNT path now projects locally before fetching Google instances, then computes exact remaining count including cancelled originals; 3/3 latency E2Es, 3 count-calculator unit tests (timed, all-day, missing selection), and build pass. Local projection remains timezone-independent through DST and preserves per-instance notes. Native Tauri build/in-app check still needs Linux GTK3 + WebKitGTK 4.1 development packages |
+| Linux native in-app E2E setup | blocked pending authenticated system-package install | Xvfb and GTK3/WebKitGTK 4.0 runtimes exist, but required GTK3 + WebKitGTK 4.1 development files and WebKit driver are absent; fresh-sandbox `npm run test:e2e:app` fails its Tauri build on missing `gdk-3.0`, `pango`, `cairo`, and `gdk-pixbuf-2.0` pkg-config metadata. `npm run setup:e2e:linux` needs authenticated sudo and made no package changes |
+| Dense horizontal-pan frame profile | tested in production Chromium (2026-10-17; residual outlier under investigation) | Twelve 400-event / 720px synthetic DOM-wheel profiles and six browser-delivered-wheel profiles: all p95 16.7–16.8ms; 8/18 had one 33.2–33.4ms frame. After the lead-in buffer fix, a fresh synthetic profile had p50/p95/max 16.7/16.7/16.8ms and no >25ms gap; browser-delivered p95 was 16.8ms with one 33.3ms gap during no wheel event/WeekView commit. Latest dispatch <=0.4ms, paint <=0.2ms, React commits 2–7ms. The 15:32 suite passes 301/365 (64 skipped). Physical OS trackpad/WebKit input and Linux WebKitGTK remain unverified; no claim that remaining lag is fixed |
+| Annotation erase from editor and no-flash delete | tested | editor erase + undo and focused-note Delete E2Es; mutation observer confirms event chips are not remounted; recurring-series body edits preserve per-instance notes |
 | Delete event with undo toast (⌘Z); delete series for recurring | tested (e2e + live) | e2e + live |
 | Timezone-correct display incl. DST boundaries | building | unit |
 
@@ -69,7 +77,7 @@ Calendar account, manual = user confirms in the running app.
 | Menubar tray: next event + join button + sync/open/quit | in testing (user verify) | manual |
 | Global quick-create shortcut (⌥C) | in testing (user verify) | manual |
 | Calendar colors = Google Calendar's displayed palette (legacy API hex mapped), tinted translucent | tested (2026-10-16, `10efe30e`) | e2e/color.spec.ts; checked against the live Google sidebar |
-| Multi-select drag: shift-click / shift-drag several events, drag one, all move (ghost each, wall-clock shift, selection kept) | tested (2026-10-16, `d3166cdd`) | e2e/groupdrag.spec.ts |
+| Multi-select drag: shift-click / shift-drag several events, drag one, all move (ghost each, wall-clock shift, selection kept; remote-deleted events leave selection and close stale editor) | tested (2026-10-17) | e2e/groupdrag.spec.ts |
 | Drag previews of events running past midnight drawn on every day they touch (move, resize, group) | tested (2026-10-17, `4794edc6`) | e2e/overnight-drag.spec.ts |
 | Pinch on the trackpad zooms the day count (1–9), the day under the fingers kept in place | tested (2026-10-17, `b65701d8`) | e2e/pinch.spec.ts (WebKit gesture + ctrl+wheel); real pinch: user verify |
 | Resizable sidebar and event panel (remembered, double-click reset, arrow keys); description grows with its text | tested (2026-10-17, `dbb37e81`) | e2e/panes.spec.ts |

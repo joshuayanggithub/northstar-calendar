@@ -61,6 +61,12 @@ export interface EventInput {
   reminder_minutes?: number | null;
 }
 
+/** Metadata needed to preserve an RRULE COUNT when splitting a series. */
+export interface CountSeriesSplit {
+  originalRecurrence: string;
+  selectedOriginalStart: { date?: string; dateTime?: string };
+}
+
 export interface SyncReport {
   pushed: number;
   pulled: number;
@@ -84,11 +90,17 @@ export interface Backend {
   getSeriesInstances(calendarId: string, masterId: string): Promise<any[]>;
   /** PATCH a series master and, with destinationId, move it to that
    *  calendar: one step, applied to the local instances right away. */
-  updateSeriesMaster(calendarId: string, masterId: string, patch: any, destinationId?: string): Promise<void>;
+  updateSeriesMaster(calendarId: string, masterId: string, patch: any, destinationId?: string, previousStart?: string): Promise<void>;
   /** "This and following": end the series before this occurrence (the
    *  truncated recurrence) and start a new series from `input`, as one step.
    *  Resolves to the new series' id. */
-  splitSeries(calendarId: string, masterId: string, recurrence: string[], input: EventInput): Promise<string>;
+  splitSeries(
+    calendarId: string,
+    masterId: string,
+    recurrence: string[],
+    input: EventInput,
+    countSplit?: CountSeriesSplit,
+  ): Promise<string>;
   /** Move a recurring master and its instances to another calendar. */
   moveSeriesMaster(calendarId: string, masterId: string, destinationId: string): Promise<void>;
   /** Goals (daily / weekly / long-term), kept by the app: lib/goals.ts */

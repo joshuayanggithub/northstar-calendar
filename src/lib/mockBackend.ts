@@ -1,7 +1,7 @@
 // In-memory backend for running the UI in a plain browser (and for Playwright).
 // Mirrors the Tauri backend's observable behavior closely enough for UI work.
 
-import type { Backend, Calendar, CalendarEvent, EventInput } from "./types";
+import type { Backend, Calendar, CalendarEvent, CountSeriesSplit, EventInput } from "./types";
 import { addDays, now, toDateOnly } from "./dates";
 import { joinDrill, splitDrill } from "./drill";
 import { periodOf, type Goal, type GoalsFile, type Horizon } from "./goals";
@@ -187,7 +187,7 @@ function demoGoals(): GoalsFile {
 }
 
 /** A series-master PATCH applied to the mock's expanded instances. */
-async function applySeriesPatch(masterId: string, patch: any) {
+async function applySeriesPatch(masterId: string, patch: any, destinationId?: string) {
   const insts = events.filter((e) => e.recurring_event_id === masterId);
   const first = [...insts].sort((a, b) => a.start.localeCompare(b.start))[0];
   const firstDate = first && (first.all_day ? first.start : toDateOnly(new Date(first.start)));
@@ -205,9 +205,19 @@ async function applySeriesPatch(masterId: string, patch: any) {
       }
     }
   }
-  for (const e of insts.filter((e) => events.includes(e))) {
+  for (const original of insts) {
+    const index = events.indexOf(original);
+    if (index < 0) continue;
+    // Native commands publish fresh database snapshots. Mutating these rows
+    // in place also mutates objects still held by React selection/editor
+    // state, hiding stale-snapshot bugs that occur in the real app.
+    const e = { ...original, calendar_id: destinationId ?? original.calendar_id };
     if (patch.summary != null) e.summary = patch.summary;
-    if (patch.description !== undefined) e.description = patch.description;
+    if (patch.description !== undefined) {
+      const { body } = splitDrill(patch.description);
+      const { drill } = splitDrill(e.description);
+      e.description = joinDrill(body, drill) || null;
+    }
     if (patch.location !== undefined) e.location = patch.location;
     if (patch.transparency !== undefined || patch.visibility !== undefined ||
         patch.reminders !== undefined || patch.attendees !== undefined) {
@@ -241,6 +251,7 @@ async function applySeriesPatch(masterId: string, patch: any) {
       e.end = toDateOnly(addDays(shifted, durationDays));
       e.all_day = true;
     }
+    events.splice(index, 1, e);
   }
   notifyDb();
 }
@@ -300,12 +311,38 @@ export const mockBackend: Backend = {
     }));
   },
   async updateSeriesMaster(calendarId, masterId, patch, destinationId) {
-    await applySeriesPatch(masterId, patch);
-    if (destinationId && destinationId !== calendarId) {
-      await mockBackend.moveSeriesMaster(calendarId, masterId, destinationId);
-    }
+    await applySeriesPatch(
+      masterId,
+      patch,
+      destinationId && destinationId !== calendarId ? destinationId : undefined,
+    );
   },
-  async splitSeries(_calendarId, masterId, recurrence, input) {
+  async splitSeries(_calendarId, masterId, recurrence, input, countSplit?: CountSeriesSplit) {
+    if (countSplit) {
+      const timestamp = (value: string | undefined) => value?.length === 10
+        ? Date.parse(`${value}T00:00:00Z`)
+        : Date.parse(value ?? "");
+      const selected = countSplit.selectedOriginalStart.dateTime ?? countSplit.selectedOriginalStart.date;
+      const boundary = timestamp(selected);
+      const instances = events.filter((event) => event.recurring_event_id === masterId);
+      const hasSelected = instances.some((event) => {
+        const original = event.raw?.originalStartTime?.dateTime ?? event.raw?.originalStartTime?.date ??
+          (event.all_day ? event.start : event.start);
+        return timestamp(original) === boundary;
+      });
+      if (!Number.isFinite(boundary) || !hasSelected) throw new Error("could not locate this occurrence in the series");
+      const earlier = instances.filter((event) => {
+        const original = event.raw?.originalStartTime?.dateTime ?? event.raw?.originalStartTime?.date ?? event.start;
+        return timestamp(original) < boundary;
+      }).length;
+      const count = Number(countSplit.originalRecurrence.match(/(?:^|;)COUNT=(\d+)/)?.[1] ?? 0);
+      const remaining = count - earlier;
+      if (remaining < 1) throw new Error("no occurrences remain after this event");
+      input = {
+        ...input,
+        recurrence: [countSplit.originalRecurrence.replace(/COUNT=\d+/, `COUNT=${remaining}`)],
+      };
+    }
     await applySeriesPatch(masterId, { recurrence });
     return mockBackend.createEvent(input);
   },
@@ -322,11 +359,8 @@ export const mockBackend: Backend = {
     notifyDb();
     return previous;
   },
-  async moveSeriesMaster(_calendarId, masterId, destinationId) {
-    for (const event of events.filter((e) => e.recurring_event_id === masterId)) {
-      event.calendar_id = destinationId;
-    }
-    notifyDb();
+  async moveSeriesMaster(calendarId, masterId, destinationId) {
+    await applySeriesPatch(masterId, {}, destinationId === calendarId ? undefined : destinationId);
   },
   async listEvents(start, end) {
     return events

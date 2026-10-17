@@ -71,6 +71,16 @@ interface DragState {
  *  event grabbed near its edge hop to the next day on a few px of drift. */
 const DAY_SWITCH_SLACK = 0.2;
 
+function profileRenderStage<T>(id: string, render: () => T): T {
+  if (typeof window === "undefined") return render();
+  const sink = (window as any).__weekRenderStages;
+  if (!Array.isArray(sink)) return render();
+  const started = performance.now();
+  const result = render();
+  sink.push({ id, duration: performance.now() - started });
+  return result;
+}
+
 interface CtxMenu {
   x: number;
   y: number;
@@ -126,6 +136,32 @@ export function WeekView(props: {
   seamStyle?: "scarf" | "rabbet" | "overlay";
 }) {
   const { days, events, calendars } = props;
+  // Development-only React Profiler callbacks are unavailable in the
+  // production build used for frame-budget measurements. Let an opt-in E2E
+  // sink time this component through its layout-effect commit instead; the
+  // normal app does no clock reads or allocations.
+  const hasRenderSink = typeof window !== "undefined" && (
+    Array.isArray((window as any).__weekViewRenderDurations) ||
+    Array.isArray((window as any).__weekViewRenderMarks)
+  );
+  const componentRenderStartedAt = hasRenderSink ? performance.now() : null;
+  const propsRef = useRef(props);
+  propsRef.current = props;
+  useLayoutEffect(() => {
+    if (componentRenderStartedAt === null) return;
+    const commitTime = performance.now();
+    const duration = commitTime - componentRenderStartedAt;
+    const durations = (window as any).__weekViewRenderDurations;
+    if (Array.isArray(durations)) durations.push(duration);
+    const marks = (window as any).__weekViewRenderMarks;
+    if (Array.isArray(marks)) marks.push({
+      startTime: componentRenderStartedAt,
+      commitTime,
+      actualDuration: duration,
+    });
+  });
+  const dayIndexByDateRef = useRef(new Map<number, number>());
+  dayIndexByDateRef.current = new Map(days.map((day, index) => [startOfDay(day).getTime(), index]));
   const adjacentDay = (day: Date, direction: -1 | 1): Date => {
     let next = addDays(day, direction);
     if (props.hideWeekends) {
@@ -337,6 +373,11 @@ export function WeekView(props: {
   const paintStripTransform = useCallback(
     () => {
       panFrameRef.current = null;
+      const panPaint = typeof window !== "undefined" &&
+        Array.isArray((window as any).__calendarPanPaintDurations)
+        ? (window as any).__calendarPanPaintDurations as number[]
+        : null;
+      const paintStarted = panPaint ? performance.now() : 0;
       // one overscan column per side: while a requested shift is still
       // rendering, hold at the overscan edge rather than show blank strip
       const w = colPxRef.current;
@@ -347,6 +388,7 @@ export function WeekView(props: {
         if (!el) continue;
         el.style.transform = tx;
       }
+      if (panPaint) panPaint.push(performance.now() - paintStarted);
     },
     [extN],
   );
@@ -403,20 +445,39 @@ export function WeekView(props: {
     const el = gridRef.current;
     const onPan = props.onPan;
     if (!el || !onPan) return;
+    let horizontalLocked = false;
+    let lastWheelAt = 0;
+    let pendingDx = 0;
     const onWheel = (e: WheelEvent) => {
-      if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return; // vertical scroll
-      e.preventDefault(); // keep WebKit from treating it as history nav
-      // Wheel handlers can arrive much faster than the display refresh. The
-      // old path forced a layout read and wrote three transforms for every
-      // packet, which is especially expensive in WebKitGTK. ResizeObserver
-      // owns the cached width; visual writes are coalesced to one per frame.
+      const now = performance.now();
+      if (now - lastWheelAt > 180) {
+        horizontalLocked = false;
+        pendingDx = 0;
+      }
+      lastWheelAt = now;
       const unit = e.deltaMode === WheelEvent.DOM_DELTA_LINE
         ? 16
         : e.deltaMode === WheelEvent.DOM_DELTA_PAGE
           ? el.clientWidth
           : 1;
+      let deltaX = e.deltaX * unit;
+      if (!horizontalLocked) {
+        // Preserve X movement from ambiguous lead-in packets. Once a
+        // horizontally dominant sample establishes intent, replay that X
+        // displacement and keep the axis locked through later cross-axis noise.
+        pendingDx += deltaX;
+        if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return;
+        horizontalLocked = true;
+        deltaX = pendingDx;
+        pendingDx = 0;
+      }
+      e.preventDefault(); // keep WebKit from treating it as history nav
+      // Wheel handlers can arrive much faster than the display refresh. The
+      // old path forced a layout read and wrote three transforms for every
+      // packet, which is especially expensive in WebKitGTK. ResizeObserver
+      // owns the cached width; visual writes are coalesced to one per frame.
       const pan = panRef.current;
-      pan.acc += e.deltaX * unit;
+      pan.acc += deltaX;
       const want = Math.trunc(pan.acc / colPxRef.current);
       if (want !== pan.pending) {
         onPan(want - pan.pending);
@@ -452,17 +513,21 @@ export function WeekView(props: {
   // inputs (events identity, zoom, star version via forceTick) are unchanged.
   const layoutCacheRef = useRef<{
     deps: unknown[];
+    dayItems: Map<number, Array<{ item: CalendarEvent; startMin: number; endMin: number }>>;
     pack: Map<number, ReturnType<typeof packDayWithSleeves<CalendarEvent>>>;
     text: Map<number, Map<CalendarEvent, PlacedText> | null>;
+    clusters: Map<number, { deps: unknown[]; nodes: React.ReactNode[] }>;
     score: Map<number, FocusScore>;
-  }>({ deps: [], pack: new Map(), text: new Map(), score: new Map() });
+  }>({ deps: [], dayItems: new Map(), pack: new Map(), text: new Map(), clusters: new Map(), score: new Map() });
   {
     const deps = [timed, pxPerMin, calendars, Math.floor(nowDate.getTime() / 60000), reconTick, props.seamStyle, colPx, starTick];
     const c = layoutCacheRef.current;
     if (deps.some((d, i) => d !== c.deps[i])) {
       c.deps = deps;
+      c.dayItems.clear();
       c.pack.clear();
       c.text.clear();
+      c.clusters.clear();
       c.score.clear();
     }
   }
@@ -855,6 +920,9 @@ export function WeekView(props: {
     });
   };
 
+  const startChipDragRef = useRef(startChipDrag);
+  startChipDragRef.current = startChipDrag;
+
   const selectedKeys = useMemo(
     () => new Set(props.selected.map(keyOf)),
     [props.selected],
@@ -1210,15 +1278,22 @@ export function WeekView(props: {
             [afterDay, -1, extN, false] as const,
           ].map(([day, di, gridCol, live]) => {
             const dayStart = startOfDay(day);
-            const dayItems = timed
-              .map((e) => ({ e, ...eventDates(e) }))
-              .filter(({ start, end }) => end > dayStart && start < addDays(dayStart, 1))
-              .map(({ e, start, end }) => ({
-                item: e,
-                startMin: isSameDay(start, day) ? minutesOfDay(start) : 0,
-                endMin: isSameDay(end, day) ? Math.max(minutesOfDay(end), 1) : DAY_MIN,
-              }));
             const cacheKey = dayStart.getTime();
+            let dayItems = layoutCacheRef.current.dayItems.get(cacheKey);
+            if (!dayItems) {
+              const dayEnd = addDays(dayStart, 1);
+              dayItems = [];
+              for (const e of timed) {
+                const { start, end } = eventDates(e);
+                if (end <= dayStart || start >= dayEnd) continue;
+                dayItems.push({
+                  item: e,
+                  startMin: isSameDay(start, day) ? minutesOfDay(start) : 0,
+                  endMin: isSameDay(end, day) ? Math.max(minutesOfDay(end), 1) : DAY_MIN,
+                });
+              }
+              layoutCacheRef.current.dayItems.set(cacheKey, dayItems);
+            }
             let packed = layoutCacheRef.current.pack.get(cacheKey);
             let placedText = layoutCacheRef.current.text.get(cacheKey);
             if (!packed || placedText === undefined) {
@@ -1230,6 +1305,89 @@ export function WeekView(props: {
             const ghostHere = live ? dragGhost?.pieces.get(di) : undefined;
             const draftHere =
               live && props.draft && !props.draft.allDay && isSameDay(props.draft.start, day) && !drag;
+            const clusterDeps = [clusters, calendars, nowDate.getTime(), selectedKeys, reconTick, starTick];
+            let cachedClusters = layoutCacheRef.current.clusters.get(cacheKey);
+            if (!cachedClusters || clusterDeps.some((dep, index) => !Object.is(dep, cachedClusters!.deps[index]))) {
+              const nodes = profileRenderStage("clusters", () => clusters.map((cl) => (
+                <div
+                  key={"cluster-" + keyOf(cl.items[0].item)}
+                  className="cluster-block"
+                  style={{
+                    zIndex: cl.z,
+                    top: cl.top,
+                    height: cl.height,
+                    left: cl.insetPx,
+                    width: `calc(100% - ${cl.insetPx + 2}px)`,
+                  }}
+                  data-testid="cluster-block"
+                  onPointerDown={(pe) => pe.stopPropagation()}
+                  title={`${cl.items.length} short events, ${fmtChipRange(
+                    atWallClock(day, cl.startMin),
+                    atWallClock(day, cl.endMin),
+                  )}`}
+                >
+                  {cl.items.map(({ item: e }) => {
+                    const { start } = eventDates(e);
+                    return (
+                      <button
+                        key={keyOf(e)}
+                        data-ek={keyOf(e)}
+                        title={e.summary + " (" + fmtChipRange(start, eventDates(e).end) + ")"}
+                        className={
+                          "cluster-row" +
+                          (ended(e, nowDate) ? " past" : "") +
+                          ((st0) => (st0 ? (st0.kind === "manual" ? " starred" : " starred-auto") : ""))(starState(starKey(e))) +
+                          (selectedKeys.has(keyOf(e)) ? " selected" : "") +
+                          ((r) => (r === "unsettled" ? " unsettled" : r === "canceled" ? " canceled" : r === "done" ? " done" : ""))(
+                            reconState(e, calendars, nowDate),
+                          )
+                        }
+                        onPointerDown={(pe) => startChipDragRef.current(pe, e, dayIndexByDateRef.current.get(cacheKey) ?? -1)}
+                        onContextMenu={(ce) => {
+                          ce.preventDefault();
+                          ce.stopPropagation();
+                          propsRef.current.onSelect(e);
+                          setCtx({ x: ce.clientX, y: ce.clientY, event: e });
+                        }}
+                      >
+                        <span className="cluster-dot" style={{ background: colorOf(calendars, e.calendar_id) }} />
+                        <span className="cluster-title">{e.summary}</span>
+                        {reconState(e, calendars, nowDate) === "unsettled" && (
+                          <span className="row-recon">
+                            <span
+                              role="button"
+                              tabIndex={-1}
+                              className="rr-yes"
+                              title="Happened"
+                              data-testid="row-recon-yes"
+                              onPointerDown={(pe) => pe.stopPropagation()}
+                              onClick={(ce) => {
+                                ce.stopPropagation();
+                                setRecon(reconKey(e), "done");
+                              }}
+                            >✓</span>
+                            <span
+                              role="button"
+                              tabIndex={-1}
+                              className="rr-no"
+                              title="Didn't happen: deletes the event (⌘Z to undo)"
+                              data-testid="row-recon-no"
+                              onPointerDown={(pe) => pe.stopPropagation()}
+                              onClick={(ce) => {
+                                ce.stopPropagation();
+                                void propsRef.current.actions.removeOccurrence(e);
+                              }}
+                            >✕</span>
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )));
+              cachedClusters = { deps: clusterDeps, nodes };
+              layoutCacheRef.current.clusters.set(cacheKey, cachedClusters);
+            }
             return (
               <div
                 key={day.toISOString()}
@@ -1238,7 +1396,7 @@ export function WeekView(props: {
                 onPointerDown={live ? (e) => startCreate(e, di) : undefined}
                 data-testid={live ? `day-col-${di}` : undefined}
               >
-                {containers.map(({ item: e, lane, top, height, seamTopPx, seamBottomPx, seamTopStepPx, seamBottomStepPx, z }) => {
+                {profileRenderStage("containers", () => containers.map(({ item: e, lane, top, height, seamTopPx, seamBottomPx, seamTopStepPx, seamBottomStepPx, z }) => {
                   const slabClip = jointClip(lane * SLEEVE_LANE_WIDTH, height, seamTopPx, seamBottomPx, seamTopStepPx, seamBottomStepPx);
                   const color = colorOf(calendars, e.calendar_id);
                   const { start, end } = eventDates(e);
@@ -1275,11 +1433,11 @@ export function WeekView(props: {
                       data-text-rule={placedText?.get(e)?.rule}
                       data-testid="cshape-seg"
                       data-ek={keyOf(e)}
-                      onPointerDown={(pe) => startChipDrag(pe, e, di)}
+                      onPointerDown={(pe) => startChipDragRef.current(pe, e, dayIndexByDateRef.current.get(cacheKey) ?? -1)}
                       onContextMenu={(ce) => {
                         ce.preventDefault();
                         ce.stopPropagation();
-                        props.onSelect(e);
+                        propsRef.current.onSelect(e);
                         setCtx({ x: ce.clientX, y: ce.clientY, event: e });
                       }}
                     >
@@ -1293,94 +1451,9 @@ export function WeekView(props: {
                       {editableCal(e.calendar_id) && <div className="chip-resize" />}
                     </div>
                   );
-                })}
-                {clusters.map((cl) => (
-                  <div
-                    key={"cluster-" + keyOf(cl.items[0].item)}
-                    className="cluster-block"
-                    style={{
-                      zIndex: cl.z,
-                      top: cl.top,
-                      height: cl.height,
-                      left: cl.insetPx,
-                      width: `calc(100% - ${cl.insetPx + 2}px)`,
-                    }}
-                    data-testid="cluster-block"
-                    onPointerDown={(pe) => pe.stopPropagation()}
-                    title={`${cl.items.length} short events, ${fmtChipRange(
-                      atWallClock(day, cl.startMin),
-                      atWallClock(day, cl.endMin),
-                    )}`}
-                  >
-                    {cl.items.map(({ item: e }) => {
-                      const { start } = eventDates(e);
-                      return (
-                        <button
-                          key={keyOf(e)}
-                          data-ek={keyOf(e)}
-                          title={e.summary + " (" + fmtChipRange(start, eventDates(e).end) + ")"}
-                          className={
-                            "cluster-row" +
-                            (ended(e, nowDate) ? " past" : "") +
-                            ((st0) => (st0 ? (st0.kind === "manual" ? " starred" : " starred-auto") : ""))(starState(starKey(e))) +
-                            (selectedKeys.has(keyOf(e)) ? " selected" : "") +
-                            ((r) => (r === "unsettled" ? " unsettled" : r === "canceled" ? " canceled" : r === "done" ? " done" : ""))(
-                              reconState(e, calendars, nowDate),
-                            )
-                          }
-                          // same path as chips: drag pulls the event out of the
-                          // cluster, a plain click opens it, shift-click selects
-                          onPointerDown={(pe) => startChipDrag(pe, e, di)}
-                          onContextMenu={(ce) => {
-                            ce.preventDefault();
-                            ce.stopPropagation();
-                            props.onSelect(e);
-                            setCtx({ x: ce.clientX, y: ce.clientY, event: e });
-                          }}
-                        >
-                          <span
-                            className="cluster-dot"
-                            style={{ background: colorOf(calendars, e.calendar_id) }}
-                          />
-                          <span className="cluster-title">{e.summary}</span>
-                          {reconState(e, calendars, nowDate) === "unsettled" && (
-                            <span className="row-recon">
-                              <span
-                                role="button"
-                                tabIndex={-1}
-                                className="rr-yes"
-                                title="Happened"
-                                data-testid="row-recon-yes"
-                                onPointerDown={(pe) => pe.stopPropagation()}
-                                onClick={(ce) => {
-                                  ce.stopPropagation();
-                                  setRecon(reconKey(e), "done");
-                                }}
-                              >
-                                ✓
-                              </span>
-                              <span
-                                role="button"
-                                tabIndex={-1}
-                                className="rr-no"
-                                title="Didn't happen: deletes the event (⌘Z to undo)"
-                                data-testid="row-recon-no"
-                                onPointerDown={(pe) => pe.stopPropagation()}
-                                onClick={(ce) => {
-                                  ce.stopPropagation();
-                                  void props.actions.removeOccurrence(e);
-                                }}
-                              >
-                                ✕
-                              </span>
-                            </span>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                ))}
-                {regular.map(({ item: e, top, height, leftPct, widthPct, insetPx, seamTopPx, seamBottomPx, seamTopStepPx, seamBottomStepPx, z }) => {
+                }))}
+                {cachedClusters.nodes}
+                {profileRenderStage("regular", () => regular.map(({ item: e, top, height, leftPct, widthPct, insetPx, seamTopPx, seamBottomPx, seamTopStepPx, seamBottomStepPx, z }) => {
                   const st = seamMode === "overlay" ? 0 : seamTopPx;
                   const sb = seamMode === "overlay" ? 0 : seamBottomPx;
                   const clipPath = jointClip(insetPx, height, st, sb, seamTopStepPx, seamBottomStepPx);
@@ -1414,13 +1487,13 @@ export function WeekView(props: {
                         width: `calc((100% - ${insetPx}px) * ${widthPct / 100} - 2px)`,
                       }}
                       title={e.summary}
-                      onPointerEnter={() => props.onHover?.(e)}
-                      onPointerLeave={() => props.onHover?.(null)}
-                      onPointerDown={(pe) => startChipDrag(pe, e, di)}
+                      onPointerEnter={() => propsRef.current.onHover?.(e)}
+                      onPointerLeave={() => propsRef.current.onHover?.(null)}
+                      onPointerDown={(pe) => startChipDragRef.current(pe, e, dayIndexByDateRef.current.get(cacheKey) ?? -1)}
                       onContextMenu={(ce) => {
                         ce.preventDefault();
                         ce.stopPropagation();
-                        props.onSelect(e);
+                        propsRef.current.onSelect(e);
                         setCtx({ x: ce.clientX, y: ce.clientY, event: e });
                       }}
                       data-testid="event-chip"
@@ -1451,7 +1524,7 @@ export function WeekView(props: {
                             onPointerDown={(pe) => pe.stopPropagation()}
                             onClick={(ce) => {
                               ce.stopPropagation();
-                              void props.actions.removeOccurrence(e);
+                              void propsRef.current.actions.removeOccurrence(e);
                             }}
                           >
                             ✕
@@ -1473,7 +1546,7 @@ export function WeekView(props: {
                       {editableCal(e.calendar_id) && <div className="chip-resize" />}
                     </div>
                   );
-                })}
+                }))}
 
                 {live &&
                   groupDrag?.ghosts.get(di)?.map((g) => (
@@ -1545,6 +1618,7 @@ export function WeekView(props: {
             events={timed}
             layoutKey={notesLayoutKey}
             firstDay={firstDay}
+            panSteps={panRef.current.pending !== 0 ? panRef.current.pending : null}
             pxPerMin={pxPerMin}
             keyOf={keyOf}
             onSelect={(e) => props.onSelect(e)}

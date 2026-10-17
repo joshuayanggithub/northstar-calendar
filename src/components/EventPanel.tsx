@@ -32,9 +32,23 @@ function tStr(min: number): string {
   return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
 }
 
-function durationLabel(startTime: string, endTime: string, nextDay: boolean): string {
-  let mins = tMin(endTime) - tMin(startTime) + (nextDay ? 1440 : 0);
-  if (mins <= 0) mins += 30;
+function calendarDayOffset(start: Date, end: Date): number {
+  const startDay = Date.UTC(start.getFullYear(), start.getMonth(), start.getDate());
+  const endDay = Date.UTC(end.getFullYear(), end.getMonth(), end.getDate());
+  return Math.max(0, Math.round((endDay - startDay) / 86400000));
+}
+
+function durationLabel(startTime: string, endTime: string, endDayOffset: number, date?: string): string {
+  let mins: number;
+  if (date) {
+    const start = new Date(`${date}T${startTime}:00`);
+    const end = new Date(`${date}T${endTime}:00`);
+    end.setDate(end.getDate() + endDayOffset);
+    mins = Math.round((end.getTime() - start.getTime()) / 60000);
+  } else {
+    mins = tMin(endTime) - tMin(startTime) + endDayOffset * 1440;
+  }
+  if (mins <= 0) mins = 30;
   const h = Math.floor(mins / 60);
   const m = mins % 60;
   if (h === 0) return `${m}min`;
@@ -115,7 +129,7 @@ function TimeField(props: {
       out.push({
         v: tStr(m),
         label: fmtTimeShort(d),
-        sub: props.relativeTo ? durationLabel(props.relativeTo, tStr(m), base + i * 15 >= 1440) : undefined,
+        sub: props.relativeTo ? durationLabel(props.relativeTo, tStr(m), base + i * 15 >= 1440 ? 1 : 0) : undefined,
       });
     }
     return out;
@@ -210,7 +224,7 @@ export function EventPanel(props: {
   const [startTime, setStartTime] = useState("09:00");
   const [endTime, setEndTime] = useState("10:00");
   const [allDay, setAllDay] = useState(false);
-  const [endNextDay, setEndNextDay] = useState(false);
+  const [endDayOffset, setEndDayOffset] = useState(0);
   const [calendarId, setCalendarId] = useState("");
   const [calendarMenuOpen, setCalendarMenuOpen] = useState(false);
   const calendarPickerRef = useRef<HTMLDivElement | null>(null);
@@ -263,7 +277,7 @@ export function EventPanel(props: {
       );
       setStartTime(format(start, "HH:mm"));
       setEndTime(format(end, "HH:mm"));
-      setEndNextDay(!e.all_day && toDateOnly(end) !== toDateOnly(start));
+      setEndDayOffset(e.all_day ? 0 : calendarDayOffset(start, end));
       setAllDay(e.all_day);
       setCalendarId(e.calendar_id);
       setLocation(e.location ?? "");
@@ -284,7 +298,7 @@ export function EventPanel(props: {
     } else if (state.mode === "new") {
       const d = state.draft;
       setTitle("");
-      setEndNextDay(!d.allDay && toDateOnly(d.end) !== toDateOnly(d.start));
+      setEndDayOffset(d.allDay ? 0 : calendarDayOffset(d.start, d.end));
       setDate(toDateOnly(d.start));
       setAllDayEnd(
         d.allDay ? toDateOnly(new Date(d.end.getTime() - 86400000)) : toDateOnly(d.start),
@@ -387,8 +401,23 @@ export function EventPanel(props: {
     if (!checked && startTime === "00:00" && endTime === "00:00") {
       setStartTime("09:00");
       setEndTime("10:00");
-      setEndNextDay(false);
+      setEndDayOffset(0);
     }
+  };
+
+  const changeStartDate = (nextDate: string) => {
+    if (allDay && date && nextDate) {
+      // `allDayEnd` is the last covered day, inclusive. Move it by the same
+      // calendar-day delta as the start so shifting a multi-day block keeps
+      // its span instead of leaving the old end date behind.
+      const oldStart = new Date(`${date}T00:00:00`);
+      const oldLastDay = new Date(`${allDayEnd && allDayEnd > date ? allDayEnd : date}T00:00:00`);
+      const spanOffset = calendarDayOffset(oldStart, oldLastDay);
+      const nextLastDay = new Date(`${nextDate}T00:00:00`);
+      nextLastDay.setDate(nextLastDay.getDate() + spanOffset);
+      setAllDayEnd(toDateOnly(nextLastDay));
+    }
+    setDate(nextDate);
   };
 
   const addAttendee = () => {
@@ -410,9 +439,8 @@ export function EventPanel(props: {
     } else {
       let endD = new Date(`${date}T${endTime}:00`);
       const startD = new Date(`${date}T${startTime}:00`);
-      if (endNextDay) {
-        endD = new Date(endD.getTime() + 86400000);
-      } else if (endD <= startD) {
+      endD.setDate(endD.getDate() + endDayOffset);
+      if (endDayOffset === 0 && endD <= startD) {
         endD = new Date(startD.getTime() + 30 * 60000);
       }
       end = toLocalISO(endD);
@@ -581,8 +609,21 @@ export function EventPanel(props: {
                 disabled={readOnly}
                 testid="time-start"
                 onPick={(v) => {
-                  const dur = Math.max(15, tMin(endTime) - tMin(startTime));
-                  setEndTime(tStr(tMin(v) + dur));
+                  // Keep the actual elapsed duration when the event crosses
+                  // midnight; subtracting clock values alone turns (for
+                  // example) 11 PM–1 AM into a 15-minute same-clock span.
+                  const currentStart = new Date(`${date}T${startTime}:00`);
+                  const currentEnd = new Date(`${date}T${endTime}:00`);
+                  currentEnd.setDate(currentEnd.getDate() + endDayOffset);
+                  const currentDuration = currentEnd.getTime() - currentStart.getTime();
+                  const durationMs = Math.max(
+                    15 * 60000,
+                    endDayOffset === 0 && currentDuration <= 0 ? 30 * 60000 : currentDuration,
+                  );
+                  const nextStart = new Date(`${date}T${v}:00`);
+                  const nextEnd = new Date(nextStart.getTime() + durationMs);
+                  setEndTime(format(nextEnd, "HH:mm"));
+                  setEndDayOffset(calendarDayOffset(nextStart, nextEnd));
                   setStartTime(v);
                 }}
               />
@@ -595,8 +636,8 @@ export function EventPanel(props: {
                 onPick={(v) => setEndTime(v)}
               />
               <span className="panel-dur">
-                {endNextDay && <span className="panel-nextday">+1d</span>}
-                {durationLabel(startTime, endTime, endNextDay)}
+                {endDayOffset > 0 && <span className="panel-nextday">+{endDayOffset}d</span>}
+                {durationLabel(startTime, endTime, endDayOffset, date)}
               </span>
             </div>
           ) : (
@@ -622,7 +663,7 @@ export function EventPanel(props: {
               value={date}
               autoFocus
               disabled={readOnly}
-              onChange={(e) => setDate(e.target.value)}
+              onChange={(e) => changeStartDate(e.target.value)}
               onBlur={() => setDateEditing(false)}
             />
           ) : (
@@ -1084,17 +1125,20 @@ function DrillNote(props: {
     el.style.height = "0px";
     el.style.height = `${el.scrollHeight}px`;
   }, [text, editing]);
+  useLayoutEffect(() => {
+    if (!editing) return;
+    const el = ref.current;
+    if (!el) return;
+    // Focus before the newly-mounted field can receive input. A deferred RAF
+    // here could steal a select-all/fill operation and move the caret back to
+    // the end, turning a replacement into an accidental append under load.
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+  }, [editing]);
   const start = () => {
     if (!props.editable) return;
     cancelled.current = false;
     setEditing(true);
-    requestAnimationFrame(() => {
-      const el = ref.current;
-      if (el) {
-        el.focus();
-        el.setSelectionRange(el.value.length, el.value.length);
-      }
-    });
   };
   const commit = () => {
     const t = text.replace(/\s+/g, " ").trim();

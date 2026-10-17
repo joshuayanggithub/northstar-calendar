@@ -109,10 +109,308 @@ browser server now runs independently. The 15:59 run had one transient
   deleted and the queue drained. The first occurrence edits the original
   master directly. Committed `a72e439`.
 - [ ] Continue the 15-minute full-suite stress loop and inspect every failure.
-  A fresh Linux continuation is running through 2026-10-16 19:03 PT; results
-  are preserved under `logs/stress-2026-10-17/`. Before it began, the complete
-  suite passed 269 with 62 intentional skips and zero failures. Continuation
-  run 1 passed 179 with 42 intentional skips.
+  The original five-hour window ended at 11:12 UTC; the CI-owned continuation
+  now runs through 2026-10-17 11:35 UTC for the requested follow-up. Results are
+  preserved under `logs/stress-2026-10-17/`.
+
+## QA continuation — 2026-10-17 Linux merge and root-cause pass
+
+- [x] Merged the latest `origin/main` (`d8c44e4`) into
+  `linux-e2e-root-cause-fixes` as `348c379`. Upstream annotation resizing,
+  overnight drag previews, pane resizing, pinch zoom, read-only calendars, and
+  copy-to-calendar work are now present alongside this branch's fixes.
+- [x] Resolved the merge's two Linux browser screenshot differences after
+  reviewing both themes at original resolution; refreshed only the week-view
+  snapshots. Fixed two newly merged overnight-drag test fixtures to use
+  explicit New York offsets, avoiding the Linux host's Pacific timezone.
+- [x] Reproduced and fixed the recurring edit's five-second stale display:
+  local instance rows were not updated/emitted until after Google PATCH/move.
+  Whole-series edits and “this and following” now project locally, emit the
+  update, and close the editor before network I/O; failures restore snapshots.
+  Added delayed-write regressions for both paths and nine platform-independent
+  series projection/rollback tests. `npm run build`, both latency E2Es, and the
+  full Linux browser suite pass (286 passed, 63 intentional skips).
+- [x] Audited the optimistic projection across host timezones. Found it was
+  converting IANA wall times through `chrono::Local`, so a series could shift
+  when run outside the event's timezone. It now uses Jiff's system zoneinfo
+  database for the event IANA zone, with fixed-offset fallback; fall-back DST
+  coverage passes under both `TZ=UTC` and `TZ=America/Los_Angeles`. All 9 series
+  projection/rollback tests and 12 sync-engine tests pass offline (one unrelated
+  OAuth entropy test skipped because sandbox `getrandom` is denied).
+- [x] Reproduced a recurring-edit annotation loss: changing the shared series
+  description replaced each expanded instance's full description and erased
+  its private `[DRILL]` note. The local projection and browser mock now merge
+  the new shared body with each existing occurrence note. A Rust regression
+  and the focused browser E2E both pass.
+- [x] Reproduced two stale-state paths after a remote deletion: App refreshed
+  selected objects that still existed but retained deleted events, so WeekView
+  rendered a ghost and submitted a doomed group update; and an open event
+  editor remained actionable from its stale snapshot. Selection now drops
+  events absent from the visible DB snapshot, and the editor closes when its
+  live event disappears. Both tests failed before the fixes; all five
+  group-drag/sync-delete tests pass afterward.
+- [x] The 08:01 full suite caught one intermittent drill-note input failure:
+  replacing a note after Escape occasionally appended to the prior note. The
+  trace matched a deferred RAF focus/caret callback racing Playwright/user text
+  replacement and moving the caret to the end mid-operation. Focus and caret
+  placement now run in `useLayoutEffect` at the textarea's mount. The production
+  build passes; the affected note suites pass 11/11 and the flaky case passes
+  20 consecutive isolated repetitions. The next CI-owned full suites at 08:16,
+  08:31, 08:46, 09:01, 09:16, 09:31, 09:46, 10:01, 10:16, and 10:31 all
+  passed (288 passed, 63 intentional skips, zero failures), including the note
+  case; treat the focus/caret race as fixed.
+- [x] Corrected pan profiling: measurements include only wheel-input frames
+  and use the optimized production build (Vite dev timing is invalid). Seven
+  isolated 400-event / 720px production-Chromium runs at 10:47–10:53 measured
+  p95 16.7–16.8ms; four runs had one 33.4ms frame, the other three maxed at
+  16.7–16.8ms. None showed long tasks or long-animation frames. The latest
+  probe measured max synchronous wheel dispatch at 0.2ms, with three wheel
+  events during its 33.4ms frame; this rules out a slow wheel callback but does
+  not yet identify the missed-frame cause. The gate is now p95 <18ms and the
+  probe reports slow-frame context. Browser pan behavior/regressions pass.
+- [ ] Resolve remaining pan uncertainty in the actual Linux Tauri/WebKitGTK
+  window and on a real trackpad. This host has neither GTK3 nor WebKitGTK
+  development packages and lacks passwordless sudo; the native behavior stays
+  unverified. One new production-preview Chromium wheel-input trace (400 events,
+  720px) measured p95/max 16.8ms, no >25ms RAF gaps, wheel dispatch <=0.2ms,
+  strip paint <=1ms, and WeekView commits 2.1-7.1ms. Input-window compositor
+  DrawAndSwap spans reached ~20ms on Chromium's software renderer. This neither
+  reproduces the 33ms idle-frame outlier nor identifies the user's real
+  trackpad/WebKit bottleneck; do not claim the remaining lag is fixed. A first
+  follow-up accidentally profiled Vite dev and measured a 25.7ms React commit;
+  the diagnostic now explicitly skips dev builds so that result is not treated
+  as production evidence. After the lead-in buffer fix, a fresh synthetic
+  production trace measured p50/p95/max 16.7/16.7/16.8ms with no >25ms gaps;
+  its browser-delivered counterpart measured p95 16.8ms and one 33.3ms gap at
+  ~1249ms, during which there was no wheel event or WeekView commit. Dispatch
+  stayed <=0.4ms, paint <=0.2ms, React commits 2-7ms; the latter gap remains
+  outside app JS work and still needs physical-device/WebKitGTK evidence.
+- [x] Diagnosed the 06:46 UTC stress-run failure burst (183 failed / 103
+  passed): the log had no Vite startup and failures were `ERR_CONNECTION_REFUSED`
+  to port 1420. `reuseExistingServer: true` had attached the long suite to a
+  transient preview/dev server that ended mid-run. Automated runs now set CI
+  mode and own their Vite server; the periodic loop was restarted with that
+  guard through the requested 11:35 UTC follow-up. This was a harness failure,
+  not 183 application regressions. The first CI-owned rerun at 07:01 UTC passed
+  (286 passed, 63 intentional skips, zero failures); the 07:16 run after adding
+  the remote-delete regressions also passed (288 passed, 63 intentional skips,
+  zero failures), as did the 07:31 run (288 passed, 63 intentional skips,
+  zero failures) and the 07:46 run (288 passed, 63 intentional skips, zero
+  failures). The 08:01 run exposed the intermittent drill-note focus race
+  (287 passed, 63 skipped); after its fix, the 08:16, 08:31, 08:46, 09:01,
+  09:16, 09:31, 09:46, 10:01, 10:16, and 10:31 runs all passed (288 passed,
+  63 skipped, zero failures).
+- [x] The prior CI-owned 15-minute E2E stress window ended at 11:35 UTC; its
+  last full run (11:31) passed 292 tests with 63 intentional skips.
+- [x] Restarted the 15-minute CI-owned full-suite loop at 12:17 UTC through
+  15:37 UTC (live process session `76152`) with local-bind permission after
+  diagnosing the 12:10 startup failure. Runs `20261017T121757Z` (292 passed /
+  64 skipped), `20261017T123257Z` (294 passed / 64 skipped), and
+  `20261017T124757Z` (295 passed / 64 skipped), and `20261017T130257Z`
+  (297 passed / 64 skipped) are green; logs remain under
+  `logs/stress-2026-10-17/`. The
+  12:10 failure was Vite `listen EPERM` on 127.0.0.1:1420, rendered by Playwright
+  as a misleading "port already used" message. `curl` confirmed no listener;
+  restarting the loop with the required local-bind permission is the harness
+  correction, not an app fix.
+- [x] Rechecked upstream `origin/main` at 12:59 and 13:54 UTC: still
+  `bb5945d973a70009eddef56fd9a3eb37e0dcae66`, already included by merge commit
+  `ac1acf5`; no new upstream commit was available to merge. The unprivileged
+  DNS lookup failed; the read-only elevated lookup confirmed the same hash.
+- [x] Added the missing multi-select deletion edge regression: opening one
+  event, shift-adding a second while its panel remains open, then deleting
+  clears selection, deletes both, and closes the deleted event's panel. Focused
+  Playwright test passed 1/1 at 14:12 UTC; the 14:17 UTC full stress run
+  passed 301/365 with 64 intentional skips and zero failures.
+- [x] The 14:17 UTC CI-owned full suite passed 301/365 (64 intentional skips,
+  zero failures), including the new selection/panel deletion case and pan
+  gesture regressions. Results: `logs/stress-2026-10-17/20261017T141757Z.log`.
+- [x] The 14:32 UTC CI-owned full suite again passed 301/365 (64 intentional
+  skips, zero failures). Results: `logs/stress-2026-10-17/20261017T143257Z.log`.
+- [x] The 14:47 UTC CI-owned full suite again passed 301/365 (64 intentional
+  skips, zero failures). Results: `logs/stress-2026-10-17/20261017T144757Z.log`.
+- [x] The 15:02 UTC CI-owned full suite passed 301/365 (64 intentional skips,
+  zero failures), including the DST-crossing all-day edit test. Results:
+  `logs/stress-2026-10-17/20261017T150257Z.log`.
+- [x] The 15:17 UTC CI-owned full suite again passed 301/365 (64 intentional
+  skips, zero failures). Results: `logs/stress-2026-10-17/20261017T151757Z.log`.
+- [x] The final 15:32 UTC CI-owned full suite passed 301/365 (64 intentional
+  skips, zero failures). Results: `logs/stress-2026-10-17/20261017T153257Z.log`.
+- [x] The five-hour stress-loop window ended at 15:37 UTC; the runner exited
+  cleanly after the 15:32 full-suite pass. The next continuation is waiting in
+  Codex task `01a14999-10a7-7c40-b9a3-80a85b3859f5` for Oct 18 at 7:35 AM
+  America/New_York (7:35 AM EDT / 11:35 UTC).
+- [x] User requested another continuation at 7:35 AM Eastern on 2026-10-17
+  (11:35 UTC while daylight time is in effect). The separate Codex task
+  `01a1496f-92dd-71b2-956b-c7e950a169d7` ran at 11:35, checked the active
+  thread and latest stress result, and handed off without edits because this
+  five-hour triage was still active. The goal is expected to run through about
+  15:37 UTC. This is best-effort scheduling, not a durable OS scheduler.
+- [x] A second continuation is scheduled for 2026-10-18 at 7:35 AM
+  America/New_York (`01a14999-10a7-7c40-b9a3-80a85b3859f5`). It was instructed
+  to inspect active tasks and repository state first, avoid overlapping edits
+  if triage is still live, and resume unfinished bug work if this task has
+  stopped or exhausted usage.
+- [x] Verify the calendar-move selection fix and mock snapshot fidelity in the
+  scheduled full-suite loop. Root cause found 10:38 UTC: mock
+  `applySeriesPatch`/`moveSeriesMaster` mutated event objects held by React
+  selection/editor state, unlike native DB updates; patch + move also emitted
+  twice instead of the native atomic update. The mock now clones rows, applies
+  patch + destination together, and emits once. That exposed a real UX bug:
+  App selection reconciliation matched only `id + calendar_id`, so the moved
+  event's new calendar ID made a live event look deleted and removed its
+  highlight. Reconciliation now follows a unique event ID across calendars,
+  while dropping missing/ambiguous IDs and recurring IDs mapped to another
+  series. The whole-series regression failed before the fix (the single-event
+  case shares the same reconciliation path); both single-event and series
+  tests pass now, and the series test also asserts old snapshots stay
+  immutable. `npm run build`, the focused tests, and all 16 `recurring:` browser
+  tests passed; the five group-drag/remote-delete tests also pass. A screenshot
+  of the selected moved series chip was reviewed: the selection remains on the
+  green destination event. The 10:46 CI-owned full suite passed (288 passed,
+  63 intentional skips, zero failures). A first focused retry in the restricted
+  shell could not bind Vite; rerunning with local-server permission passed.
+  Keep stress-running through 11:35 UTC.
+- [x] Upstream merge: the initial sandboxed remote query failed DNS, but the
+  elevated read-only check at 10:55 UTC found `bb5945d`; fetched and merged it
+  as `ac1acf5`. Upstream adds a mounted-panel busy reset after Delete and a
+  Delete/Backspace shortcut for the open event. Merge conflict was limited to
+  the shipped log; all local QA edits were preserved in a scoped stash and
+  reapplied. Rechecked `origin/main` at 12:02 UTC: it remains
+  `bb5945d973a70009eddef56fd9a3eb37e0dcae66`, so there are no newer upstream
+  changes to merge. The 11:01 suite passed (290 passed, 63 intentional skips).
+- [x] Root-caused a duplicate recurring delete request from the new keyboard
+  shortcut. Delete/Backspace handled the open panel before the general modal
+  guard and lacked a `pendingScope` check, so a second keypress while choosing
+  “this / following / all” called `getSeriesMaster` again and reset the dialog.
+  Added the pending-scope guard and regression in
+  `e2e/panel-delete.spec.ts`; confirmed it failed with 2 master reads before
+  the fix and passes afterward. All three panel-delete E2Es pass and
+  `npm run build` is clean. The 11:16 full suite also passed (291 passed,
+  63 intentional skips, zero failures).
+- [x] **Overnight event start-time edit:** reproduced a new editor bug while
+  continuing event-edit triage. After moving Swim to 11 PM–1 AM, changing the
+  start to 11:30 PM made the end 11:45 PM instead of 1:30 AM: the old handler
+  subtracted clock values without accounting for midnight and clamped the
+  negative duration to 15 minutes. The editor now accounts for the day wrap
+  when preserving the event's elapsed duration. A browser regression covers
+  drag → start-time edit → end-time edit → save/reopen. Confirmed red before
+  the fix and green after in a fresh CI-owned Vite server; the existing time
+  picker and cross-midnight editor regressions pass too. Preserve the separate
+  documented behavior that an end entered earlier than a same-day start is
+  clamped to 30 minutes. Re-aligned the duration fallback with that save rule;
+  focused same-day-clamp/cross-midnight/overnight tests pass 3/3 and the build
+  passes. The 12:12 manual, 12:17 scheduled, and 12:32 scheduled full browser
+  suites passed (latest 294 passed / 64 skipped). Fix remains uncommitted in
+  the working tree.
+- [x] **Multi-day timed event truncated on any editor save:** after seeding a
+  49-hour Offsite (Oct 14 09:00–Oct 16 10:00), changing only its title and
+  saving persisted Oct 15 10:00 as the end. Root cause: EventPanel collapsed
+  `endDate - startDate` to `endNextDay: boolean`, and `buildInput` added only
+  one calendar day. Reproduced red with a browser test before changing code.
+  The panel now tracks integer `endDayOffset`, shows `+2d`, applies the offset
+  on save, and when the start clock changes preserves elapsed duration across
+  DST using the actual local Date instants; the duration badge also reports the
+  actual 27h (not 26 wall-clock hours) across fall-back. Regression asserts start
+  09:00→09:30 changes end 10:00→10:30 while retaining +2d. Focused same-day
+  clamp, cross-midnight, overnight-duration, normal multi-day, and DST
+  fall-back multi-day tests pass (6/6 including the adjacent DST-layout test);
+  production build passes. The 12:32 full suite passed (294 passed / 64
+  skipped), including both new multi-day regressions. Fix is uncommitted.
+- [x] **Moving a multi-day all-day event's start date truncated its range:**
+  seeded Oct 14–16 all-day Planning retreat, changed start to Oct 16, then
+  observed the saved exclusive end move to Oct 17 instead of Oct 19. Root
+  cause: the date input changed `date` but left the inclusive `allDayEnd` at
+  Oct 16; `buildInput` then fell back to one day because the old end was no
+  longer after the new start. Reproduced red. The handler now shifts the
+  inclusive end by the same calendar-day offset as the start. Regression
+  asserts the end-date control moves to Oct 18 and the persisted exclusive end
+  is Oct 19, then reopens and shifts backward to confirm the three-day span
+  again. The multi-day all-day regression plus timed/all-day conversion,
+  all-day visibility, and lane-move tests pass 4/4; production build passes.
+  Focused forward/backward regression re-ran at 12:42 UTC (1/1), then the
+  12:47 full suite passed 295/359 with 64 intentional skips.
+- [x] Extended the all-day range regression across DST fall-back: move a
+  three-day Oct 31–Nov 2 event, preserve its three calendar-day span and
+  exclusive Nov 3 end despite the clock change. Focused Playwright passed 1/1
+  at 14:54 UTC; the 15:02 full suite passed 301/365 with 64 intentional skips,
+  including this assertion.
+- [x] Reproduced the remaining five-second delay for “this and following” on
+  `COUNT=` series. `App.applyScope` awaited `getSeriesInstances` before calling
+  `splitSeries`, so the existing local-first native transaction never started
+  while Google paged through up to 5,000 instances. The UI now passes the
+  original COUNT rule and selected `originalStartTime` to the backend; native
+  split first projects the truncated old series + new placeholder and emits
+  `db-changed`, then fetches Google instances, calculates the exact remaining
+  COUNT (including cancelled originals), and only then patches/enqueues. Any
+  count-fetch or truncate failure rolls the local projection back. The shared
+  sync-core calculator has tests for cancelled instances, date-only all-day
+  starts, and a missing selection. All three delayed series-latency browser
+  tests and `npm run build` pass. Linux Tauri compilation/in-app validation
+  still needs the absent GTK3/WebKitGTK 4.1 development packages.
+- [x] Confirmed the original CI-owned 15-minute loop remained active; the
+  13:17, 13:32, and 13:47 UTC full suites each passed 298/362 (64 intentional
+  skips), and 14:02 passed 300/364 after adding the leading-packet and idle
+  expiry regressions.
+  A redundant 13:18 loop start correctly refused an occupied
+  :1420; I stopped only that duplicate after its dedicated-port 13:19 run also
+  passed 298/362. Playwright now accepts `PW_PORT` and the stress runner can
+  use :1421 if an independent loop is ever needed. The original loop continues
+  through 15:37 UTC; all logs remain under `logs/stress-2026-10-17/`.
+- [x] Re-ran the series projection unit tests under this resumed pass:
+  `cargo test -p sync-core --offline series::tests` passed 9/9, and the
+  DST/IANA-zone regression passed under `TZ=UTC`; the sync-engine integration
+  tests passed 12/12, including series instance swapping and queued edit/delete
+  ordering. `cargo test -p sync-core --offline -- --skip
+  pkce_challenge_is_s256_of_verifier` passes all 21 remaining tests. The
+  unfiltered crate suite's only failure is the sandbox-denied OAuth entropy
+  read (`getrandom`: `Operation not permitted`), not series projection or sync.
+- [ ] Pan follow-up: reproduce the user's residual lag through physical
+  trackpad delivery and Linux WebKitGTK. Existing 18 production-Chromium
+  profiles (12 synthetic + 6 browser-delivered; 400 events / 720px) measured
+  p95 16.7–16.8ms; 8/18 had one 33.2–33.4ms gap, usually with no wheel event
+  or WeekView commit. New input-window CDP trace against the production bundle
+  passed twice: p95/max 16.7–16.8ms, no >25ms RAF gaps, dispatch <=0.3ms,
+  transform paint <=0.2ms, React commit <=7.2ms, and measured JSX stage work
+  <=1.4ms total. Chromium's software renderer showed ~20–22ms DrawAndSwap
+  spans, but those did not cause a missed RAF frame in these samples. An
+  initial Vite-dev run showed a 25.7ms commit and is excluded; the opt-in probe
+  now skips dev builds and summarizes its stage timings.
+  **Two packet-loss cases are now reproduced and fixed in the app:** the
+  wheel handler chose an axis independently for every packet. A horizontal
+  start followed by 29 packets at `deltaX=4, deltaY=5` moved only 4 of the
+  requested 120 pixels (red regression). The handler now locks to horizontal
+  after the first horizontally dominant sample until 180 ms idle. Further
+  tracing found the undecided lead-in also discarded X from a Y-dominant first
+  packet; a red browser regression lost exactly 8px before lock. The handler
+  now buffers only candidate X until horizontal intent locks, then replays it;
+  candidates expire on idle. All seven focused gesture tests pass, including
+  leading-delta retention, idle expiry, pure vertical scrolling, and alignment;
+  `npm run build` passes. Two production-bundle profiles after this change
+  measured synthetic p95/max 16.7/16.8ms with no >25ms gaps, and
+  browser-delivered p95 16.8ms / max 33.3ms with one gap at 1249ms containing
+  zero wheel events and zero WeekView commits. Dispatch peaked at 0.4ms, paint
+  at 0.2ms, React commits at 2–7ms; no long tasks or long frames. This supports
+  that the measured outlier isn't produced by the JS wheel handler, but it
+  doesn't identify the renderer/scheduler cause. This fixes confirmed input-
+  loss sources, but the user's actual
+  physical trackpad/WebKitGTK symptom remains to be validated. The prior
+  mixed-axis and new lead-in regressions passed the 14:17 full suite (301
+  passed / 64 skipped, including the new G4 selection/panel delete regression).
+  Native Linux setup is still
+  blocked:
+  Xvfb and GTK3/WebKitGTK 4.0 runtime libraries are present, but GTK3 and
+  WebKitGTK 4.1 development `pkg-config` files (required by the repo setup
+  script) and the WebKit driver are absent. A real `npm run test:e2e:app`
+  attempt in a fresh `/tmp` sandbox failed before launch: `gdk-3.0`, `pango`,
+  `cairo`, and `gdk-pixbuf-2.0` development pkg-config files are missing. The
+  setup script previously stopped at `sudo: a password is required` before apt
+  could install them. Exact build output is preserved in
+  `/tmp/northstar-native-e2e-check-20261017/app.log`.
+- [x] The 12:12 manual and 12:17, 12:32, 12:47, and 13:02 UTC scheduled full
+  browser runs passed with the latest editor/gesture changes (latest 297 passed / 64
+  intentional skips, zero failures). Periodic run logs are preserved in
+  `logs/stress-2026-10-17/`.
 
 ## Overlap text placement — 2026-10-15 evening (committed `2fc384d8`)
 
@@ -250,10 +548,12 @@ saved before the merge. Its own tests, run against the merged code:
   now mirrors both RFC 5545 forms. Focused timed/all-day COUNT cases pass.
 - [ ] Run the disposable all-day COUNT split against live Google on the Mac;
   the current `e2e/live_series_split.py` probe covers the timed form.
-- [ ] **Policy: a local delete vs a concurrent Google edit.** The WIP makes
-  the delete win (fetch the current etag, retry); the engine's rule is
-  412 → remote wins. Its first test (delete queued after our own edit) already
-  passes on main; the second encodes the policy change. Decide, don't drift.
+- [ ] **Policy: a local delete vs a concurrent Google edit.** Current behavior
+  is 412 → remote wins: a stale local delete refetches/reinstates the remotely
+  edited event. Honoring the delete would require fetching the new etag and
+  retrying, which could erase a collaborator's change. Asked Joshua to choose
+  before changing this conflict policy; same-event local edit-then-delete is
+  already rebased and covered separately.
 
 Linux E2E (new): `npm run setup:e2e:linux` once (sudo apt), then
 `npm run test:e2e:app` — sandboxed real WebKitGTK window under Xvfb,

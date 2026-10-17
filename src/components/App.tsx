@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Profiler, useCallback, useEffect, useMemo, useState, type ProfilerOnRenderCallback } from "react";
 import {
   addDays,
   addMonths,
@@ -41,6 +41,17 @@ import { PANEL_PANE, PaneResize, SIDEBAR_PANE, usePaneWidth } from "./PaneResize
 import { CommandMenu } from "./CommandMenu";
 
 export type View = "day" | "week" | "month" | "list" | "insights";
+
+// Optional development-only probe for dense horizontal-pan profiling. The
+// production UI has no observer unless an E2E test installs the sink.
+const profileCalendarRender: ProfilerOnRenderCallback = (id, _phase, actualDuration, _baseDuration, startTime, commitTime) => {
+  if (!import.meta.env.DEV || typeof window === "undefined") return;
+  const suffix = id === "WeekView" ? "weekView" : "calendarApp";
+  const sink = (window as any)[`__${suffix}RenderDurations`];
+  if (Array.isArray(sink)) sink.push(actualDuration);
+  const marks = (window as any)[`__${suffix}RenderMarks`];
+  if (Array.isArray(marks)) marks.push({ startTime, commitTime, actualDuration });
+};
 
 function addBusinessDays(day: Date, offset: number): Date {
   let result = addDays(startOfDay(day), Math.trunc(offset / 5) * 7);
@@ -250,14 +261,32 @@ export default function App() {
     setSelected((sel) => {
       if (!sel.length) return sel;
       let changed = false;
-      const next = sel.map((s) => {
-        const cur = visible.find((e) => e.id === s.id && e.calendar_id === s.calendar_id);
-        if (cur && cur !== s) {
-          changed = true;
-          return cur;
+      const next: CalendarEvent[] = [];
+      for (const s of sel) {
+        let cur = visible.find((e) => e.id === s.id && e.calendar_id === s.calendar_id);
+        if (!cur) {
+          // A calendar move changes the composite key but not the event id.
+          // Follow it when there is exactly one visible candidate; if ids
+          // collide across calendars, or this recurring occurrence now maps
+          // to a different series, drop the stale selection instead.
+          const sameId = visible.filter((e) => e.id === s.id);
+          if (sameId.length === 1 &&
+              (!s.recurring_event_id || sameId[0].recurring_event_id === s.recurring_event_id)) {
+            cur = sameId[0];
+          }
         }
-        return s;
-      });
+        if (!cur) {
+          // A remote delete (or a calendar being hidden) must not leave a
+          // stale snapshot in the multi-selection. WeekView uses that list
+          // to draw group-move ghosts and App later submits every selected
+          // update; keeping a missing event here made one group drag partially
+          // fail after the remaining events had already moved.
+          changed = true;
+          continue;
+        }
+        if (cur !== s) changed = true;
+        next.push(cur);
+      }
       return changed ? next : sel;
     });
   }, [visible]);
@@ -467,6 +496,14 @@ export default function App() {
         : null,
     [panel, events],
   );
+  useEffect(() => {
+    if (panel.mode === "view" && !panelLive) {
+      // A sync delete invalidates the editor's snapshot. Leaving it open lets
+      // Save/Move target a deleted event and turns the external change into a
+      // confusing failure.
+      setPanel({ mode: "closed" });
+    }
+  }, [panel.mode, panelLive]);
 
   // ---- bulk operations over the multi-selection (per-instance semantics) ----
   const bulkRemove = useCallback(
@@ -572,9 +609,14 @@ export default function App() {
         (ev.all_day ? selectedOriginal === masterOriginal :
           Date.parse(selectedOriginal) === Date.parse(masterOriginal));
       const effectiveScope = scope === "following" && firstOccurrence ? "all" : scope;
+      if (effectiveScope !== "this") {
+        setPanel({ mode: "closed" });
+        showToast("Saving series changes…", false);
+      }
       const rrule: string | undefined = master?.recurrence?.find((r: string) =>
         r.startsWith("RRULE"),
       );
+      const previousMasterStart: string | undefined = master?.start?.dateTime ?? master?.start?.date;
       const untilOf = (boundaryIso: string, allDay: boolean) => {
         if (allDay) {
           // RFC 5545 requires UNTIL to have the same value type as DTSTART.
@@ -700,29 +742,18 @@ export default function App() {
             masterId,
             patch,
             input.calendar_id !== ev.calendar_id ? input.calendar_id : undefined,
+            previousMasterStart,
           );
           showToast(`Updated all “${ev.summary}” events`, false);
         } else if (rrule) {
           // split: truncate the old series, start a new one at this instance
           let nextRule = rrule;
           const count = Number(rrule.match(/(?:^|;)COUNT=(\d+)/)?.[1] ?? 0);
-          if (count) {
-            const instances = await backend.getSeriesInstances(ev.calendar_id, masterId);
-            const originalTime = (instance: any) => {
-              const value = instance.originalStartTime?.dateTime ?? instance.originalStartTime?.date;
-              return value?.length === 10 ? Date.parse(`${value}T00:00:00Z`) : Date.parse(value);
-            };
-            const selectedOriginal = ev.raw?.originalStartTime ??
-              (ev.all_day ? { date: ev.start } : { dateTime: ev.start });
-            const boundary = originalTime({ originalStartTime: selectedOriginal });
-            if (!Number.isFinite(boundary) || !instances.some((instance: any) => instance.id === ev.id)) {
-              throw new Error("could not locate this occurrence in the series");
-            }
-            const earlier = instances.filter((instance: any) => originalTime(instance) < boundary).length;
-            const remaining = count - earlier;
-            if (remaining < 1) throw new Error("no occurrences remain after this event");
-            nextRule = rrule.replace(/COUNT=\d+/, `COUNT=${remaining}`);
-          }
+          const countSplit = count ? {
+            originalRecurrence: rrule,
+            selectedOriginalStart: ev.raw?.originalStartTime ??
+              (ev.all_day ? { date: ev.start } : { dateTime: ev.start }),
+          } : undefined;
           // truncate + new series as one backend step: done as two calls,
           // a sync pass between them pulled the old series' cancelled tail
           // before the new series existed, and the rest of the series
@@ -731,7 +762,7 @@ export default function App() {
             ...input,
             description: splitDrill(input.description).body || null,
             recurrence: [nextRule],
-          });
+          }, countSplit);
           showToast(`Updated “${input.summary}” and following`, false);
         }
         setPanel({ mode: "closed" });
@@ -1043,7 +1074,7 @@ export default function App() {
 
       // the open event's panel: Delete / Backspace delete it (Notion), unless
       // a field in it has the focus (that's editing text, handled above)
-      if ((e.key === "Backspace" || e.key === "Delete") && panel.mode === "view" && !quickOpen && !cmdOpen) {
+      if ((e.key === "Backspace" || e.key === "Delete") && panel.mode === "view" && !quickOpen && !cmdOpen && !pendingScope) {
         e.preventDefault();
         void actions.remove(panel.event);
         return;
@@ -1149,7 +1180,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [step, anyOverlay, selected, selectedOne, actions, cycleSelection, sortedVisible, openEvent, bulkRemove, bulkDuplicate, toggleSelect, toggleWeekends, calendars, calOf, panel, quickOpen, cmdOpen]);
+  }, [step, anyOverlay, selected, selectedOne, actions, cycleSelection, sortedVisible, openEvent, bulkRemove, bulkDuplicate, toggleSelect, toggleWeekends, calendars, calOf, panel, quickOpen, cmdOpen, pendingScope]);
 
   // Pinch on the trackpad zooms how many days are shown: spreading the
   // fingers shows fewer (each wider), squeezing shows more, 1 to 9, in
@@ -1290,6 +1321,7 @@ export default function App() {
   };
 
   return (
+    <Profiler id="CalendarApp" onRender={profileCalendarRender}>
     <BackendContext.Provider value={backend}>
       <div
         className={"app" + (sidebarHidden ? " sidebar-hidden" : "")}
@@ -1333,6 +1365,7 @@ export default function App() {
             onOpenCommand={() => setCmdOpen(true)}
           />
           {(view === "week" || view === "day") && (
+            <Profiler id="WeekView" onRender={profileCalendarRender}>
             <WeekView
               backend={backend}
               days={range.days}
@@ -1356,6 +1389,7 @@ export default function App() {
               onSelect={(e) => setSelected(e ? [e] : [])}
               onDraft={openDraft}
             />
+            </Profiler>
           )}
           {view === "month" && (
             <MonthView
@@ -1525,5 +1559,6 @@ export default function App() {
         )}
       </div>
     </BackendContext.Provider>
+    </Profiler>
   );
 }

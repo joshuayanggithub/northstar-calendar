@@ -107,6 +107,46 @@ test("group drag: an event from a view-only calendar stays where it is", async (
   await expect(page.getByTestId("toast")).toContainText("stayed");
 });
 
+test("selection drops an event deleted by a sync before the next group drag", async ({ page }) => {
+  await open(page);
+  await chip(page, "Alpha").click({ modifiers: ["Shift"] });
+  await chip(page, "Beta").click({ modifiers: ["Shift"] });
+  await expect(page.locator(".chip-timed.selected")).toHaveCount(2);
+
+  // Simulate a remote deletion arriving through the same mock DB-change path
+  // used by the real sync engine, without using the UI's local delete action.
+  await page.evaluate(async () => {
+    const { mockBackend } = await import("/src/lib/mockBackend.ts");
+    await mockBackend.deleteEvent("p", "g2");
+  });
+
+  await expect(page.locator(".chip-timed.selected"), "deleted events must not stay in the multi-selection").toHaveCount(1);
+  await expect(chip(page, "Alpha")).toHaveClass(/selected/);
+  await expect(chip(page, "Beta")).toHaveCount(0);
+
+  // A stale selected snapshot was still counted by WeekView, so dragging the
+  // surviving chip showed a ghost for the deleted event and sent a doomed
+  // second update alongside the valid move.
+  await dragBy(page, "Alpha", 0, 1, async () => {
+    await expect(page.getByTestId("group-ghost"), "no ghost for the remotely deleted event").toHaveCount(0);
+  });
+  expect(await timeOf(page, "Alpha")).toBe("10 – 11 AM");
+});
+
+test("sync deletion closes the event editor instead of leaving a stale snapshot", async ({ page }) => {
+  await open(page);
+  await chip(page, "Alpha").click();
+  const panel = page.getByTestId("event-panel");
+  await expect(panel).toBeVisible();
+
+  await page.evaluate(async () => {
+    const { mockBackend } = await import("/src/lib/mockBackend.ts");
+    await mockBackend.deleteEvent("p", "g1");
+  });
+
+  await expect(panel, "the editor must not remain actionable for a remotely deleted event").toHaveCount(0);
+});
+
 test("wall-clock shift: 9:00 stays 9:00 on the new day across the end of daylight saving", () => {
   process.env.TZ = "America/New_York";
   // Sat Oct 31 2026 9:00 EDT, dragged to Sunday: Nov 1 is 25 hours long

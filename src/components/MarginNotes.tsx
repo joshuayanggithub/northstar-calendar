@@ -122,6 +122,8 @@ export function MarginNotes(props: {
   layoutKey: unknown;
   /** the first visible day; changing alone means the strip was swiped */
   firstDay: number;
+  /** pending visible-column shift for a wheel pan; null for other navigation */
+  panSteps: number | null;
   pxPerMin: number;
   keyOf: (e: CalendarEvent) => string;
   onSelect: (e: CalendarEvent) => void;
@@ -166,16 +168,31 @@ export function MarginNotes(props: {
     const layer = layerRef.current;
     const strip = props.stripRef.current;
     if (!layer || !strip || !placed.places.length) return;
-    const L = layer.getBoundingClientRect();
     const dxOf = new Map<string, number>();
     const chipX = new Map<string, number>();
-    for (const p of placed.places) {
-      const was = placed.chipX.get(p.key);
-      const el = strip.querySelector<HTMLElement>(`.chip-timed[data-ek="${CSS.escape(p.key)}"], .cluster-block [data-ek="${CSS.escape(p.key)}"]`);
-      if (was === undefined || !el) continue;
-      const x = el.getBoundingClientRect().left - L.left;
-      dxOf.set(p.key, x - was);
-      chipX.set(p.key, x);
+    if (props.panSteps != null && placed.colW > 0) {
+      // All three calendar strips move by the same cached column width. Notes
+      // follow that exact transform without querying chip geometry (which
+      // forced WebKit to lay out the dense grid after every day boundary).
+      const dx = -props.panSteps * placed.colW;
+      for (const p of placed.places) {
+        const was = placed.chipX.get(p.key);
+        if (was === undefined) continue;
+        dxOf.set(p.key, dx);
+        chipX.set(p.key, was + dx);
+      }
+    } else {
+      // Non-pan navigation can jump an arbitrary distance, so measure once
+      // and preserve the existing behavior for Today/arrows/mini-calendar.
+      const L = layer.getBoundingClientRect();
+      for (const p of placed.places) {
+        const was = placed.chipX.get(p.key);
+        const el = strip.querySelector<HTMLElement>(`.chip-timed[data-ek="${CSS.escape(p.key)}"], .cluster-block [data-ek="${CSS.escape(p.key)}"]`);
+        if (was === undefined || !el) continue;
+        const x = el.getBoundingClientRect().left - L.left;
+        dxOf.set(p.key, x - was);
+        chipX.set(p.key, x);
+      }
     }
     const shift = (r: Rect, dx: number): Rect => ({ x0: r.x0 + dx, y0: r.y0, x1: r.x1 + dx, y1: r.y1 });
     const anchors = new Map<string, Rect>();

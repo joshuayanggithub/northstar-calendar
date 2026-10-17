@@ -8,6 +8,7 @@ pub mod db;
 pub mod google;
 pub mod models;
 pub mod oauth;
+pub mod series;
 pub mod sync;
 
 pub use db::Db;

@@ -34,7 +34,15 @@ while time.time() < end:
         "npx", "playwright", "test", "--reporter=line",
         f"--output={log_dir / stamp}",
     ]
-    env = dict(os.environ, PLAYWRIGHT_BROWSERS_PATH="0")
+    # CI mode gives each scheduled suite ownership of its Vite server. Reusing
+    # a developer's transient profiler/preview server let it disappear mid-run.
+    env = dict(os.environ, CI="1")
+    # Respect an explicit Linux/system browser cache path; fall back to the
+    # repository-local Playwright cache for CI and fresh developer setups.
+    env.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
+    # Keep the stress runner's owned Vite server separate from an interactive
+    # app or development server on the normal browser-test port.
+    env.setdefault("PW_PORT", "1421")
     try:
         with log.open("w") as out:
             result = subprocess.run(command, cwd=root, env=env, stdout=out,
