@@ -1,3 +1,9 @@
+<h1 align="center">North Star</h1>
+
+<p align="center">
+  <img src="design/icon/north-star-1024.png" width="160" alt="The North Star app icon: the Little Dipper drawn across a month page, ending at a red today square crowned by a gold north star">
+</p>
+
 # Main
 northstar is a rust-based, macOS, dekstop calendar app that centers around features maximizing your north star: long-term goals and productivity! the most popular calendar (gcal, notion) apps are 1. basic clunky - lacking basic UI/UX features that help when scheduling lots of events 2. lack true features that enable long-term planning and reflection of goals. 
 
