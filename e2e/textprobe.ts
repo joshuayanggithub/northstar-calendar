@@ -180,10 +180,31 @@ export async function probeInPage(): Promise<ProbeResult> {
                 alignBad.push(`${k} -> .${off.el.className.split(" ")[0]} starts at x ${Math.round(off.r.left - cr.left)}, title block at ${Math.round(x0 - cr.left)}`);
               }
               const ttl = rows.find(({ el }) => /chip-title|chip-line/.test(el.className));
-              // the title opens the event: at its top, below a joint's step at most
+              // the title opens the event: at its top, below a joint's step at
+              // most — or, for a C-shape whose top is taken by what it
+              // encloses (they keep their true start), right below those
               const ob2 = owner.getBoundingClientRect();
-              if (ttl && ttl.r.top - ob2.top > 16) {
-                alignBad.push(`${k} -> title starts ${Math.round(ttl.r.top - ob2.top)}px below the event's top`);
+              let open = ob2.top;
+              if (owner.classList.contains("chip-cfull")) {
+                const z0 = Number(owner.style.zIndex) || 0;
+                const above = owners
+                  .filter((o) => o !== owner && (Number(o.style.zIndex) || 0) > z0)
+                  .map((o) => o.getBoundingClientRect())
+                  .filter((r) => r.left < ob2.right - 1 && r.right > ob2.left + 1);
+                for (let moved = true; moved; ) {
+                  moved = false;
+                  for (const r of above) {
+                    // anything starting within a label band (and a joint's
+                    // step) of the open top leaves no room for the title there
+                    if (r.top < open + 30 && r.bottom > open + 0.5) {
+                      open = r.bottom;
+                      moved = true;
+                    }
+                  }
+                }
+              }
+              if (ttl && ttl.r.top - open > 16) {
+                alignBad.push(`${k} -> title starts ${Math.round(ttl.r.top - open)}px below the event's top${open > ob2.top ? " (open part)" : ""}`);
               }
               const trow = rows.find(({ el }) => el.classList.contains("chip-time"));
               if (ttl && trow && Math.abs(trow.r.top - ttl.r.bottom) > 1.5) {

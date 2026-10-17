@@ -353,12 +353,46 @@ export function packDayWithSleeves<T>(
     }
     bandPx.set(n, b);
   }
-  // title band (cluster: its whole body is content that must stay visible)
-  const bandOf = (n: Node): [number, number] =>
-    n.c ? [n.T, n.B] : [n.T + n.jt, Math.min(n.T + n.jt + bandPx.get(n)!, n.B)];
   const minHeight = (n: Node) =>
     n.c ? ROW_PX * n.c.items.length + 6 : Math.max(minHeightPx, LABEL_PX);
+  // A slab whose enclosed events start right at its top (the tail of an
+  // event that ran past midnight, under a sleep that starts at midnight)
+  // writes its title BELOW them, in the first open stretch of it that can
+  // hold the band, so they keep their true start instead of being pushed
+  // down under its title. lowBand: where that band starts (natural px).
+  const lowBand = new Map<Node, number>();
+  for (const n of nodes) {
+    if (!n.slab || !n.it) continue;
+    const band = bandPx.get(n)!;
+    const inside = nodes.filter((k) => k !== n && isAncestor(n, k));
+    let y = n.startMin * pxPerMin;
+    for (let moved = true; moved; ) {
+      moved = false;
+      for (const k of inside) {
+        const k0 = k.startMin * pxPerMin;
+        const k1 = Math.max(k.endMin * pxPerMin, k0 + minHeight(k));
+        if (k0 < y + band - 0.5 && k1 > y + 0.5) {
+          y = k1;
+          moved = true;
+        }
+      }
+    }
+    if (y > n.startMin * pxPerMin + 0.5 && y + band <= n.endMin * pxPerMin + 0.5) lowBand.set(n, y);
+  }
+  /** a low band's events above it (they start before it) */
+  const aboveBand = (a: Node, k: Node) => lowBand.has(a) && k.startMin * pxPerMin < lowBand.get(a)! - 0.5;
   const placed: Node[] = [];
+  // title band (cluster: its whole body is content that must stay visible);
+  // a low band sits under whatever of the slab's own events lie above it,
+  // wherever they ended up
+  const bandOf = (n: Node): [number, number] => {
+    if (n.c) return [n.T, n.B];
+    const low = lowBand.get(n);
+    if (low === undefined) return [n.T + n.jt, Math.min(n.T + n.jt + bandPx.get(n)!, n.B)];
+    let top = Math.max(n.T + n.jt, low);
+    for (const k of placed) if (k !== n && isAncestor(n, k) && aboveBand(n, k)) top = Math.max(top, k.B);
+    return [top, top + bandPx.get(n)!];
+  };
 
   for (const n of nodes) {
     const natural = n.startMin * pxPerMin;
@@ -368,8 +402,13 @@ export function packDayWithSleeves<T>(
     let partner: Node | null = null;
     for (let guard = 0; guard < 200; guard++) {
       const before = n.T;
-      // (a) beneath every enclosing event's title band
-      for (const a of ancestors) n.T = Math.max(n.T, bandOf(a)[1]);
+      // (a) beneath every enclosing event's title band (a low band: clear
+      // of it, the events above it keeping their place)
+      for (const a of ancestors) {
+        if (aboveBand(a, n)) continue;
+        const [ba, bb] = bandOf(a);
+        if (!lowBand.has(a) || (n.T < bb - 0.5 && n.T + natH > ba + 0.5)) n.T = Math.max(n.T, bb);
+      }
       // the box as it would be drawn at this top
       n.jt = 0;
       n.jtx = null;
@@ -425,7 +464,7 @@ export function packDayWithSleeves<T>(
     // every enclosing event keeps this box inside it (no blank strip beside
     // an inset child); enclosers are slabs on the bottom layer, so growing
     // them never covers anything
-    for (const a of ancestors) a.B = Math.max(a.B, n.B);
+    for (const a of ancestors) a.B = Math.max(a.B, n.B, lowBand.has(a) ? bandOf(a)[1] : 0);
   }
 
   const slabs = nodes.filter((n) => n.slab).map((n) => n.it!);

@@ -273,6 +273,7 @@ the window on an existing display (e.g. SSH X forwarding) instead.
 
 ## Shipped log (newest first)
 
+- `b69ccc3b` C-shape title moves below events at its top (overnight tails start on the 12 AM line)
 - `a0ea5055` Other calendars read-only by default + Copy to my calendar (picker, series), copied originals step aside
 - `69537ede` Obsidian link removed (journal bridge, weekly-review view, goals import)
 - `56ab03a1` Margin notes: size the box from its edges/corner, A−/A+ writing size
