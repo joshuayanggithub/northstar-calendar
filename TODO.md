@@ -7,6 +7,15 @@ When something ships, move it to the "Shipped" log at the bottom with its
 commit, then into FEATURES.md / REQUESTS.md. Edits to this file are verified
 (read back), never fire-and-forget.
 
+## 2026-10-18 — horizontal pan follow-up
+
+- [ ] Verify the fix with a physical macOS trackpad in a dense week. Linux
+  WebKitGTK and Chromium cannot establish WKWebView compositor behavior.
+- [ ] The optional 120-events/day native app suite stops before its pan check:
+  deleting its QA note also removes a second note DOM node, violating the
+  annotation test's exact removal count. Investigate separately; the default
+  native suite and dense browser pan profile pass.
+
 ## Features
 
 - Zooming in should decrease the # of days in the current view, and zooming out should increase it. Granularity should be by number of days until we get to 14 in which we can go to month next. 
@@ -1332,6 +1341,12 @@ password; it made no system-package changes, so native setup remains blocked.
 - [ ] Import/export (ICS), booking-rules in-app panel, E-then-key chords.
 
 ## Shipped log (newest first)
+
+- `d0c3282` Fixed synchronous day-boundary pan resets by recording pending
+  shifts before React commits, and painted the sticky header rule across the
+  full overscan strip. Refreshed reviewed Linux week snapshots for current
+  sidebar UI. Browser E2E: 341 passed / 64 skipped; default native app suite
+  passed; 2,520-event pan measured 16.8 ms p95 frames.
 
 - `7d5cf733` Hourly nudge built in (replaces ~/bin/calendar-nudge.sh); `5865bae8` goal classifier off
 - `09434efd` Thought dump under the goals; Goals fold as a section
