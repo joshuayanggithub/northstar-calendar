@@ -121,7 +121,7 @@ def make(title, hour, note):
     return hook("create_event", input={
         "calendar_id": cal, "summary": title,
         "description": f"Agenda stays.\n\n[DRILL] {note}",
-        "start": start.isoformat(), "end": (start + dt.timedelta(hours=1)).isoformat(),
+        "start": start.isoformat(), "end": (start + dt.timedelta(hours=2)).isoformat(),
         "all_day": False,
     })["id"]
 
@@ -181,8 +181,8 @@ try:
     # ---- 2. the editor's x erases the note for good (and the PATCH clears it)
     hook("update_event", event_id=B, input={
         "calendar_id": cal, "summary": "QA native editor note", "description": "[DRILL] Editor x must erase this.",
-        "start": today.replace(hour=16).isoformat(), "end": today.replace(hour=17).isoformat(), "all_day": False})
-    chip_b = f'.chip-timed[data-ek="{KB}"]'
+        "start": today.replace(hour=16).isoformat(), "end": today.replace(hour=18).isoformat(), "all_day": False})
+    chip_b = f':is(.chip-timed, .cluster-row)[data-ek="{KB}"]'
     wait("return !!document.querySelector(arguments[0])", "event B chip", chip_b)
     pointer_click(chip_b)
     wait("return !!document.querySelector('[data-testid=panel-drill]')", "editor shows the note")
@@ -205,6 +205,9 @@ try:
     shot("notes-after.png")
 
     # ---- 3. horizontal swipe: never steps backwards, notes stay up
+    diagnostic_css = os.environ.get("CAL_E2E_PAN_STYLE")
+    if diagnostic_css:
+        js("const style = document.createElement('style'); style.textContent = arguments[0]; document.head.append(style); return true", diagnostic_css)
     res = jsa("""
       const grid = document.querySelector('[data-testid=week-grid]');
       const head = document.querySelector('.day-headers .pan-strip');
@@ -218,22 +221,37 @@ try:
       const samples = [pos()];
       const mo = new MutationObserver(() => samples.push(pos()));
       mo.observe(grid, {childList: true, subtree: true, attributes: true, attributeFilter: ['style'], characterData: true});
+      const rows = grid.querySelectorAll('.cluster-row').length;
+      const viewport = grid.getBoundingClientRect();
+      const visibleRows = [...grid.querySelectorAll('.cluster-row')].filter((row) => {
+        const rect = row.getBoundingClientRect();
+        return rect.bottom > viewport.top && rect.top < viewport.bottom &&
+          rect.right > viewport.left && rect.left < viewport.right;
+      }).length;
       const frames = [];
+      const wheelDispatch = [];
       let last = performance.now(), live = true;
       const tick = (t) => { frames.push(t - last); last = t; if (live) requestAnimationFrame(tick); };
       requestAnimationFrame(tick);
       let i = 0;
       const step = () => {
         if (i++ < 60) {
+          const dispatchStarted = performance.now();
           grid.dispatchEvent(new WheelEvent('wheel', {deltaX: 12, deltaY: 0, bubbles: true, cancelable: true}));
+          wheelDispatch.push(performance.now() - dispatchStarted);
           setTimeout(step, 12);
         } else setTimeout(() => {
           live = false; mo.disconnect();
           let back = 0;
           for (let k = 1; k < samples.length; k++) if (samples[k] - samples[k - 1] < -0.02 && Math.abs(samples[k] - samples[k - 1]) < 20) back++;
-          frames.sort((a, b) => a - b);
+          const percentile95 = (values) => {
+            values.sort((a, b) => a - b);
+            return values[Math.floor(values.length * 0.95)] || 0;
+          };
           done({back, travelled: samples[samples.length - 1] - samples[0], n: samples.length,
-                p95: frames[Math.floor(frames.length * 0.95)], slow: frames.filter((f) => f > 50).length});
+                rows, visibleRows, p95: percentile95(frames), slow: frames.filter((f) => f > 50).length,
+                wheelDispatchP95: percentile95(wheelDispatch),
+                wheelDispatchMax: Math.max(...wheelDispatch)});
         }, 400);
       };
       step();""")

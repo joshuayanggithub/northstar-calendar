@@ -99,7 +99,7 @@ function GoalsSection(props: {
       return {};
     }
   });
-  const toggleGroup = (key: Horizon) =>
+  const toggleGroup = (key: Horizon | "section") =>
     setCollapsed((c) => {
       const next = { ...c, [key]: !c[key] };
       try {
@@ -131,20 +131,36 @@ function GoalsSection(props: {
   return (
     <div className="sidebar-section goals" data-testid="goals-section">
       <div className="sidebar-head">
-        <span className="sidebar-label">Goals</span>
+        <button
+          className="sidebar-label sidebar-toggle"
+          data-testid="goals-toggle"
+          aria-expanded={!collapsed.section}
+          onClick={() => toggleGroup("section")}
+        >
+          <span className={"goals-chevron" + (collapsed.section ? " closed" : "")}>▾</span>
+          Goals
+          {collapsed.section && goals.file.goals.length > 0 && (
+            <span className="cal-group-count">
+              {goals.file.goals.filter((g) => goals.isDone(g)).length}/{goals.file.goals.length}
+            </span>
+          )}
+        </button>
         <span className="sidebar-head-actions">
           <button
             className="cal-add"
             title="New goal"
             aria-label="Add goal"
             data-testid="goal-add"
-            onClick={() => setAdding((a) => !a)}
+            onClick={() => {
+              if (collapsed.section) toggleGroup("section");
+              setAdding((a) => !a);
+            }}
           >
             ＋
           </button>
         </span>
       </div>
-      {adding && (
+      {adding && !collapsed.section && (
         <div className="cal-add-form" data-testid="goal-add-form">
           <input
             autoFocus
@@ -171,7 +187,7 @@ function GoalsSection(props: {
           </div>
         </div>
       )}
-      {HORIZONS.map((h) => {
+      {!collapsed.section && HORIZONS.map((h) => {
         const list = goals.file.goals.filter((g) => g.horizon === h.key);
         const done = list.filter((g) => goals.isDone(g)).length;
         return (
@@ -253,6 +269,112 @@ function GoalsSection(props: {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/** The thought dump: bullet points of things to think about, under the
+ *  goals and kept with them (lib/goals.ts). Type and press Enter to add one
+ *  (the field stays ready for the next); double-click a line to edit it,
+ *  emptying it deletes it; ✕ deletes. Collapsible like the sections above. */
+function ThoughtsSection(props: { backend: Backend | null }) {
+  const goals = useGoals(props.backend);
+  const [closed, setClosed] = useState(() => {
+    try {
+      return localStorage.getItem("thoughts-collapsed") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggle = () =>
+    setClosed((c) => {
+      try {
+        localStorage.setItem("thoughts-collapsed", c ? "0" : "1");
+      } catch {
+        /* per-viewer convenience only */
+      }
+      return !c;
+    });
+  const [draft, setDraft] = useState("");
+  const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
+  const list = goals.thoughts;
+  const commitEdit = () => {
+    if (!editing) return;
+    goals.editThought(editing.id, editing.text);
+    setEditing(null);
+  };
+  return (
+    <div className="sidebar-section thoughts" data-testid="thoughts-section">
+      <div className="sidebar-head">
+        <button
+          className="sidebar-label sidebar-toggle"
+          data-testid="thoughts-toggle"
+          aria-expanded={!closed}
+          onClick={toggle}
+        >
+          <span className={"goals-chevron" + (closed ? " closed" : "")}>▾</span>
+          Thought dump
+          {closed && list.length > 0 && <span className="cal-group-count">{list.length}</span>}
+        </button>
+      </div>
+      {!closed && (
+        <>
+          <ul className="thought-list">
+            {list.map((t) => (
+              <li key={t.id} className="thought-row" data-testid="thought-row">
+                <span className="thought-dot" aria-hidden="true">•</span>
+                {editing?.id === t.id ? (
+                  <textarea
+                    className="thought-edit"
+                    autoFocus
+                    rows={1}
+                    value={editing.text}
+                    onChange={(e) => setEditing({ id: t.id, text: e.target.value })}
+                    onBlur={commitEdit}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        commitEdit();
+                      }
+                      if (e.key === "Escape") setEditing(null);
+                    }}
+                  />
+                ) : (
+                  <span
+                    className="thought-text"
+                    title="Double-click to edit"
+                    onDoubleClick={() => setEditing({ id: t.id, text: t.text })}
+                  >
+                    {t.text}
+                  </span>
+                )}
+                <button
+                  className="goal-del"
+                  title="Delete"
+                  aria-label="Delete thought"
+                  onClick={() => goals.removeThought(t.id)}
+                >
+                  ✕
+                </button>
+              </li>
+            ))}
+          </ul>
+          <input
+            className="thought-add"
+            data-testid="thought-add"
+            placeholder={list.length ? "Add another…" : "Something to think about…"}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && draft.trim()) {
+                goals.addThought(draft);
+                setDraft("");
+              }
+              if (e.key === "Escape") (e.target as HTMLInputElement).blur();
+            }}
+          />
+        </>
+      )}
     </div>
   );
 }
@@ -397,6 +519,7 @@ export const Sidebar = memo(function Sidebar(props: {
         })()}
       </div>
       <GoalsSection backend={props.backend} events={props.events} />
+      <ThoughtsSection backend={props.backend} />
       {!runningInTauri && <div className="mock-badge">browser mock mode</div>}
     </aside>
   );

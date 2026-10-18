@@ -1,5 +1,11 @@
 # Local goal-work classification — design
 
+> **Status: off (2026-10-17).** It loaded gemma3:12b (8 GB, 6–14 s a title)
+> and took too much of the machine, so `GOAL_CLASSIFIER_ENABLED` in
+> `src-tauri/src/classify.rs` is false: nothing calls Ollama and no hollow
+> "suggested" stars show. Hand-set stars still work. This document is the
+> design if it's ever turned back on.
+
 Goal: events that advance the user's goals (the Goals sidebar, kept by the
 app) get recognized automatically, with zero cloud calls. The model
 *suggests*; the user *ratifies*. A misclassification must never loudly

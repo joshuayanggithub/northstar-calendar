@@ -22,10 +22,18 @@ export interface Goal {
   horizon: Horizon;
 }
 
+/** a line of the thought dump: something to think about, not a goal */
+export interface Thought {
+  id: string;
+  text: string;
+}
+
 export interface GoalsFile {
   goals: Goal[];
   /** goal id -> the period it was ticked in */
   checks: Record<string, string>;
+  /** the thought dump, kept in the same file (absent in older files) */
+  thoughts?: Thought[];
 }
 
 /** the period a tick belongs to: this day, this week, or for good */
@@ -98,8 +106,20 @@ export function useGoals(backend: Backend | null) {
       edit((f) => {
         const checks = { ...f.checks };
         delete checks[id];
-        return { goals: f.goals.filter((g) => g.id !== id), checks };
+        return { ...f, goals: f.goals.filter((g) => g.id !== id), checks };
       }),
+    thoughts: file.thoughts ?? [],
+    addThought: (text: string) =>
+      edit((f) => ({ ...f, thoughts: [...(f.thoughts ?? []), { id: newId(), text: text.trim() }] })),
+    editThought: (id: string, text: string) =>
+      edit((f) => ({
+        ...f,
+        thoughts: text.trim()
+          ? (f.thoughts ?? []).map((t) => (t.id === id ? { ...t, text: text.trim() } : t))
+          : (f.thoughts ?? []).filter((t) => t.id !== id),
+      })),
+    removeThought: (id: string) =>
+      edit((f) => ({ ...f, thoughts: (f.thoughts ?? []).filter((t) => t.id !== id) })),
     toggle: (g: Goal) =>
       edit((f) => {
         const checks = { ...f.checks };

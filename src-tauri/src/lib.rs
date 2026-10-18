@@ -102,12 +102,68 @@ pub struct EventInput {
     pub recurrence: Option<Vec<String>>,
     /// attendee emails
     pub attendees: Option<Vec<String>>,
+    /// full attendee resources for edits/undo (preserves RSVP state)
+    pub attendee_details: Option<Vec<serde_json::Value>>,
+    /// full reminder resource for undo snapshots (preserves multiple overrides)
+    pub reminders: Option<serde_json::Value>,
     /// "opaque" (busy) | "transparent" (free)
     pub transparency: Option<String>,
     /// "default" | "public" | "private"
     pub visibility: Option<String>,
-    /// popup reminder minutes before start; None = calendar default
-    pub reminder_minutes: Option<i64>,
+    /// popup reminder minutes before start; null = calendar default, absent = unchanged
+    #[serde(default, deserialize_with = "deserialize_reminder_minutes")]
+    pub reminder_minutes: ReminderMinutes,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum ReminderMinutes {
+    /// The caller omitted the field, so a PATCH must leave reminders unchanged.
+    #[default]
+    Unchanged,
+    /// The caller explicitly selected the calendar's default reminders.
+    CalendarDefault,
+    /// One event-specific popup reminder in minutes.
+    At(i64),
+}
+
+fn writable_attendee(attendee: &serde_json::Value) -> serde_json::Value {
+    const WRITABLE: &[&str] = &[
+        "additionalGuests",
+        "comment",
+        "displayName",
+        "email",
+        "id",
+        "optional",
+        "resource",
+        "responseStatus",
+    ];
+    let Some(fields) = attendee.as_object() else {
+        return attendee.clone();
+    };
+    serde_json::Value::Object(
+        fields
+            .iter()
+            .filter(|(name, _)| WRITABLE.contains(&name.as_str()))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect(),
+    )
+}
+
+fn writable_google_patch(mut patch: serde_json::Value) -> serde_json::Value {
+    if let Some(attendees) = patch.get_mut("attendees").and_then(serde_json::Value::as_array_mut) {
+        *attendees = attendees.iter().map(writable_attendee).collect();
+    }
+    patch
+}
+
+fn deserialize_reminder_minutes<'de, D>(deserializer: D) -> Result<ReminderMinutes, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<i64>::deserialize(deserializer)? {
+        Some(minutes) => ReminderMinutes::At(minutes),
+        None => ReminderMinutes::CalendarDefault,
+    })
 }
 
 fn google_body(id: &str, input: &EventInput) -> serde_json::Value {
@@ -146,7 +202,11 @@ fn google_body(id: &str, input: &EventInput) -> serde_json::Value {
             }
         }
     }
-    if let Some(att) = &input.attendees {
+    if let Some(attendees) = &input.attendee_details {
+        body["attendees"] = serde_json::json!(
+            attendees.iter().map(writable_attendee).collect::<Vec<_>>()
+        );
+    } else if let Some(att) = &input.attendees {
         body["attendees"] = serde_json::json!(att
             .iter()
             .map(|e| serde_json::json!({ "email": e }))
@@ -156,15 +216,23 @@ fn google_body(id: &str, input: &EventInput) -> serde_json::Value {
         body["transparency"] = serde_json::json!(t);
     }
     if let Some(v) = &input.visibility {
-        if v != "default" {
-            body["visibility"] = serde_json::json!(v);
-        }
+        body["visibility"] = serde_json::json!(v);
     }
-    if let Some(mins) = input.reminder_minutes {
-        body["reminders"] = serde_json::json!({
-            "useDefault": false,
-            "overrides": [{ "method": "popup", "minutes": mins }]
-        });
+    if let Some(reminders) = &input.reminders {
+        body["reminders"] = reminders.clone();
+    } else {
+        match input.reminder_minutes {
+            ReminderMinutes::Unchanged => {}
+            ReminderMinutes::CalendarDefault => {
+                body["reminders"] = serde_json::json!({ "useDefault": true });
+            }
+            ReminderMinutes::At(mins) => {
+                body["reminders"] = serde_json::json!({
+                    "useDefault": false,
+                    "overrides": [{ "method": "popup", "minutes": mins }]
+                });
+            }
+        }
     }
     if input.with_meet == Some(true) {
         body["conferenceData"] = serde_json::json!({
@@ -175,6 +243,13 @@ fn google_body(id: &str, input: &EventInput) -> serde_json::Value {
         });
     }
     body
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CountSeriesSplit {
+    original_recurrence: String,
+    selected_original_start: serde_json::Value,
 }
 
 pub(crate) fn do_create_event(
@@ -407,6 +482,51 @@ fn delete_event(
     do_delete_event(&app, &app_state, calendar_id, event_id)
 }
 
+/// Re-enable a previously deleted occurrence without turning it into a new
+/// standalone event. Google retains cancelled recurring exceptions by id, so
+/// PATCHing their status restores membership in the original series.
+pub(crate) fn do_restore_recurring_occurrence(
+    app: &AppHandle,
+    app_state: &AppState,
+    event: Event,
+) -> CmdResult<()> {
+    if event.recurring_event_id.is_none() {
+        return Err("event is not a recurring occurrence".into());
+    }
+    let calendar_id = event.calendar_id.clone();
+    let event_id = event.id.clone();
+    let status = if event.status == "cancelled" {
+        "confirmed".to_string()
+    } else {
+        event.status.clone()
+    };
+    app_state
+        .db(|db| {
+            db.upsert_event(&event)?;
+            db.enqueue_op(
+                &calendar_id,
+                &event_id,
+                OpKind::Patch,
+                Some(&serde_json::json!({ "status": status })),
+                None,
+            )?;
+            Ok(())
+        })
+        .map_err(err_str)?;
+    let _ = app.emit("db-changed", ());
+    app_state.kick_sync(SyncKick::Calendars(vec![calendar_id]));
+    Ok(())
+}
+
+#[tauri::command]
+fn restore_recurring_occurrence(
+    app: AppHandle,
+    app_state: State<AppState>,
+    event: Event,
+) -> CmdResult<()> {
+    do_restore_recurring_occurrence(&app, &app_state, event)
+}
+
 pub(crate) fn do_add_calendar(
     app: &AppHandle,
     app_state: &AppState,
@@ -464,31 +584,6 @@ async fn off_main<T: Send + 'static>(
     .map_err(err_str)?
 }
 
-/// `UNTIL=` of an RRULE as a comparable UTC instant (date-only = that day's end).
-fn rule_until(recurrence: &[String]) -> Option<chrono::DateTime<chrono::Utc>> {
-    use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
-    let rule = recurrence.iter().find(|r| r.starts_with("RRULE"))?;
-    let v = rule.split(';').find_map(|p| p.strip_prefix("UNTIL").map(|x| x.trim_start_matches([':', '='])))?;
-    if let Ok(t) = NaiveDateTime::parse_from_str(v, "%Y%m%dT%H%M%SZ") {
-        return Some(Utc.from_utc_datetime(&t));
-    }
-    let d = NaiveDate::parse_from_str(v, "%Y%m%d").ok()?;
-    Some(Utc.from_utc_datetime(&d.and_hms_opt(23, 59, 59)?))
-}
-
-/// When an instance was scheduled by its series (originalStartTime), in UTC.
-fn original_start(e: &Event) -> Option<chrono::DateTime<chrono::Utc>> {
-    use chrono::{NaiveDate, TimeZone, Utc};
-    let o = e.raw.as_ref().map(|r| &r["originalStartTime"]);
-    let dt = o.and_then(|o| o["dateTime"].as_str()).or((!e.all_day).then_some(e.start.as_str()));
-    if let Some(t) = dt.and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()) {
-        return Some(t.with_timezone(&Utc));
-    }
-    let d = o.and_then(|o| o["date"].as_str()).unwrap_or(&e.start);
-    let d = NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()?;
-    Some(Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0)?))
-}
-
 /// Mirror a series-master change onto the local instances right away, so the
 /// screen shows the result instead of the old series until a sync pass pulls
 /// Google's regenerated instances (which replace these rows in one step).
@@ -498,38 +593,19 @@ fn apply_series_locally(
     master_id: &str,
     patch: &serde_json::Value,
     destination: Option<&str>,
+    previous_start: Option<&str>,
 ) -> sync_core::Result<()> {
-    let until = patch["recurrence"].as_array().and_then(|r| {
-        rule_until(&r.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>())
-    });
-    for mut inst in db.list_series_instances(calendar_id, master_id)? {
-        if let (Some(until), Some(at)) = (until, original_start(&inst)) {
-            if at > until {
-                db.delete_event(calendar_id, &inst.id)?;
-                continue;
-            }
-        }
-        let mut changed = false;
-        if let Some(v) = patch["summary"].as_str() {
-            inst.summary = v.to_string();
-            changed = true;
-        }
-        for (key, field) in [("description", &mut inst.description), ("location", &mut inst.location)] {
-            if let Some(v) = patch.get(key) {
-                *field = v.as_str().map(String::from);
-                changed = true;
-            }
-        }
-        if let Some(dest) = destination {
-            db.delete_event(calendar_id, &inst.id)?;
-            inst.calendar_id = dest.to_string();
-            changed = true;
-        }
-        if changed {
-            db.upsert_event(&inst)?;
-        }
-    }
-    Ok(())
+    sync_core::series::apply_locally(db, calendar_id, master_id, patch, destination, previous_start)
+}
+
+fn restore_series_locally(
+    db: &sync_core::db::Db,
+    calendar_id: &str,
+    master_id: &str,
+    destination: Option<&str>,
+    previous: &[Event],
+) -> sync_core::Result<()> {
+    sync_core::series::restore_locally(db, calendar_id, master_id, destination, previous)
 }
 
 #[tauri::command]
@@ -570,20 +646,64 @@ async fn update_series_master(
     master_id: String,
     patch: serde_json::Value,
     destination_id: Option<String>,
+    previous_start: Option<String>,
 ) -> CmdResult<()> {
     off_main(app, move |app, st| {
+        // Keep the full patch for the local optimistic snapshot (opaque
+        // attendee fields may be needed to round-trip data the editor cannot
+        // represent), but send only writable attendee fields to Google.
+        let google_patch = writable_google_patch(patch.clone());
         let destination = destination_id.filter(|d| *d != calendar_id);
-        let client = st.google_client().map_err(err_str)?;
         let _gate = st.sync_gate.lock().unwrap_or_else(|p| p.into_inner());
-        if patch.as_object().map_or(false, |o| !o.is_empty()) {
-            client.patch_event(&calendar_id, &master_id, &patch, None).map_err(err_str)?;
-        }
-        if let Some(dest) = &destination {
-            client.move_event(&calendar_id, &master_id, dest).map_err(err_str)?;
-        }
-        st.db(|db| db.in_transaction(|| apply_series_locally(db, &calendar_id, &master_id, &patch, destination.as_deref())))
+        let previous = st
+            .db(|db| db.list_series_instances(&calendar_id, &master_id))
             .map_err(err_str)?;
+        st.db(|db| {
+            db.in_transaction(|| {
+                apply_series_locally(
+                    db,
+                    &calendar_id,
+                    &master_id,
+                    &patch,
+                    destination.as_deref(),
+                    previous_start.as_deref(),
+                )
+            })
+        })
+        .map_err(err_str)?;
+        // Publish the locally-applied series before doing any network I/O.
+        // Google can take seconds to PATCH a master; that latency must not
+        // delay the visible change.
         let _ = app.emit("db-changed", ());
+
+        let remote = (|| -> CmdResult<()> {
+            let client = st.google_client().map_err(err_str)?;
+            if google_patch.as_object().map_or(false, |o| !o.is_empty()) {
+                client.patch_event(&calendar_id, &master_id, &google_patch, None).map_err(err_str)?;
+            }
+            if let Some(dest) = &destination {
+                client.move_event(&calendar_id, &master_id, dest).map_err(err_str)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = remote {
+            let rollback = st.db(|db| {
+                db.in_transaction(|| {
+                    restore_series_locally(
+                        db,
+                        &calendar_id,
+                        &master_id,
+                        destination.as_deref(),
+                        &previous,
+                    )
+                })
+            });
+            if let Err(rollback_error) = rollback {
+                tracing::error!("series optimistic rollback failed: {rollback_error}");
+            }
+            let _ = app.emit("db-changed", ());
+            return Err(error);
+        }
         st.kick_sync(SyncKick::Calendars([Some(calendar_id), destination].into_iter().flatten().collect()));
         Ok(())
     })
@@ -597,7 +717,7 @@ async fn move_series_master(
     master_id: String,
     destination_id: String,
 ) -> CmdResult<()> {
-    update_series_master(app, calendar_id, master_id, serde_json::json!({}), Some(destination_id)).await
+    update_series_master(app, calendar_id, master_id, serde_json::json!({}), Some(destination_id), None).await
 }
 
 /// "This and following": end the old series before this occurrence and start
@@ -605,9 +725,10 @@ async fn move_series_master(
 /// kicked by the first pulled the old series' cancelled tail before the new
 /// series existed, so the rest of the series vanished from view until the
 /// next pass brought it back. The truncate goes to Google under the sync
-/// gate; the new series is created locally (a placeholder for this
-/// occurrence) and queued, so the next pass pushes it and pulls both changes
-/// together. Returns the new series' id.
+/// gate. Locally truncate the old rows and show a placeholder for the new
+/// series first; only queue its insert after Google's truncate succeeds, so
+/// a sync pass cannot publish the new master while the old one still includes
+/// the same occurrences. Returns the new series' id.
 #[tauri::command]
 async fn split_series(
     app: AppHandle,
@@ -615,16 +736,91 @@ async fn split_series(
     master_id: String,
     recurrence: Vec<String>,
     input: EventInput,
+    count_split: Option<CountSeriesSplit>,
 ) -> CmdResult<String> {
     off_main(app, move |app, st| {
         let patch = serde_json::json!({ "recurrence": recurrence });
-        let client = st.google_client().map_err(err_str)?;
         let _gate = st.sync_gate.lock().unwrap_or_else(|p| p.into_inner());
-        client.patch_event(&calendar_id, &master_id, &patch, None).map_err(err_str)?;
-        st.db(|db| db.in_transaction(|| apply_series_locally(db, &calendar_id, &master_id, &patch, None)))
-            .map_err(err_str)?;
         let target = input.calendar_id.clone();
-        let id = do_create_event(app, st, input)?;
+        let previous = st
+            .db(|db| db.list_series_instances(&calendar_id, &master_id))
+            .map_err(err_str)?;
+        let id = generate_event_id();
+        let placeholder = Event {
+            id: id.clone(),
+            calendar_id: target.clone(),
+            etag: None,
+            summary: input.summary.clone(),
+            description: input.description.clone(),
+            location: input.location.clone(),
+            start: input.start.clone(),
+            end: input.end.clone(),
+            all_day: input.all_day,
+            timezone: None,
+            status: "confirmed".into(),
+            recurrence: None,
+            recurring_event_id: None,
+            conference_url: None,
+            updated: None,
+            raw: None,
+        };
+        st.db(|db| {
+            db.in_transaction(|| {
+                apply_series_locally(db, &calendar_id, &master_id, &patch, None, None)?;
+                db.upsert_event(&placeholder)
+            })
+        })
+        .map_err(err_str)?;
+        let _ = app.emit("db-changed", ());
+
+        // The calendar now shows both halves of the split. Only after the
+        // remote truncate succeeds do we queue the new master for insertion;
+        // otherwise a sync pass could publish it while the old master still
+        // includes the same occurrences.
+        let mut input = input;
+        let body = st.google_client().map_err(err_str).and_then(|client| {
+            if let Some(count_split) = count_split {
+                let instances = client
+                    .list_series_instances(&calendar_id, &master_id)
+                    .map_err(err_str)?;
+                let rule = sync_core::series::count_split_recurrence(
+                    &count_split.original_recurrence,
+                    &count_split.selected_original_start,
+                    &instances,
+                )
+                .map_err(err_str)?;
+                input.recurrence = Some(vec![rule]);
+            }
+            let body = google_body(&id, &input);
+            client.patch_event(&calendar_id, &master_id, &patch, None).map_err(err_str)?;
+            Ok(body)
+        });
+        let body = match body {
+            Ok(body) => body,
+            Err(error) => {
+                let rollback = st.db(|db| {
+                    db.in_transaction(|| {
+                        sync_core::series::restore_locally(
+                            db,
+                            &calendar_id,
+                            &master_id,
+                            None,
+                            &previous,
+                        )?;
+                        db.delete_event(&target, &id)?;
+                        db.remove_ops_for_event(&target, &id)
+                    })
+                });
+                if let Err(rollback_error) = rollback {
+                    tracing::error!("series split rollback failed: {rollback_error}");
+                }
+                let _ = app.emit("db-changed", ());
+                return Err(error);
+            }
+        };
+        st.db(|db| db.enqueue_op(&target, &id, OpKind::Insert, Some(&body), None))
+            .map_err(err_str)?;
+        let _ = app.emit("db-changed", ());
         st.kick_sync(SyncKick::Calendars(if target == calendar_id { vec![target] } else { vec![calendar_id, target] }));
         Ok(id)
     })
@@ -673,6 +869,13 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // the app coming to the front right after the hourly nudge is the
+        // nudge being answered (clicking a banner brings its app forward)
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Focused(true) = event {
+                notify::answer_nudge(window.app_handle());
+            }
+        })
         .setup(|app| {
             let state = AppState::init(app.handle().clone())?;
             let db_path = state.db_path.clone();
@@ -697,6 +900,7 @@ pub fn run() {
             update_event,
             set_event_note,
             delete_event,
+            restore_recurring_occurrence,
             add_calendar,
             get_series_master,
             get_series_instances,
@@ -709,8 +913,20 @@ pub fn run() {
             log_frontend,
             test_report,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // macOS: clicking the nudge (or the Dock icon) reopens the app;
+            // bring the window back even if it was closed or minimized
+            if let tauri::RunEvent::Reopen { .. } = event {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.unminimize();
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+                notify::answer_nudge(app);
+            }
+        });
 }
 
 #[cfg(test)]
@@ -758,13 +974,82 @@ mod series_tests {
         v
     }
 
+    fn event_input(reminder_field: Option<serde_json::Value>) -> EventInput {
+        let mut value = json!({
+            "calendar_id": "cal",
+            "summary": "Reminder semantics",
+            "start": "2026-10-14T10:00:00-04:00",
+            "end": "2026-10-14T11:00:00-04:00",
+            "all_day": false,
+            "visibility": "default",
+        });
+        if let Some(reminder_field) = reminder_field {
+            value["reminder_minutes"] = reminder_field;
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
     #[test]
-    fn until_parses_both_rfc5545_forms() {
-        let t = rule_until(&["RRULE:FREQ=DAILY;UNTIL=20261013T155959Z".into()]).unwrap();
-        assert_eq!(t.to_rfc3339(), "2026-10-13T15:59:59+00:00");
-        let d = rule_until(&["RRULE:FREQ=DAILY;UNTIL=20261013".into()]).unwrap();
-        assert_eq!(d.to_rfc3339(), "2026-10-13T23:59:59+00:00");
-        assert!(rule_until(&["RRULE:FREQ=DAILY;COUNT=3".into()]).is_none());
+    fn omitted_reminders_are_unchanged_but_null_resets_to_calendar_default() {
+        let omitted = event_input(None);
+        assert_eq!(omitted.reminder_minutes, ReminderMinutes::Unchanged);
+        assert!(google_body("event", &omitted).get("reminders").is_none());
+
+        let reset = event_input(Some(serde_json::Value::Null));
+        let body = google_body("event", &reset);
+        assert_eq!(reset.reminder_minutes, ReminderMinutes::CalendarDefault);
+        assert_eq!(body["reminders"], json!({ "useDefault": true }));
+        assert_eq!(body["visibility"], "default");
+
+        let mut clear_attendees = event_input(None);
+        clear_attendees.attendee_details = Some(vec![]);
+        assert_eq!(google_body("event", &clear_attendees)["attendees"], json!([]));
+
+        let mut restore = event_input(None);
+        restore.attendee_details = Some(vec![json!({
+            "email": "accepted@example.invalid",
+            "responseStatus": "accepted",
+            "displayName": "Accepted attendee",
+            "optional": true,
+            "organizer": false,
+            "self": true,
+            "asyncOperation": "inProgress"
+        })]);
+        restore.reminders = Some(json!({
+            "useDefault": false,
+            "overrides": [
+                { "method": "popup", "minutes": 10 },
+                { "method": "email", "minutes": 1440 }
+            ]
+        }));
+        let body = google_body("event", &restore);
+        assert_eq!(body["attendees"][0]["responseStatus"], "accepted");
+        assert_eq!(body["attendees"][0]["displayName"], "Accepted attendee");
+        assert_eq!(body["attendees"][0]["optional"], true);
+        assert!(body["attendees"][0].get("organizer").is_none());
+        assert!(body["attendees"][0].get("self").is_none());
+        assert!(body["attendees"][0].get("asyncOperation").is_none());
+        assert_eq!(body["reminders"]["overrides"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn recurring_patch_keeps_opaque_local_attendees_but_strips_read_only_wire_fields() {
+        let local_patch = json!({
+            "attendees": [{
+                "id": "opaque-attendee",
+                "displayName": "Private guest",
+                "responseStatus": "accepted",
+                "self": true,
+                "asyncOperation": "inProgress"
+            }]
+        });
+        let google_patch = writable_google_patch(local_patch.clone());
+        assert_eq!(local_patch["attendees"][0]["id"], "opaque-attendee");
+        assert_eq!(google_patch["attendees"][0], json!({
+            "id": "opaque-attendee",
+            "displayName": "Private guest",
+            "responseStatus": "accepted"
+        }));
     }
 
     #[test]
@@ -772,19 +1057,84 @@ mod series_tests {
         // "this and following" from the 13th: UNTIL is one second before it
         let db = series();
         let patch = json!({ "recurrence": ["RRULE:FREQ=DAILY;UNTIL=20261013T155959Z"] });
-        apply_series_locally(&db, "cal", "m", &patch, None).unwrap();
+        apply_series_locally(&db, "cal", "m", &patch, None, None).unwrap();
         assert_eq!(ids(&db, "cal"), vec!["m_1"]);
     }
 
     #[test]
     fn a_series_move_and_rename_show_before_any_sync() {
         let db = series();
-        apply_series_locally(&db, "cal", "m", &json!({ "summary": "Daily sync" }), Some("work")).unwrap();
+        apply_series_locally(&db, "cal", "m", &json!({ "summary": "Daily sync" }), Some("work"), None).unwrap();
         assert!(ids(&db, "cal").is_empty(), "instances left behind in the old calendar");
         let moved = db.list_series_instances("work", "m").unwrap();
         assert_eq!(moved.len(), 3);
         assert!(moved.iter().all(|e| e.summary == "Daily sync"));
         // fields the patch doesn't name are left alone (the occurrence's note)
         assert!(moved.iter().all(|e| e.description.as_deref() == Some("[DRILL] occurrence note")));
+    }
+
+    #[test]
+    fn series_time_changes_are_visible_locally_before_google_sync() {
+        use chrono::{Duration, Timelike};
+
+        let db = series();
+        // read times on the series' own clock (Pacific, -07:00 in October),
+        // not the host's, so the test holds on any machine
+        let pacific = chrono::FixedOffset::west_opt(7 * 3600).unwrap();
+        let local = |value: &str| {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .unwrap()
+                .with_timezone(&pacific)
+        };
+        let before = local("2026-10-13T09:00:00-07:00");
+        let patch = json!({
+            "start": { "dateTime": "2026-10-12T11:00:00-07:00", "timeZone": "America/Los_Angeles" },
+            "end": { "dateTime": "2026-10-12T12:30:00-07:00", "timeZone": "America/Los_Angeles" },
+            "transparency": "transparent",
+            "visibility": "private",
+            "reminders": { "useDefault": false, "overrides": [{ "method": "popup", "minutes": 15 }] },
+        });
+        apply_series_locally(
+            &db,
+            "cal",
+            "m",
+            &patch,
+            None,
+            Some("2026-10-12T09:00:00-07:00"),
+        )
+        .unwrap();
+
+        let second = db.get_event("cal", "m_2").unwrap().unwrap();
+        let after = local(&second.start);
+        let after_end = local(&second.end);
+        assert_eq!(after.naive_local(), before.naive_local() + Duration::hours(2));
+        assert_eq!(after.hour(), 11);
+        assert_eq!(after_end.naive_local() - after.naive_local(), Duration::minutes(90));
+        let raw = second.raw.unwrap();
+        assert_eq!(raw["transparency"], "transparent");
+        assert_eq!(raw["visibility"], "private");
+        assert_eq!(raw["reminders"]["overrides"][0]["minutes"], 15);
+    }
+
+    #[test]
+    fn all_day_series_time_shift_changes_dates_locally() {
+        let db = series();
+        let patch = json!({
+            "start": { "date": "2026-10-14" },
+            "end": { "date": "2026-10-15" },
+        });
+        apply_series_locally(
+            &db,
+            "cal",
+            "m",
+            &patch,
+            None,
+            Some("2026-10-12T09:00:00-07:00"),
+        )
+        .unwrap();
+        let second = db.get_event("cal", "m_2").unwrap().unwrap();
+        assert!(second.all_day);
+        assert_eq!(second.start, "2026-10-15");
+        assert_eq!(second.end, "2026-10-16");
     }
 }

@@ -58,16 +58,68 @@ export function useEvents(
   const endKey = rangeEnd.getTime();
   useEffect(() => {
     if (!backend) return;
+    let latestRequest = 0;
     // Query strings: timed events are RFC3339, all-day are YYYY-MM-DD; both
     // compare lexicographically within kind. Pad the window by a day each side
     // so all-day and cross-midnight events at the edges are included.
     const s = toLocalISO(addDays(new Date(startKey), -1));
     const e = toLocalISO(addDays(new Date(endKey), 1));
-    const load = () => backend.listEvents(s, e).then(setEvents);
+    const load = () => {
+      const request = ++latestRequest;
+      void backend.listEvents(s, e).then((next) => {
+        // Panning can change the range while an earlier DB query is still in
+        // flight. A late response must not replace events for the newer view;
+        // the same guard also orders overlapping db-changed refreshes.
+        if (request === latestRequest) setEvents((previous) => reuseUnchangedEvents(previous, next));
+      });
+    };
     load();
-    return backend.onDbChanged(load);
+    const unsubscribe = backend.onDbChanged(() => load());
+    return () => {
+      latestRequest++;
+      unsubscribe();
+    };
   }, [backend, startKey, endKey]);
   return events;
+}
+
+function reuseUnchangedEvents(previous: CalendarEvent[], next: CalendarEvent[]): CalendarEvent[] {
+  if (previous.length === 0) return next;
+  const previousByKey = new Map(previous.map((event) => [`${event.calendar_id}/${event.id}`, event]));
+  let unchanged = previous.length === next.length;
+  const stable = next.map((event, index) => {
+    const old = previousByKey.get(`${event.calendar_id}/${event.id}`);
+    if (!old || !sameEventSnapshot(old, event)) {
+      unchanged = false;
+      return event;
+    }
+    if (old !== previous[index]) unchanged = false;
+    return old;
+  });
+  return unchanged ? previous : stable;
+}
+
+function sameEventSnapshot(a: CalendarEvent, b: CalendarEvent): boolean {
+  if (a === b) return true;
+  const sameRecurrence = a.recurrence === b.recurrence || (
+    a.recurrence != null && b.recurrence != null &&
+    a.recurrence.length === b.recurrence.length &&
+    a.recurrence.every((rule, index) => rule === b.recurrence![index])
+  );
+  let sameRaw = a.raw === b.raw;
+  if (!sameRaw) {
+    try {
+      sameRaw = JSON.stringify(a.raw) === JSON.stringify(b.raw);
+    } catch {
+      sameRaw = false;
+    }
+  }
+  return a.id === b.id && a.calendar_id === b.calendar_id && a.etag === b.etag &&
+    a.summary === b.summary && a.description === b.description && a.location === b.location &&
+    a.start === b.start && a.end === b.end && a.all_day === b.all_day &&
+    a.timezone === b.timezone && a.status === b.status && sameRecurrence &&
+    a.recurring_event_id === b.recurring_event_id && a.conference_url === b.conference_url &&
+    a.updated === b.updated && sameRaw;
 }
 
 export function useVisibleEvents(events: CalendarEvent[], calendars: Calendar[]): CalendarEvent[] {

@@ -195,6 +195,17 @@ fn dispatch(app: &AppHandle, req: &Value) -> Result<Value, String> {
             let (title, rows) = crate::notify::TRAY_STATE.lock().unwrap().clone();
             Ok(json!({ "title": title, "rows": rows }))
         }
+        // the hourly nudge, now (debug builds only): the banner, then the
+        // window of time in which bringing the app forward answers it
+        "nudge" => {
+            crate::notify::send_nudge(&app, chrono::Local::now());
+            Ok(json!({ "sent": true }))
+        }
+        // what a click on the nudge does once the app is in front
+        "answer_nudge" => {
+            crate::notify::answer_nudge(&app);
+            Ok(json!({ "answered": true }))
+        }
         other => Err(format!("unknown cmd: {other}")),
     }
 }

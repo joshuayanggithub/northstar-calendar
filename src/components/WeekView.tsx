@@ -4,6 +4,7 @@
 // faded past events, persistent draft chip while creating.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import {
   addDays,
   eventDates,
@@ -35,6 +36,9 @@ import type { EventActions } from "./App";
 const DEFAULT_HOUR_PX = 48;
 const SNAP_MIN = 15;
 const DAY_MIN = 24 * 60;
+const MAX_INDEXED_ALL_DAY_DAYS = 31;
+const MAX_INDEXED_TIMED_DAYS = 31;
+const PAN_OVERSCAN_DAYS = 2;
 
 export interface DraftEvent {
   start: Date;
@@ -70,6 +74,16 @@ interface DragState {
  *  Switching by the column under the pointer made a vertical drag of an
  *  event grabbed near its edge hop to the next day on a few px of drift. */
 const DAY_SWITCH_SLACK = 0.2;
+
+function profileRenderStage<T>(id: string, render: () => T): T {
+  if (typeof window === "undefined") return render();
+  const sink = (window as any).__weekRenderStages;
+  if (!Array.isArray(sink)) return render();
+  const started = performance.now();
+  const result = render();
+  sink.push({ id, duration: performance.now() - started });
+  return result;
+}
 
 interface CtxMenu {
   x: number;
@@ -126,6 +140,32 @@ export function WeekView(props: {
   seamStyle?: "scarf" | "rabbet" | "overlay";
 }) {
   const { days, events, calendars } = props;
+  // Development-only React Profiler callbacks are unavailable in the
+  // production build used for frame-budget measurements. Let an opt-in E2E
+  // sink time this component through its layout-effect commit instead; the
+  // normal app does no clock reads or allocations.
+  const hasRenderSink = typeof window !== "undefined" && (
+    Array.isArray((window as any).__weekViewRenderDurations) ||
+    Array.isArray((window as any).__weekViewRenderMarks)
+  );
+  const componentRenderStartedAt = hasRenderSink ? performance.now() : null;
+  const propsRef = useRef(props);
+  propsRef.current = props;
+  useLayoutEffect(() => {
+    if (componentRenderStartedAt === null) return;
+    const commitTime = performance.now();
+    const duration = commitTime - componentRenderStartedAt;
+    const durations = (window as any).__weekViewRenderDurations;
+    if (Array.isArray(durations)) durations.push(duration);
+    const marks = (window as any).__weekViewRenderMarks;
+    if (Array.isArray(marks)) marks.push({
+      startTime: componentRenderStartedAt,
+      commitTime,
+      actualDuration: duration,
+    });
+  });
+  const dayIndexByDateRef = useRef(new Map<number, number>());
+  dayIndexByDateRef.current = new Map(days.map((day, index) => [startOfDay(day).getTime(), index]));
   const adjacentDay = (day: Date, direction: -1 | 1): Date => {
     let next = addDays(day, direction);
     if (props.hideWeekends) {
@@ -133,8 +173,16 @@ export function WeekView(props: {
     }
     return next;
   };
-  const beforeDay = adjacentDay(days[0], -1);
-  const afterDay = adjacentDay(days[days.length - 1], 1);
+  const beforeDays = Array.from({ length: PAN_OVERSCAN_DAYS }, (_, index) => {
+    let day = days[0];
+    for (let count = index; count < PAN_OVERSCAN_DAYS; count++) day = adjacentDay(day, -1);
+    return day;
+  });
+  const afterDays = Array.from({ length: PAN_OVERSCAN_DAYS }, (_, index) => {
+    let day = days[days.length - 1];
+    for (let count = 0; count <= index; count++) day = adjacentDay(day, 1);
+    return day;
+  });
   const pxPerMin = (props.hourPx ?? DEFAULT_HOUR_PX) / 60;
   const gutterW = props.secondaryTz ? 92 : 46;
   const tzLabel = (h: number): string => {
@@ -148,6 +196,42 @@ export function WeekView(props: {
     }
   };
   const gridRef = useRef<HTMLDivElement>(null);
+  // Dense clusters can contain hundreds of rows per day. Keep their full
+  // height and order, but only mount buttons near the vertical viewport;
+  // otherwise WebKit lays out and paints thousands of offscreen descendants
+  // on every horizontal scroll frame.
+  const [rowWindow, setRowWindow] = useState<{ top: number; bottom: number } | null>(null);
+  useLayoutEffect(() => {
+    const grid = gridRef.current;
+    if (!grid) return;
+    let lastVerticalScroll = Number.NaN;
+    const measure = () => {
+      const scrollTop = grid.scrollTop;
+      // Horizontal pans fire scroll events too. They must not measure layout
+      // or schedule React work just to keep a vertical row window unchanged.
+      if (scrollTop === lastVerticalScroll) return;
+      lastVerticalScroll = scrollTop;
+      const body = grid.querySelector<HTMLElement>(".grid-body");
+      if (!body) return;
+      const top = scrollTop - body.offsetTop;
+      const bottom = top + grid.clientHeight;
+      setRowWindow((current) => {
+        if (current && top >= current.top + 120 && bottom <= current.bottom - 120) return current;
+        return { top: top - 240, bottom: bottom + 240 };
+      });
+    };
+    measure();
+    grid.addEventListener("scroll", measure, { passive: true });
+    const observer = new ResizeObserver(() => {
+      lastVerticalScroll = Number.NaN;
+      measure();
+    });
+    observer.observe(grid);
+    return () => {
+      grid.removeEventListener("scroll", measure);
+      observer.disconnect();
+    };
+  }, []);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [ctx, setCtx] = useState<CtxMenu | null>(null);
   // Escape closes the right-click menu (and only that: the selection and the
@@ -165,7 +249,7 @@ export function WeekView(props: {
   }, [ctx]);
   /** the focus-score explanation being hovered: its day and badge position */
   const [scorePop, setScorePop] = useState<{ day: Date; x: number; y: number } | null>(null);
-  const [, forceTick] = useState(0);
+  const [nowTick, forceTick] = useState(0);
 
   useEffect(() => {
     const t = setInterval(() => forceTick((n) => n + 1), 30_000);
@@ -177,13 +261,14 @@ export function WeekView(props: {
   useEffect(() => subscribeRecon(() => bumpRecon((n) => n + 1)), []);
 
   // Notion: a horizontal two-finger swipe slides the day columns under the
-  // pointer, pixel for pixel. Three strips (headers, all-day, body) translate
-  // together with one overscan column per side. Crossing a column width
-  // requests a day shift without forcing a React render inside the wheel
-  // handler. A later wheel event resumes from the same partial-column offset.
+  // pointer, pixel for pixel. The shared weekview scroll surface moves the
+  // header, all-day row, and body together. Crossing a column width requests
+  // a day shift without forcing a React render inside the wheel handler; later
+  // scroll deltas resume from the preserved partial-column offset.
   const dayClipRef = useRef<HTMLDivElement | null>(null);
   const [colPx, setColPx] = useState(0);
   const colPxRef = useRef(1);
+  const measuredColPxRef = useRef(0);
   useEffect(() => {
     const el = dayClipRef.current;
     if (!el) return;
@@ -323,37 +408,16 @@ export function WeekView(props: {
       </svg>
     );
   };
-  const headStripRef = useRef<HTMLDivElement | null>(null);
-  const alldayStripRef = useRef<HTMLDivElement | null>(null);
   const colsStripRef = useRef<HTMLDivElement | null>(null);
   // acc: px the content has been swiped past the RENDERED days[0].
   // pending: day steps already requested from onPan but not rendered yet.
-  // acc only drops by a column in the commit that renders the shifted days
-  // (below); dropping it in the wheel handler painted one frame of the old
-  // days pulled back a whole column at every day boundary (the jitter).
+  // The outer weekview scroll surface moves all three strips together; acc
+  // carries any distance past the one-column overscan while React shifts days.
   const panRef = useRef({ acc: 0, pending: 0 });
-  const panFrameRef = useRef<number | null>(null);
-  const extN = days.length + 2;
-  const paintStripTransform = useCallback(
-    () => {
-      panFrameRef.current = null;
-      // one overscan column per side: while a requested shift is still
-      // rendering, hold at the overscan edge rather than show blank strip
-      const w = colPxRef.current;
-      const shown = Math.max(-w, Math.min(w, panRef.current.acc));
-      const tx = `translate3d(calc(${(-100 / extN).toFixed(4)}% - ${shown}px), 0, 0)`;
-      for (const r of [headStripRef, alldayStripRef, colsStripRef]) {
-        const el = r.current;
-        if (!el) continue;
-        el.style.transform = tx;
-      }
-    },
-    [extN],
-  );
-  const scheduleStripTransform = useCallback(() => {
-    if (panFrameRef.current != null) return;
-    panFrameRef.current = requestAnimationFrame(paintStripTransform);
-  }, [paintStripTransform]);
+  const programmaticScrollLeftRef = useRef<number | null>(null);
+  const observedScrollLeftRef = useRef<number | null>(null);
+  const nativePanRef = useRef(false);
+  const extN = days.length + PAN_OVERSCAN_DAYS * 2;
   // The commit that renders a requested shift takes it out of acc, so the
   // strip's new days and its offset reach the screen in the same frame.
   const firstDay = days[0].getTime();
@@ -378,55 +442,214 @@ export function WeekView(props: {
     if (steps) {
       pan.acc -= steps * colPxRef.current;
       pan.pending -= steps;
+      const grid = gridRef.current;
+      if (grid) {
+        const base = colPxRef.current;
+        grid.scrollLeft = PAN_OVERSCAN_DAYS * base + Math.max(-base, Math.min(base, pan.acc));
+        observedScrollLeftRef.current = grid.scrollLeft;
+        programmaticScrollLeftRef.current = grid.scrollLeft;
+      }
     } else {
       // moved by navigation (Today, arrows, mini-calendar), not the swipe
       pan.acc = 0;
       pan.pending = 0;
+      const grid = gridRef.current;
+      if (grid) {
+        grid.scrollLeft = PAN_OVERSCAN_DAYS * colPxRef.current;
+        pan.acc = grid.scrollLeft - PAN_OVERSCAN_DAYS * colPxRef.current;
+        observedScrollLeftRef.current = grid.scrollLeft;
+        programmaticScrollLeftRef.current = grid.scrollLeft;
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [firstDay]);
   useLayoutEffect(() => {
-    paintStripTransform();
-  });
-  useLayoutEffect(() => {
     panRef.current.acc = 0;
     panRef.current.pending = 0;
-    paintStripTransform();
-  }, [days.length, props.hideWeekends, paintStripTransform]);
-  useEffect(
-    () => () => {
-      if (panFrameRef.current != null) cancelAnimationFrame(panFrameRef.current);
-    },
-    [],
-  );
+    const grid = gridRef.current;
+    if (grid) {
+      const base = PAN_OVERSCAN_DAYS * colPxRef.current;
+      grid.scrollLeft = base;
+      panRef.current.acc = grid.scrollLeft - base;
+      observedScrollLeftRef.current = grid.scrollLeft;
+      programmaticScrollLeftRef.current = grid.scrollLeft;
+    }
+  }, [days.length, props.hideWeekends]);
+  useLayoutEffect(() => {
+    const grid = gridRef.current;
+    if (!grid || colPx <= 0) return;
+    const previous = measuredColPxRef.current;
+    const pan = panRef.current;
+    if (previous <= 0) {
+      grid.scrollLeft = PAN_OVERSCAN_DAYS * colPx;
+      pan.acc = grid.scrollLeft - PAN_OVERSCAN_DAYS * colPx;
+    } else {
+      const nextBase = PAN_OVERSCAN_DAYS * colPx;
+      const residual = pan.acc * (colPx / previous);
+      grid.scrollLeft = nextBase + residual;
+      pan.acc = residual;
+    }
+    observedScrollLeftRef.current = grid.scrollLeft;
+    programmaticScrollLeftRef.current = grid.scrollLeft;
+    measuredColPxRef.current = colPx;
+  }, [colPx]);
   useEffect(() => {
     const el = gridRef.current;
     const onPan = props.onPan;
     if (!el || !onPan) return;
+    observedScrollLeftRef.current = el.scrollLeft;
+    let horizontalLocked = false;
+    let lastWheelAt = 0;
+    let pendingDx = 0;
+    let pendingDxStartedAt = 0;
+    let leadInExpired = false;
+    let wheelListenerPassive = false;
+    let nativePanTimer: number | null = null;
+    let setWheelPassiveMode: (passive: boolean) => void = () => {};
+    let resetNativePanTimer: () => void = () => {};
     const onWheel = (e: WheelEvent) => {
-      if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return; // vertical scroll
-      e.preventDefault(); // keep WebKit from treating it as history nav
-      // Wheel handlers can arrive much faster than the display refresh. The
-      // old path forced a layout read and wrote three transforms for every
-      // packet, which is especially expensive in WebKitGTK. ResizeObserver
-      // owns the cached width; visual writes are coalesced to one per frame.
-      const unit = e.deltaMode === WheelEvent.DOM_DELTA_LINE
+      const now = performance.now();
+      if (now - lastWheelAt > 180) {
+        horizontalLocked = false;
+        pendingDx = 0;
+        pendingDxStartedAt = 0;
+        leadInExpired = false;
+        nativePanRef.current = false;
+        setWheelPassiveMode(false);
+      }
+      lastWheelAt = now;
+      if (e.isTrusted && nativePanRef.current) {
+        // Keep the remainder of a horizontal trackpad stream on the browser's
+        // native scroller, including small cross-axis jitter. The idle timer
+        // restores axis filtering for a later gesture.
+        resetNativePanTimer();
+        return;
+      }
+      const unitX = e.deltaMode === WheelEvent.DOM_DELTA_LINE
         ? 16
         : e.deltaMode === WheelEvent.DOM_DELTA_PAGE
           ? el.clientWidth
           : 1;
+      const unitY = e.deltaMode === WheelEvent.DOM_DELTA_LINE
+        ? 16
+        : e.deltaMode === WheelEvent.DOM_DELTA_PAGE
+          ? el.clientHeight
+          : 1;
+      let deltaX = e.deltaX * unitX;
+      if (!horizontalLocked) {
+        // Preserve X movement from ambiguous lead-in packets. Once a
+        // horizontally dominant sample establishes intent, replay that X
+        // displacement and keep the axis locked through later cross-axis noise.
+        // Do not let a prolonged vertical/diagonal stream accumulate that X
+        // indefinitely and turn a later horizontal gesture into a jump.
+        if (pendingDxStartedAt === 0) pendingDxStartedAt = now;
+        if (!leadInExpired && now - pendingDxStartedAt <= 100) {
+          pendingDx += deltaX;
+        } else {
+          pendingDx = 0;
+          leadInExpired = true;
+        }
+        if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) {
+          // Preserve vertical intent when a mixed packet is still ambiguous;
+          // don't let small X noise become a horizontal jump.
+          if (e.deltaX !== 0) {
+            e.preventDefault();
+            el.scrollTop += e.deltaY * unitY;
+          }
+          return;
+        }
+        horizontalLocked = true;
+        if (!leadInExpired) deltaX = pendingDx;
+        pendingDx = 0;
+      }
       const pan = panRef.current;
-      pan.acc += e.deltaX * unit;
+      const base = colPxRef.current;
+      const nativeDeltaLimit = Math.min(base / 2, 64);
+      if (e.isTrusted && e.deltaY === 0 && Math.abs(deltaX) < nativeDeltaLimit) {
+        // This is a clear, low-amplitude horizontal trackpad stream. Carry
+        // buffered lead-in X once, then let subsequent packets scroll natively
+        // without a cancelable listener on the hot path.
+        const currentDeltaX = e.deltaX * unitX;
+        const carry = deltaX - currentDeltaX;
+        if (carry !== 0) {
+          el.scrollLeft += carry;
+          pan.acc += carry;
+          const want = Math.trunc(pan.acc / base);
+          if (want !== pan.pending) {
+            onPan(want - pan.pending);
+            pan.pending = want;
+          }
+          observedScrollLeftRef.current = el.scrollLeft;
+          programmaticScrollLeftRef.current = el.scrollLeft;
+        }
+        nativePanRef.current = true;
+        resetNativePanTimer();
+        setWheelPassiveMode(true);
+        return;
+      }
+      e.preventDefault(); // keep WebKit from treating the custom path as history navigation
+      if (nativePanRef.current) {
+        // Account for coalesced native scroll before returning to custom
+        // handling, so no pixels are replayed or dropped at the transition.
+        const observed = observedScrollLeftRef.current ?? el.scrollLeft;
+        pan.acc += el.scrollLeft - observed;
+        observedScrollLeftRef.current = el.scrollLeft;
+        nativePanRef.current = false;
+        setWheelPassiveMode(false);
+      }
+      pan.acc += deltaX;
       const want = Math.trunc(pan.acc / colPxRef.current);
       if (want !== pan.pending) {
         onPan(want - pan.pending);
         pan.pending = want;
       }
-      scheduleStripTransform();
+      el.scrollLeft = PAN_OVERSCAN_DAYS * base + Math.max(-base, Math.min(base, pan.acc));
+      observedScrollLeftRef.current = el.scrollLeft;
+      programmaticScrollLeftRef.current = el.scrollLeft;
+    };
+    setWheelPassiveMode = (passive) => {
+      if (wheelListenerPassive === passive) return;
+      el.removeEventListener("wheel", onWheel);
+      el.addEventListener("wheel", onWheel, { passive });
+      wheelListenerPassive = passive;
+    };
+    resetNativePanTimer = () => {
+      if (nativePanTimer != null) window.clearTimeout(nativePanTimer);
+      nativePanTimer = window.setTimeout(() => {
+        nativePanTimer = null;
+        nativePanRef.current = false;
+        setWheelPassiveMode(false);
+      }, 180);
+    };
+    const onScroll = () => {
+      const actual = el.scrollLeft;
+      const expected = programmaticScrollLeftRef.current;
+      if (expected != null && Math.abs(actual - expected) < 0.01) {
+        programmaticScrollLeftRef.current = null;
+        observedScrollLeftRef.current = actual;
+        return;
+      }
+      programmaticScrollLeftRef.current = null;
+      const pan = panRef.current;
+      const observed = observedScrollLeftRef.current ?? actual;
+      // Add only user-driven scroll deltas. Rebuilding acc from scrollLeft
+      // loses the fractional remainder whenever the browser quantizes a
+      // programmatic rebase to an integer offset.
+      pan.acc += actual - observed;
+      observedScrollLeftRef.current = actual;
+      const want = Math.trunc(pan.acc / colPxRef.current);
+      if (want === pan.pending) return;
+      onPan(want - pan.pending);
+      pan.pending = want;
     };
     el.addEventListener("wheel", onWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onWheel);
-  }, [props.onPan, scheduleStripTransform]);
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      if (nativePanTimer != null) window.clearTimeout(nativePanTimer);
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("scroll", onScroll);
+    };
+  }, [props.onPan]);
 
   const nowDate = now();
   const todayIdx = days.findIndex((d) => isSameDay(d, nowDate));
@@ -447,26 +670,121 @@ export function WeekView(props: {
     [events],
   );
 
+  // Index once per event snapshot instead of scanning the whole fetched
+  // window each time panning exposes a new day. This matters when a 3-week
+  // prefetch contains thousands of events but the visible day has only a few.
+  const dayItemsIndex = useMemo(() => profileRenderStage("day-items-index", () => {
+    const byDay = new Map<number, Array<{ item: CalendarEvent; startMin: number; endMin: number }>>();
+    const longEvents: Array<{ item: CalendarEvent; start: Date; end: Date }> = [];
+    const order = new Map<CalendarEvent, number>();
+    for (let position = 0; position < timed.length; position++) {
+      const e = timed[position];
+      const { start, end } = eventDates(e);
+      if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime())) continue;
+      const firstDay = startOfDay(start);
+      const lastDay = end > start
+        ? startOfDay(new Date(end.getTime() - 1))
+        : end.getTime() === start.getTime() && start.getTime() !== firstDay.getTime()
+          ? firstDay
+          : null;
+      if (!lastDay) continue;
+      order.set(e, position);
+      if (end.getTime() - start.getTime() > (MAX_INDEXED_TIMED_DAYS + 1) * DAY_MIN * 60_000) {
+        // Keep malformed or unusually long timed events from allocating one
+        // index entry per day; check these rare spans only for rendered days.
+        longEvents.push({ item: e, start, end });
+        continue;
+      }
+      for (let day = firstDay; day <= lastDay; day = addDays(day, 1)) {
+        const key = day.getTime();
+        const dayEnd = addDays(day, 1);
+        if (end <= day || start >= dayEnd) continue;
+        const items = byDay.get(key) ?? [];
+        items.push({
+          item: e,
+          startMin: key === firstDay.getTime() ? minutesOfDay(start) : 0,
+          endMin: key === lastDay.getTime() && end < dayEnd
+            ? Math.max(minutesOfDay(end), 1)
+            : DAY_MIN,
+        });
+        byDay.set(key, items);
+      }
+    }
+    return { byDay, longEvents, order };
+  }), [timed]);
+
   // Per-day layout + header-score caches: swiping shifts the visible window
   // but a given day's packing doesn't change, so cache by day as long as the
   // inputs (events identity, zoom, star version via forceTick) are unchanged.
   const layoutCacheRef = useRef<{
     deps: unknown[];
+    dayItems: Map<number, Array<{ item: CalendarEvent; startMin: number; endMin: number }>>;
     pack: Map<number, ReturnType<typeof packDayWithSleeves<CalendarEvent>>>;
     text: Map<number, Map<CalendarEvent, PlacedText> | null>;
+    clusters: Map<number, { deps: unknown[]; nodes: React.ReactNode[] }>;
+    clusterTimes: Map<number, {
+      deps: unknown[];
+      signature: string;
+      states: Map<string, { past: boolean; recon: ReturnType<typeof reconState> }>;
+    }>;
+    chips: Map<number, { deps: unknown[]; containers: React.ReactNode[]; regular: React.ReactNode[] }>;
     score: Map<number, FocusScore>;
-  }>({ deps: [], pack: new Map(), text: new Map(), score: new Map() });
+    minute: number;
+  }>({ deps: [], dayItems: new Map(), pack: new Map(), text: new Map(), clusters: new Map(), clusterTimes: new Map(), chips: new Map(), score: new Map(), minute: 0 });
   {
-    const deps = [timed, pxPerMin, calendars, Math.floor(nowDate.getTime() / 60000), reconTick, props.seamStyle, colPx, starTick];
     const c = layoutCacheRef.current;
+    const minute = Math.floor(nowDate.getTime() / 60000);
+    if (c.minute !== minute) {
+      c.minute = minute;
+      // Focus score is time-sensitive; event layout and row DOM are not.
+      c.score.clear();
+    }
+    const deps = [pxPerMin, calendars, reconTick, props.seamStyle, colPx, starTick];
     if (deps.some((d, i) => d !== c.deps[i])) {
       c.deps = deps;
+      c.dayItems.clear();
       c.pack.clear();
       c.text.clear();
+      c.clusters.clear();
+      c.clusterTimes.clear();
+      c.chips.clear();
       c.score.clear();
+    }
+    // Keep only the dates this strip can render (visible days + two runway
+    // days on each side). Caches no longer need the periodic clock tick to
+    // bound their lifetime as the user pans through the calendar.
+    const retainedDays = new Set(
+      [...days, ...beforeDays, ...afterDays].map((day) => startOfDay(day).getTime()),
+    );
+    for (const cache of [c.dayItems, c.pack, c.text, c.clusters, c.clusterTimes, c.chips, c.score]) {
+      for (const key of cache.keys()) if (!retainedDays.has(key)) cache.delete(key);
     }
   }
   const allDay = useMemo(() => events.filter((e) => e.all_day), [events]);
+  const allDayByDay = useMemo(() => profileRenderStage("all-day-items-index", () => {
+    const byDay = new Map<number, CalendarEvent[]>();
+    const longEvents: CalendarEvent[] = [];
+    const order = new Map<CalendarEvent, number>();
+    for (const [position, event] of allDay.entries()) {
+      const { start, end } = eventDates(event);
+      if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || end <= start) continue;
+      order.set(event, position);
+      const spanDays = (Date.parse(event.end) - Date.parse(event.start)) / 86_400_000;
+      if (spanDays > MAX_INDEXED_ALL_DAY_DAYS) {
+        // Avoid allocating one map entry per day for malformed or unusually
+        // long spans; these rare rows are checked only against rendered days.
+        longEvents.push(event);
+        continue;
+      }
+      for (let day = startOfDay(start); day < end; day = addDays(day, 1)) {
+        const key = day.getTime();
+        const items = byDay.get(key) ?? [];
+        items.push(event);
+        byDay.set(key, items);
+      }
+    }
+    return { byDay, longEvents, order };
+  }), [allDay]);
   /** a new value whenever the chips may have moved, other than by a swipe
    *  (MarginNotes gets the first day separately and carries notes along) */
   const notesLayoutKey = useMemo(
@@ -819,12 +1137,34 @@ export function WeekView(props: {
     }
     if (!editableCal(ev.calendar_id)) {
       // read-only: click opens, never drags
-      const open = () => {
-        window.removeEventListener("pointerup", open);
-        props.onSelect(ev);
-        props.onOpenEvent(ev, { x: e.clientX, y: e.clientY });
+      const target = e.currentTarget as HTMLElement;
+      const pointerId = e.pointerId;
+      const origin = { x: e.clientX, y: e.clientY };
+      let moved = false;
+      const cleanup = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onCancel);
       };
-      window.addEventListener("pointerup", open, { once: true });
+      const onMove = (move: PointerEvent) => {
+        if (move.pointerId === pointerId && Math.hypot(move.clientX - origin.x, move.clientY - origin.y) >= 4) {
+          moved = true;
+        }
+      };
+      const onUp = (up: PointerEvent) => {
+        if (up.pointerId !== pointerId) return;
+        cleanup();
+        if (!moved && up.target instanceof Node && target.contains(up.target)) {
+          propsRef.current.onSelect(ev);
+          propsRef.current.onOpenEvent(ev, origin);
+        }
+      };
+      const onCancel = (cancel: PointerEvent) => {
+        if (cancel.pointerId === pointerId) cleanup();
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onCancel);
       return;
     }
     const loc = locate(e.clientX, e.clientY);
@@ -854,6 +1194,9 @@ export function WeekView(props: {
       moved: false,
     });
   };
+
+  const startChipDragRef = useRef(startChipDrag);
+  startChipDragRef.current = startChipDrag;
 
   const selectedKeys = useMemo(
     () => new Set(props.selected.map(keyOf)),
@@ -968,7 +1311,6 @@ export function WeekView(props: {
         <div className="pan-clip">
           <div
             className="pan-strip"
-            ref={headStripRef}
             style={{
               display: "grid",
               gridTemplateColumns: `repeat(${extN}, minmax(0, 1fr))`,
@@ -976,9 +1318,9 @@ export function WeekView(props: {
             }}
           >
             {[
-              ...days.map((d, di) => [d, di + 2, true] as const),
-              [beforeDay, 1, false] as const,
-              [afterDay, extN, false] as const,
+              ...days.map((d, di) => [d, di + PAN_OVERSCAN_DAYS + 1, true] as const),
+              ...beforeDays.map((d, index) => [d, index + 1, false] as const),
+              ...afterDays.map((d, index) => [d, days.length + PAN_OVERSCAN_DAYS + index + 1, false] as const),
             ].map(([d, gridCol, live]) => {
           // one list keyed by date: a header sliding between overscan and
           // live keeps its element instead of remounting on every swipe step
@@ -1052,20 +1394,27 @@ export function WeekView(props: {
           <div className="pan-clip">
             <div
               className="pan-strip"
-              ref={alldayStripRef}
               style={{
                 display: "grid",
                 gridTemplateColumns: `repeat(${extN}, minmax(0, 1fr))`,
                 width: `${(extN / days.length) * 100}%`,
               }}
             >
-              {[...days, beforeDay, afterDay].map((d, idx) => {
-                const live = idx < days.length;
-                const gridCol = live ? idx + 2 : idx === days.length ? 1 : extN;
+              {[
+                ...days.map((d, idx) => [d, idx + PAN_OVERSCAN_DAYS + 1, true] as const),
+                ...beforeDays.map((d, idx) => [d, idx + 1, false] as const),
+                ...afterDays.map((d, idx) => [d, days.length + PAN_OVERSCAN_DAYS + idx + 1, false] as const),
+              ].map(([d, gridCol, live]) => {
                 const renderCell = () => {
-            const dayAll = allDay.filter((e) => {
-              const { start, end } = eventDates(e);
-              return d >= startOfDay(start) && d < end;
+            const dayAll = profileRenderStage("all-day-items", () => {
+              const indexed = allDayByDay.byDay.get(startOfDay(d).getTime()) ?? [];
+              if (allDayByDay.longEvents.length === 0) return indexed;
+              const spanning = allDayByDay.longEvents.filter((event) => {
+                const { start, end } = eventDates(event);
+                return d >= startOfDay(start) && d < end;
+              });
+              if (spanning.length === 0) return indexed;
+              return [...indexed, ...spanning].sort((a, b) => allDayByDay.order.get(a)! - allDayByDay.order.get(b)!);
             });
             const dropTarget =
               drag?.kind === "move" && drag.allDayDropDay === days.indexOf(d);
@@ -1171,7 +1520,7 @@ export function WeekView(props: {
             </div>
           )}
         </div>
-        <div className="gridlines" style={{ left: gutterW }}>
+        <div className="gridlines" style={{ left: gutterW, right: "auto", width: colPx * extN }}>
           {Array.from({ length: 24 }, (_, h) => (
             <div key={h} className="hline" style={{ top: h * 60 * pxPerMin }} />
           ))}
@@ -1185,7 +1534,7 @@ export function WeekView(props: {
               className="marquee"
               data-testid="marquee"
               style={{
-                left: `${(marquee.d0 / days.length) * 100}%`,
+                left: `${((marquee.d0 + PAN_OVERSCAN_DAYS) / days.length) * 100}%`,
                 width: `${((marquee.d1 - marquee.d0 + 1) / days.length) * 100}%`,
                 top: marquee.m0 * pxPerMin,
                 height: Math.max((marquee.m1 - marquee.m0) * pxPerMin, 2),
@@ -1205,24 +1554,46 @@ export function WeekView(props: {
             }}
           >
           {[
-            ...days.map((d, i) => [d, i, i + 2, true] as const),
-            [beforeDay, -1, 1, false] as const,
-            [afterDay, -1, extN, false] as const,
+            // Keep DOM order chronological. A day step then drops the first
+            // runway column and appends one, instead of moving populated
+            // columns through the dense body on every step.
+            ...beforeDays.map((day, index) => [day, -1, index + 1, false] as const),
+            ...days.map((day, index) => [day, index, index + PAN_OVERSCAN_DAYS + 1, true] as const),
+            ...afterDays.map((day, index) => [day, -1, days.length + PAN_OVERSCAN_DAYS + index + 1, false] as const),
           ].map(([day, di, gridCol, live]) => {
             const dayStart = startOfDay(day);
-            const dayItems = timed
-              .map((e) => ({ e, ...eventDates(e) }))
-              .filter(({ start, end }) => end > dayStart && start < addDays(dayStart, 1))
-              .map(({ e, start, end }) => ({
-                item: e,
+            const cacheKey = dayStart.getTime();
+            const cachedDayItems = layoutCacheRef.current.dayItems.get(cacheKey);
+            const nextDayItems = profileRenderStage("day-items", () => {
+              const indexed = dayItemsIndex.byDay.get(cacheKey) ?? [];
+              if (dayItemsIndex.longEvents.length === 0) return indexed;
+              const dayEnd = addDays(dayStart, 1);
+              const spanning = dayItemsIndex.longEvents.filter(({ start, end }) => end > dayStart && start < dayEnd);
+              if (spanning.length === 0) return indexed;
+              const items = [...indexed, ...spanning.map(({ item, start, end }) => ({
+                item,
                 startMin: isSameDay(start, day) ? minutesOfDay(start) : 0,
                 endMin: isSameDay(end, day) ? Math.max(minutesOfDay(end), 1) : DAY_MIN,
-              }));
-            const cacheKey = dayStart.getTime();
+              }))];
+              return items.sort((a, b) => dayItemsIndex.order.get(a.item)! - dayItemsIndex.order.get(b.item)!);
+            });
+            const sameDayItems = !!cachedDayItems && cachedDayItems.length === nextDayItems.length &&
+              cachedDayItems.every((item, index) => item.item === nextDayItems[index].item &&
+                item.startMin === nextDayItems[index].startMin && item.endMin === nextDayItems[index].endMin);
+            const dayItems = sameDayItems ? cachedDayItems! : nextDayItems;
+            if (!sameDayItems) {
+              layoutCacheRef.current.dayItems.set(cacheKey, dayItems);
+              layoutCacheRef.current.pack.delete(cacheKey);
+              layoutCacheRef.current.text.delete(cacheKey);
+              layoutCacheRef.current.clusters.delete(cacheKey);
+              layoutCacheRef.current.clusterTimes.delete(cacheKey);
+              layoutCacheRef.current.chips.delete(cacheKey);
+              layoutCacheRef.current.score.delete(cacheKey);
+            }
             let packed = layoutCacheRef.current.pack.get(cacheKey);
             let placedText = layoutCacheRef.current.text.get(cacheKey);
             if (!packed || placedText === undefined) {
-              ({ packed, placed: placedText } = layoutDay(dayItems));
+              ({ packed, placed: placedText } = profileRenderStage("day-layout", () => layoutDay(dayItems)));
               layoutCacheRef.current.pack.set(cacheKey, packed);
               layoutCacheRef.current.text.set(cacheKey, placedText);
             }
@@ -1230,6 +1601,280 @@ export function WeekView(props: {
             const ghostHere = live ? dragGhost?.pieces.get(di) : undefined;
             const draftHere =
               live && props.draft && !props.draft.allDay && isSameDay(props.draft.start, day) && !drag;
+            // Refresh time-sensitive row status on the clock tick, but keep
+            // the cached row DOM unless a visible event actually crossed a
+            // past/reconciliation boundary. At high density, rebuilding every
+            // cluster button every 30 seconds is a needless rendering spike.
+            const clusterTimeDeps = [clusters, calendars, nowTick, reconTick];
+            let cachedClusterTime = layoutCacheRef.current.clusterTimes.get(cacheKey);
+            if (!cachedClusterTime || clusterTimeDeps.some((dep, index) =>
+              !Object.is(dep, cachedClusterTime!.deps[index]),
+            )) {
+              const states = new Map<string, { past: boolean; recon: ReturnType<typeof reconState> }>();
+              const signature: string[] = [];
+              for (const cluster of clusters) {
+                for (const { item } of cluster.items) {
+                  const past = ended(item, nowDate);
+                  const recon = reconState(item, calendars, nowDate);
+                  states.set(keyOf(item), { past, recon });
+                  signature.push(`${past ? 1 : 0}${recon ?? "-"}`);
+                }
+              }
+              cachedClusterTime = {
+                deps: clusterTimeDeps,
+                signature: signature.join("\u0000"),
+                states,
+              };
+              layoutCacheRef.current.clusterTimes.set(cacheKey, cachedClusterTime);
+            }
+            const clusterDeps = [clusters, calendars, cachedClusterTime.signature, selectedKeys, reconTick, starTick, rowWindow];
+            let cachedClusters = layoutCacheRef.current.clusters.get(cacheKey);
+            if (!cachedClusters || clusterDeps.some((dep, index) => !Object.is(dep, cachedClusters!.deps[index]))) {
+              const nodes = profileRenderStage("clusters", () => clusters.map((cl) => {
+                const first = rowWindow ? Math.min(cl.items.length, Math.max(0, Math.floor((rowWindow.top - cl.top - 3) / 15))) : 0;
+                const end = rowWindow ? Math.max(0, Math.min(cl.items.length, Math.ceil((rowWindow.bottom - cl.top - 3) / 15))) : cl.items.length;
+                return (
+                <div
+                  key={"cluster-" + keyOf(cl.items[0].item)}
+                  className="cluster-block"
+                  style={{
+                    zIndex: cl.z,
+                    top: cl.top,
+                    height: cl.height,
+                    left: cl.insetPx,
+                    width: `calc(100% - ${cl.insetPx + 2}px)`,
+                  }}
+                  data-testid="cluster-block"
+                  data-row-count={cl.items.length}
+                  onPointerDown={(pe) => pe.stopPropagation()}
+                  title={`${cl.items.length} short events, ${fmtChipRange(
+                    atWallClock(day, cl.startMin),
+                    atWallClock(day, cl.endMin),
+                  )}`}
+                >
+                  {first > 0 && <div className="cluster-row-spacer" style={{ height: first * 15 }} aria-hidden="true" />}
+                  {cl.items.slice(first, Math.max(first, end)).map(({ item: e }) => {
+                    const { start } = eventDates(e);
+                    const rowState = cachedClusterTime!.states.get(keyOf(e))!;
+                    return (
+                      <button
+                        key={keyOf(e)}
+                        data-ek={keyOf(e)}
+                        style={{ "--cluster-dot-color": colorOf(calendars, e.calendar_id) } as CSSProperties}
+                        title={e.summary + " (" + fmtChipRange(start, eventDates(e).end) + ")"}
+                        className={
+                          "cluster-row" +
+                          (rowState.past ? " past" : "") +
+                          ((st0) => (st0 ? (st0.kind === "manual" ? " starred" : " starred-auto") : ""))(starState(starKey(e))) +
+                          (selectedKeys.has(keyOf(e)) ? " selected" : "") +
+                          (rowState.recon ? ` ${rowState.recon}` : "")
+                        }
+                        onPointerDown={(pe) => startChipDragRef.current(pe, e, dayIndexByDateRef.current.get(cacheKey) ?? -1)}
+                        onContextMenu={(ce) => {
+                          ce.preventDefault();
+                          ce.stopPropagation();
+                          propsRef.current.onSelect(e);
+                          setCtx({ x: ce.clientX, y: ce.clientY, event: e });
+                        }}
+                      >
+                        <span className="cluster-title">{e.summary}</span>
+                        {rowState.recon === "unsettled" && (
+                          <span className="row-recon">
+                            <span
+                              role="button"
+                              tabIndex={-1}
+                              className="rr-yes"
+                              title="Happened"
+                              data-testid="row-recon-yes"
+                              onPointerDown={(pe) => pe.stopPropagation()}
+                              onClick={(ce) => {
+                                ce.stopPropagation();
+                                setRecon(reconKey(e), "done");
+                              }}
+                            >✓</span>
+                            <span
+                              role="button"
+                              tabIndex={-1}
+                              className="rr-no"
+                              title="Didn't happen: deletes the event (⌘Z to undo)"
+                              data-testid="row-recon-no"
+                              onPointerDown={(pe) => pe.stopPropagation()}
+                              onClick={(ce) => {
+                                ce.stopPropagation();
+                                void propsRef.current.actions.removeOccurrence(e);
+                              }}
+                            >✕</span>
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                  {end < cl.items.length && <div className="cluster-row-spacer" style={{ height: (cl.items.length - Math.max(first, end)) * 15 }} aria-hidden="true" />}
+                </div>
+                );
+              }));
+              cachedClusters = { deps: clusterDeps, nodes };
+              layoutCacheRef.current.clusters.set(cacheKey, cachedClusters);
+            }
+            // Chip elements and their event handlers depend on the layout and
+            // visible state, not on the parent App's day-window render. Reuse
+            // the unchanged day's subtree during a horizontal pan.
+            const chipDeps = [containers, regular, placedText, calendars, nowTick, selectedKeys, reconTick, starTick, drag, groupDrag, seamMode];
+            let cachedChips = layoutCacheRef.current.chips.get(cacheKey);
+            if (!cachedChips || chipDeps.some((dep, index) => !Object.is(dep, cachedChips!.deps[index]))) {
+              const containerNodes = profileRenderStage("containers", () => containers.map(({ item: e, lane, top, height, seamTopPx, seamBottomPx, seamTopStepPx, seamBottomStepPx, z }) => {
+                const slabClip = jointClip(lane * SLEEVE_LANE_WIDTH, height, seamTopPx, seamBottomPx, seamTopStepPx, seamBottomStepPx);
+                const color = colorOf(calendars, e.calendar_id);
+                const { start, end } = eventDates(e);
+                const recon = reconState(e, calendars, nowDate);
+                const isPast = ended(e, nowDate);
+                const common =
+                  (groupDrag?.moving.has(keyOf(e)) ? " dragging" : "") +
+                  (isPast ? " past" : "") +
+                  (recon === "unsettled" ? " unsettled" : "") +
+                  (recon === "canceled" ? " canceled" : "") +
+                  (editableCal(e.calendar_id) ? "" : " readonly") +
+                  (selectedKeys.has(keyOf(e)) ? " selected" : "");
+                const rangeTitle = `${e.summary} (${fmtChipRange(start, end)})`;
+                return (
+                  <div
+                    key={"cont-" + keyOf(e)}
+                    className={
+                      "chip chip-timed chip-cfull" +
+                      (slabClip ? " jointed" : "") +
+                      ((st0) => (st0 ? (st0.kind === "manual" ? " starred" : " starred-auto") : ""))(starState(starKey(e))) +
+                      common +
+                      (height < 16 ? " chip-xs" : "")
+                    }
+                    style={{
+                      ...chipStyle(color),
+                      clipPath: slabClip,
+                      zIndex: z,
+                      top,
+                      height,
+                      left: lane * SLEEVE_LANE_WIDTH,
+                      width: `calc(100% - ${lane * SLEEVE_LANE_WIDTH + 2}px)`,
+                    }}
+                    title={rangeTitle}
+                    data-text-rule={placedText?.get(e)?.rule}
+                    data-testid="cshape-seg"
+                    data-ek={keyOf(e)}
+                    onPointerDown={(pe) => startChipDragRef.current(pe, e, dayIndexByDateRef.current.get(cacheKey) ?? -1)}
+                    onContextMenu={(ce) => {
+                      ce.preventDefault();
+                      ce.stopPropagation();
+                      propsRef.current.onSelect(e);
+                      setCtx({ x: ce.clientX, y: ce.clientY, event: e });
+                    }}
+                  >
+                    {jointSeam(lane * SLEEVE_LANE_WIDTH, height, seamTopPx, seamBottomPx, seamTopStepPx, seamBottomStepPx)}
+                    {((g) => g && goalRing(keyOf(e), lane * SLEEVE_LANE_WIDTH, height, seamTopPx, seamBottomPx, g.kind, seamTopStepPx, seamBottomStepPx))(
+                      starState(starKey(e)),
+                    )}
+                    <div className="cfull-label">
+                      <ChipText e={e} p={placedText?.get(e)} />
+                    </div>
+                    {editableCal(e.calendar_id) && <div className="chip-resize" />}
+                  </div>
+                );
+              }));
+              const regularNodes = profileRenderStage("regular", () => regular.map(({ item: e, top, height, leftPct, widthPct, insetPx, seamTopPx, seamBottomPx, seamTopStepPx, seamBottomStepPx, z }) => {
+                const st = seamMode === "overlay" ? 0 : seamTopPx;
+                const sb = seamMode === "overlay" ? 0 : seamBottomPx;
+                const clipPath = jointClip(insetPx, height, st, sb, seamTopStepPx, seamBottomStepPx);
+                const color = colorOf(calendars, e.calendar_id);
+                const beingMoved =
+                  drag?.kind !== "create" && drag?.event?.id === e.id && drag.moved && !drag.duplicate;
+                const recon = reconState(e, calendars, nowDate);
+                const isPast = ended(e, nowDate);
+                return (
+                  <div
+                    key={keyOf(e)}
+                    className={
+                      "chip chip-timed" +
+                      (clipPath ? " jointed" : "") +
+                      ((st0) => (st0 ? (st0.kind === "manual" ? " starred" : " starred-auto") : ""))(starState(starKey(e))) +
+                      (height < 16 ? " chip-xs" : "") +
+                      (beingMoved || groupDrag?.moving.has(keyOf(e)) ? " dragging" : "") +
+                      (isPast ? " past" : "") +
+                      (recon === "unsettled" ? " unsettled" : "") +
+                      (recon === "canceled" ? " canceled" : "") +
+                      (editableCal(e.calendar_id) ? "" : " readonly") +
+                      (selectedKeys.has(keyOf(e)) ? " selected" : "")
+                    }
+                    style={{
+                      ...chipStyle(color),
+                      clipPath,
+                      zIndex: z,
+                      top,
+                      height,
+                      left: `calc(${insetPx}px + (100% - ${insetPx}px) * ${leftPct / 100})`,
+                      width: `calc((100% - ${insetPx}px) * ${widthPct / 100} - 2px)`,
+                    }}
+                    title={e.summary}
+                    onPointerEnter={() => propsRef.current.onHover?.(e)}
+                    onPointerLeave={() => propsRef.current.onHover?.(null)}
+                    onPointerDown={(pe) => startChipDragRef.current(pe, e, dayIndexByDateRef.current.get(cacheKey) ?? -1)}
+                    onContextMenu={(ce) => {
+                      ce.preventDefault();
+                      ce.stopPropagation();
+                      propsRef.current.onSelect(e);
+                      setCtx({ x: ce.clientX, y: ce.clientY, event: e });
+                    }}
+                    data-testid="event-chip"
+                    data-ek={keyOf(e)}
+                    data-text-rule={placedText?.get(e)?.rule}
+                  >
+                    {jointSeam(insetPx, height, st, sb, seamTopStepPx, seamBottomStepPx)}
+                    {((g) => g && goalRing(keyOf(e), insetPx, height, st, sb, g.kind, seamTopStepPx, seamBottomStepPx))(starState(starKey(e)))}
+                    <ChipText e={e} p={placedText?.get(e)} />
+                    {recon === "unsettled" && (
+                      <span className="recon-actions">
+                        <button
+                          className="ra-yes"
+                          title="Happened"
+                          data-testid="recon-yes"
+                          onPointerDown={(pe) => pe.stopPropagation()}
+                          onClick={(ce) => {
+                            ce.stopPropagation();
+                            setRecon(reconKey(e), "done");
+                          }}
+                        >
+                          ✓
+                        </button>
+                        <button
+                          className="ra-no"
+                          title="Didn't happen: deletes the event (⌘Z to undo)"
+                          data-testid="recon-no"
+                          onPointerDown={(pe) => pe.stopPropagation()}
+                          onClick={(ce) => {
+                            ce.stopPropagation();
+                            void propsRef.current.actions.removeOccurrence(e);
+                          }}
+                        >
+                          ✕
+                        </button>
+                      </span>
+                    )}
+                    {e.conference_url && placedText?.get(e)?.join && (
+                      <a
+                        className="chip-join chip-abs"
+                        style={{ left: placedText.get(e)!.join!.x, top: placedText.get(e)!.join!.y }}
+                        href={e.conference_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        onPointerDown={(pe) => pe.stopPropagation()}
+                      >
+                        Join
+                      </a>
+                    )}
+                    {editableCal(e.calendar_id) && <div className="chip-resize" />}
+                  </div>
+                );
+              }));
+              cachedChips = { deps: chipDeps, containers: containerNodes, regular: regularNodes };
+              layoutCacheRef.current.chips.set(cacheKey, cachedChips);
+            }
             return (
               <div
                 key={day.toISOString()}
@@ -1238,242 +1883,9 @@ export function WeekView(props: {
                 onPointerDown={live ? (e) => startCreate(e, di) : undefined}
                 data-testid={live ? `day-col-${di}` : undefined}
               >
-                {containers.map(({ item: e, lane, top, height, seamTopPx, seamBottomPx, seamTopStepPx, seamBottomStepPx, z }) => {
-                  const slabClip = jointClip(lane * SLEEVE_LANE_WIDTH, height, seamTopPx, seamBottomPx, seamTopStepPx, seamBottomStepPx);
-                  const color = colorOf(calendars, e.calendar_id);
-                  const { start, end } = eventDates(e);
-                  const recon = reconState(e, calendars, nowDate);
-                  const isPast = ended(e, nowDate);
-                  const common =
-                    (groupDrag?.moving.has(keyOf(e)) ? " dragging" : "") +
-                    (isPast ? " past" : "") +
-                    (recon === "unsettled" ? " unsettled" : "") +
-                    (recon === "canceled" ? " canceled" : "") +
-                    (editableCal(e.calendar_id) ? "" : " readonly") +
-                    (selectedKeys.has(keyOf(e)) ? " selected" : "");
-                  const rangeTitle = `${e.summary} (${fmtChipRange(start, end)})`;
-                  return (
-                    <div
-                      key={"cont-" + keyOf(e)}
-                      className={
-                        "chip chip-timed chip-cfull" +
-                        (slabClip ? " jointed" : "") +
-                        ((st0) => (st0 ? (st0.kind === "manual" ? " starred" : " starred-auto") : ""))(starState(starKey(e))) +
-                        common +
-                        (height < 16 ? " chip-xs" : "")
-                      }
-                      style={{
-                        ...chipStyle(color),
-                        clipPath: slabClip,
-                        zIndex: z,
-                        top,
-                        height,
-                        left: lane * SLEEVE_LANE_WIDTH,
-                        width: `calc(100% - ${lane * SLEEVE_LANE_WIDTH + 2}px)`,
-                      }}
-                      title={rangeTitle}
-                      data-text-rule={placedText?.get(e)?.rule}
-                      data-testid="cshape-seg"
-                      data-ek={keyOf(e)}
-                      onPointerDown={(pe) => startChipDrag(pe, e, di)}
-                      onContextMenu={(ce) => {
-                        ce.preventDefault();
-                        ce.stopPropagation();
-                        props.onSelect(e);
-                        setCtx({ x: ce.clientX, y: ce.clientY, event: e });
-                      }}
-                    >
-                      {jointSeam(lane * SLEEVE_LANE_WIDTH, height, seamTopPx, seamBottomPx, seamTopStepPx, seamBottomStepPx)}
-                      {((g) => g && goalRing(keyOf(e), lane * SLEEVE_LANE_WIDTH, height, seamTopPx, seamBottomPx, g.kind, seamTopStepPx, seamBottomStepPx))(
-                        starState(starKey(e)),
-                      )}
-                      <div className="cfull-label">
-                        <ChipText e={e} p={placedText?.get(e)} />
-                      </div>
-                      {editableCal(e.calendar_id) && <div className="chip-resize" />}
-                    </div>
-                  );
-                })}
-                {clusters.map((cl) => (
-                  <div
-                    key={"cluster-" + keyOf(cl.items[0].item)}
-                    className="cluster-block"
-                    style={{
-                      zIndex: cl.z,
-                      top: cl.top,
-                      height: cl.height,
-                      left: cl.insetPx,
-                      width: `calc(100% - ${cl.insetPx + 2}px)`,
-                    }}
-                    data-testid="cluster-block"
-                    onPointerDown={(pe) => pe.stopPropagation()}
-                    title={`${cl.items.length} short events, ${fmtChipRange(
-                      atWallClock(day, cl.startMin),
-                      atWallClock(day, cl.endMin),
-                    )}`}
-                  >
-                    {cl.items.map(({ item: e }) => {
-                      const { start } = eventDates(e);
-                      return (
-                        <button
-                          key={keyOf(e)}
-                          data-ek={keyOf(e)}
-                          title={e.summary + " (" + fmtChipRange(start, eventDates(e).end) + ")"}
-                          className={
-                            "cluster-row" +
-                            (ended(e, nowDate) ? " past" : "") +
-                            ((st0) => (st0 ? (st0.kind === "manual" ? " starred" : " starred-auto") : ""))(starState(starKey(e))) +
-                            (selectedKeys.has(keyOf(e)) ? " selected" : "") +
-                            ((r) => (r === "unsettled" ? " unsettled" : r === "canceled" ? " canceled" : r === "done" ? " done" : ""))(
-                              reconState(e, calendars, nowDate),
-                            )
-                          }
-                          // same path as chips: drag pulls the event out of the
-                          // cluster, a plain click opens it, shift-click selects
-                          onPointerDown={(pe) => startChipDrag(pe, e, di)}
-                          onContextMenu={(ce) => {
-                            ce.preventDefault();
-                            ce.stopPropagation();
-                            props.onSelect(e);
-                            setCtx({ x: ce.clientX, y: ce.clientY, event: e });
-                          }}
-                        >
-                          <span
-                            className="cluster-dot"
-                            style={{ background: colorOf(calendars, e.calendar_id) }}
-                          />
-                          <span className="cluster-title">{e.summary}</span>
-                          {reconState(e, calendars, nowDate) === "unsettled" && (
-                            <span className="row-recon">
-                              <span
-                                role="button"
-                                tabIndex={-1}
-                                className="rr-yes"
-                                title="Happened"
-                                data-testid="row-recon-yes"
-                                onPointerDown={(pe) => pe.stopPropagation()}
-                                onClick={(ce) => {
-                                  ce.stopPropagation();
-                                  setRecon(reconKey(e), "done");
-                                }}
-                              >
-                                ✓
-                              </span>
-                              <span
-                                role="button"
-                                tabIndex={-1}
-                                className="rr-no"
-                                title="Didn't happen: deletes the event (⌘Z to undo)"
-                                data-testid="row-recon-no"
-                                onPointerDown={(pe) => pe.stopPropagation()}
-                                onClick={(ce) => {
-                                  ce.stopPropagation();
-                                  void props.actions.removeOccurrence(e);
-                                }}
-                              >
-                                ✕
-                              </span>
-                            </span>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                ))}
-                {regular.map(({ item: e, top, height, leftPct, widthPct, insetPx, seamTopPx, seamBottomPx, seamTopStepPx, seamBottomStepPx, z }) => {
-                  const st = seamMode === "overlay" ? 0 : seamTopPx;
-                  const sb = seamMode === "overlay" ? 0 : seamBottomPx;
-                  const clipPath = jointClip(insetPx, height, st, sb, seamTopStepPx, seamBottomStepPx);
-                  const color = colorOf(calendars, e.calendar_id);
-                  const beingMoved =
-                    drag?.kind !== "create" && drag?.event?.id === e.id && drag.moved && !drag.duplicate;
-                  const recon = reconState(e, calendars, nowDate);
-                  const isPast = ended(e, nowDate);
-                  return (
-                    <div
-                      key={keyOf(e)}
-                      className={
-                        "chip chip-timed" +
-                        (clipPath ? " jointed" : "") +
-                        ((st0) => (st0 ? (st0.kind === "manual" ? " starred" : " starred-auto") : ""))(starState(starKey(e))) +
-                        (height < 16 ? " chip-xs" : "") +
-                        (beingMoved || groupDrag?.moving.has(keyOf(e)) ? " dragging" : "") +
-                        (isPast ? " past" : "") +
-                        (recon === "unsettled" ? " unsettled" : "") +
-                        (recon === "canceled" ? " canceled" : "") +
-                        (editableCal(e.calendar_id) ? "" : " readonly") +
-                        (selectedKeys.has(keyOf(e)) ? " selected" : "")
-                      }
-                      style={{
-                        ...chipStyle(color),
-                        clipPath,
-                        zIndex: z,
-                        top,
-                        height,
-                        left: `calc(${insetPx}px + (100% - ${insetPx}px) * ${leftPct / 100})`,
-                        width: `calc((100% - ${insetPx}px) * ${widthPct / 100} - 2px)`,
-                      }}
-                      title={e.summary}
-                      onPointerEnter={() => props.onHover?.(e)}
-                      onPointerLeave={() => props.onHover?.(null)}
-                      onPointerDown={(pe) => startChipDrag(pe, e, di)}
-                      onContextMenu={(ce) => {
-                        ce.preventDefault();
-                        ce.stopPropagation();
-                        props.onSelect(e);
-                        setCtx({ x: ce.clientX, y: ce.clientY, event: e });
-                      }}
-                      data-testid="event-chip"
-                      data-ek={keyOf(e)}
-                      data-text-rule={placedText?.get(e)?.rule}
-                    >
-                      {jointSeam(insetPx, height, st, sb, seamTopStepPx, seamBottomStepPx)}
-                      {((g) => g && goalRing(keyOf(e), insetPx, height, st, sb, g.kind, seamTopStepPx, seamBottomStepPx))(starState(starKey(e)))}
-                      <ChipText e={e} p={placedText?.get(e)} />
-                      {recon === "unsettled" && (
-                        <span className="recon-actions">
-                          <button
-                            className="ra-yes"
-                            title="Happened"
-                            data-testid="recon-yes"
-                            onPointerDown={(pe) => pe.stopPropagation()}
-                            onClick={(ce) => {
-                              ce.stopPropagation();
-                              setRecon(reconKey(e), "done");
-                            }}
-                          >
-                            ✓
-                          </button>
-                          <button
-                            className="ra-no"
-                            title="Didn't happen: deletes the event (⌘Z to undo)"
-                            data-testid="recon-no"
-                            onPointerDown={(pe) => pe.stopPropagation()}
-                            onClick={(ce) => {
-                              ce.stopPropagation();
-                              void props.actions.removeOccurrence(e);
-                            }}
-                          >
-                            ✕
-                          </button>
-                        </span>
-                      )}
-                      {e.conference_url && placedText?.get(e)?.join && (
-                        <a
-                          className="chip-join chip-abs"
-                          style={{ left: placedText.get(e)!.join!.x, top: placedText.get(e)!.join!.y }}
-                          href={e.conference_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          onPointerDown={(pe) => pe.stopPropagation()}
-                        >
-                          Join
-                        </a>
-                      )}
-                      {editableCal(e.calendar_id) && <div className="chip-resize" />}
-                    </div>
-                  );
-                })}
+                {cachedChips.containers}
+                {cachedClusters.nodes}
+                {cachedChips.regular}
 
                 {live &&
                   groupDrag?.ghosts.get(di)?.map((g) => (
@@ -1545,6 +1957,7 @@ export function WeekView(props: {
             events={timed}
             layoutKey={notesLayoutKey}
             firstDay={firstDay}
+            panSteps={panRef.current.pending !== 0 ? panRef.current.pending : null}
             pxPerMin={pxPerMin}
             keyOf={keyOf}
             onSelect={(e) => props.onSelect(e)}

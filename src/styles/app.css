@@ -396,7 +396,8 @@ html.pane-resizing * {
 /* ---------- week grid ---------- */
 .weekview {
   flex: 1;
-  overflow-y: auto;
+  overflow: auto;
+  overscroll-behavior-x: contain;
   position: relative;
   border-top: 1px solid var(--border);
   /* grid is drag-first UI: never let drags start text selection */
@@ -468,6 +469,18 @@ html.pane-resizing * {
   }
 }
 
+/* The week scrolls sideways under these sticky rows, and their day strips
+   run wider than the rows' own boxes (a column of overscan either side):
+   the strips carry the page color themselves, or the events scrolled up
+   beneath show through past the right edge of the row's box. */
+.day-headers .pan-strip,
+.allday-row .pan-strip {
+  background: var(--bg);
+  /* and the row's bottom rule, which only spans the row's box (the rule
+     colour is translucent: lay it over the page colour) */
+  box-shadow: 0 1px 0 var(--border), 0 1px 0 var(--bg);
+}
+
 .allday-row {
   display: grid;
   border-bottom: 1px solid var(--border);
@@ -478,10 +491,14 @@ html.pane-resizing * {
 }
 
 .allday-label {
+  position: sticky;
+  left: 0;
+  z-index: 5;
   font-size: 9px;
   color: var(--fg-faint);
   text-align: right;
   padding: 4px 6px;
+  background: var(--bg);
 }
 
 .allday-cell {
@@ -511,7 +528,10 @@ html.pane-resizing * {
 .gutter {
   width: var(--gutter-w);
   flex: none;
-  position: relative;
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--bg);
 }
 
 .hour-label {
@@ -2329,6 +2349,10 @@ html.pane-resizing * {
 
 /* timezone abbreviation atop the time gutter (Notion) */
 .gutter-tz {
+  position: sticky;
+  left: 0;
+  z-index: 6;
+  background: var(--bg);
   display: flex;
   align-items: flex-end;
   justify-content: flex-end;
@@ -2707,6 +2731,11 @@ html.pane-resizing * {
   display: none; /* rows carry their own calendar dots */
 }
 
+.cluster-row-spacer {
+  flex: none;
+  pointer-events: none;
+}
+
 .cluster-row {
   display: flex;
   align-items: center;
@@ -2730,11 +2759,13 @@ html.pane-resizing * {
   background: color-mix(in srgb, var(--fg) 9%, transparent);
 }
 
-.cluster-dot {
+.cluster-row::before {
+  content: "";
   width: 6px;
   height: 6px;
   border-radius: 2px;
   flex: none;
+  background: var(--cluster-dot-color);
 }
 
 .cluster-time {
@@ -2754,7 +2785,7 @@ html.pane-resizing * {
   color: var(--fg-secondary);
 }
 
-.cluster-row.past .cluster-dot {
+.cluster-row.past::before {
   opacity: 0.4;
 }
 
@@ -2888,19 +2919,17 @@ html.pane-resizing * {
 /* ---------- pixel panning strips ---------- */
 .pan-clip {
   position: relative;
-  overflow: hidden;
+  overflow: visible;
   min-width: 0;
 }
 
-.pan-strip {
-  will-change: transform;
-  transform: translateX(0);
-}
+.pan-strip { transform: none; }
 
 .day-clip {
   flex: 1;
   position: relative;
-  overflow: hidden;
+  overflow: visible;
+  min-width: 0;
 }
 
 .day-head-x {
@@ -3409,4 +3438,106 @@ html.pane-resizing * {
 .row-recon .rr-no:hover {
   background: #c25555;
   color: #fff;
+}
+
+/* section heads that fold their section (Goals, Thought dump): the label
+   itself is the toggle, chevron first, like the calendar groups */
+.sidebar-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.sidebar-toggle:hover {
+  color: var(--fg);
+}
+
+/* the thought dump: bullet points, wrapping, edited in place */
+.thought-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.thought-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 3px 6px;
+  border-radius: 5px;
+  font-size: 12.5px;
+  line-height: 17px;
+  color: var(--fg);
+}
+
+.thought-row:hover {
+  background: var(--bg-hover);
+}
+
+.thought-row:hover .goal-del {
+  opacity: 1;
+}
+
+.thought-dot {
+  flex: none;
+  color: var(--fg-faint);
+}
+
+.thought-text {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  cursor: text;
+}
+
+.thought-edit {
+  flex: 1;
+  min-width: 0;
+  resize: vertical;
+  border: 1px solid var(--focus);
+  background: var(--bg);
+  color: var(--fg);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font: inherit;
+  outline: none;
+}
+
+.thought-row .goal-del {
+  margin-top: 2px;
+}
+
+.thought-add {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 4px;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--fg);
+  border-radius: 6px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12.5px;
+  outline: none;
+}
+
+.thought-add::placeholder {
+  color: var(--fg-faint);
+}
+
+.thought-add:hover,
+.thought-add:focus {
+  border-color: var(--border);
+  background: var(--bg);
+}
+
+.thought-add:focus {
+  border-color: var(--focus);
 }

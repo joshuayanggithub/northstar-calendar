@@ -55,3 +55,32 @@ test("panel: Delete / Backspace delete the open event, but not while typing in i
   await page.keyboard.press("ControlOrMeta+z");
   await expect(page.locator(".chip-timed", { hasText: "Gym" })).toHaveCount(1);
 });
+
+test("panel: a second Delete cannot resubmit while recurring scope is open", async ({ page }) => {
+  await open(page);
+  await page.evaluate(() => {
+    const w = window as any;
+    const backend = w.__mockBackend;
+    const getMaster = backend.getSeriesMaster.bind(backend);
+    w.__seriesMasterReads = 0;
+    backend.getSeriesMaster = (...args: unknown[]) => {
+      w.__seriesMasterReads++;
+      return getMaster(...args);
+    };
+  });
+
+  const recurringSleep = page.locator(".chip-timed:not(.chip-cfull)").filter({
+    has: page.locator(".chip-title", { hasText: /^Sleep$/ }),
+  }).first();
+  await recurringSleep.click();
+  await expect(panel(page)).toBeVisible();
+  await expect(panel(page).getByText("Repeats")).toBeVisible();
+  await page.keyboard.press("Delete");
+  const scope = page.getByTestId("scope-dialog");
+  await expect(scope).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as any).__seriesMasterReads)).toBe(1);
+
+  await page.keyboard.press("Delete");
+  await expect(scope).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as any).__seriesMasterReads)).toBe(1);
+});

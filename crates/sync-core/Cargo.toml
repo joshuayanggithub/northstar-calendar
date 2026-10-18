@@ -10,6 +10,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
+jiff = { workspace = true }
 rusqlite = { version = "0.32", features = ["bundled"] }
 ureq = { version = "2.10", features = ["json"] }
 sha2 = "0.10"

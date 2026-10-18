@@ -105,16 +105,16 @@ case "${1:-start}" in
       # an existing X display, e.g. the SSH-forwarded one to watch the run
       # (CAL_E2E_DISPLAY=$DISPLAY) or an Xvfb you started yourself
       nohup setsid env CAL_SANDBOX="$SANDBOX_DIR" PATH="$RUST_PATH" DISPLAY="$CAL_E2E_DISPLAY" \
-        npm run tauri dev "${extra[@]}" > "$SANDBOX_DIR/app.log" 2>&1 &
+        npm run tauri dev ${extra[@]+"${extra[@]}"} > "$SANDBOX_DIR/app.log" 2>&1 &
     elif [[ "$OS" == Linux ]]; then
       command -v xvfb-run >/dev/null || {
         echo "xvfb-run is required; run ./e2e/setup_linux.sh"
         exit 1
       }
       nohup setsid env CAL_SANDBOX="$SANDBOX_DIR" PATH="$RUST_PATH" xvfb-run -a -s "-screen 0 1600x1000x24" \
-        npm run tauri dev "${extra[@]}" > "$SANDBOX_DIR/app.log" 2>&1 &
+        npm run tauri dev ${extra[@]+"${extra[@]}"} > "$SANDBOX_DIR/app.log" 2>&1 &
     else
-      nohup env CAL_SANDBOX="$SANDBOX_DIR" PATH="$RUST_PATH" npm run tauri dev "${extra[@]}" \
+      nohup env CAL_SANDBOX="$SANDBOX_DIR" PATH="$RUST_PATH" npm run tauri dev ${extra[@]+"${extra[@]}"} \
         > "$SANDBOX_DIR/app.log" 2>&1 &
     fi
     echo $! > "$PID_FILE"

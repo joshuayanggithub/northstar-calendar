@@ -400,6 +400,8 @@ export interface PlaceOpts {
   /** how far from its event a note looks first (px); it widens if needed */
   reachX?: number;
   reachY?: number;
+  /** opt-in phase timing for the worker's dense-layout diagnostic */
+  profile?: (stage: string, durationMs: number) => void;
 }
 
 export function placeNotes(
@@ -408,6 +410,9 @@ export function placeNotes(
   measure: (s: string) => number,
   opts: PlaceOpts = {},
 ): NotePlace[] {
+  const clock = opts.profile ? () => performance.now() : () => 0;
+  const totalStarted = clock();
+  const report = (stage: string, started: number) => opts.profile?.(stage, clock() - started);
   const W = field.w;
   const H = field.h;
   const colW = field.cols.length ? (field.cols[field.cols.length - 1].x1 - field.cols[0].x0) / field.cols.length : W;
@@ -862,7 +867,9 @@ export function placeNotes(
     const c = baseCost(spec, p.box, { w: p.w, h: p.h, lines: p.lines, scale: p.scale }, p.angle);
     return { ...optOf(spec, c), bend: p.bend };
   });
+  const candidatesStarted = clock();
   const lists = loose.map(shortlist);
+  report("candidate-search", candidatesStarted);
 
   // a fixed seed from the page itself: the same week lays out the same way
   let seed = 2166136261;
@@ -895,6 +902,7 @@ export function placeNotes(
     }
     return t;
   };
+  const greedyStarted = clock();
   for (const i of order) {
     let bestJ = -1;
     let bestV = Infinity;
@@ -908,11 +916,17 @@ export function placeNotes(
     });
     sel[i] = bestJ;
   }
+  report("greedy-placement", greedyStarted);
 
   // anneal
   const n = loose.length;
+  const annealStarted = clock();
   if (n > 1) {
-    const ITER = 500 * n;
+    // Pairwise penalties make each annealing step O(n). Keep the original
+    // 500 steps/n for small note sets, but bound total search work on crowded
+    // weeks so dozens of annotations don't leave the newest placement queued
+    // for seconds behind an exponentially larger search.
+    const ITER = Math.min(500 * n, 6_000);
     const T0 = 80;
     const T1 = 0.5;
     const curPen = sel.map((_, i) => (chosen(i) ? penAgainst(i, chosen(i)!) : 0));
@@ -949,9 +963,11 @@ export function placeNotes(
     }
     for (let i = 0; i < n; i++) sel[i] = bestSel[i];
   }
+  report("annealing", annealStarted);
 
   // commit, then any note still clashing (or with no shortlist) finds a spot
   // with all the others fixed, wider if it must
+  const repairStarted = clock();
   const clashing: NoteSpec[] = [];
   for (let i = 0; i < n; i++) {
     const o = chosen(i);
@@ -970,5 +986,7 @@ export function placeNotes(
   }
   for (const s of clashing) commit(s, best(s));
 
+  report("final-repair", repairStarted);
+  report("total", totalStarted);
   return specs.map((s) => placed.get(s.key)!.p);
 }

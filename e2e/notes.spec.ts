@@ -135,18 +135,24 @@ test("margin notes: a note travels with its event during a swipe, never blinking
   await page.evaluate((k) => {
     const w = window as any;
     w.__follow = { seen: 0, missing: 0, offsets: new Set<number>() };
-    const clip = document.querySelector(".day-clip")!;
-    new MutationObserver(() => {
+    const grid = document.querySelector<HTMLElement>("[data-testid=week-grid]")!;
+    const sample = () => {
       const chip = document.querySelector(`.chip-timed[data-ek="${CSS.escape(k)}"]`);
       if (!chip) return;
       const c = chip.getBoundingClientRect();
-      const v = clip.getBoundingClientRect();
-      if (c.left < v.left || c.right > v.right) return;
+      const v = grid.getBoundingClientRect();
+      const left = grid.querySelector<HTMLElement>(".gutter")!.getBoundingClientRect().right;
+      if (c.left < left || c.right > v.right) return;
       w.__follow.seen++;
       const n = document.querySelector(`.margin-note[data-ek="${CSS.escape(k)}"]`);
       if (!n) w.__follow.missing++;
       else w.__follow.offsets.add(Math.round(n.getBoundingClientRect().left - c.left));
-    }).observe(document.querySelector("[data-testid=week-grid]")!, { childList: true, subtree: true, attributes: true, attributeFilter: ["style"] });
+    };
+    new MutationObserver(sample).observe(grid, {
+      childList: true, subtree: true, attributes: true, attributeFilter: ["style"],
+    });
+    grid.addEventListener("scroll", sample, { passive: true });
+    sample();
   }, key);
   const box = (await page.getByTestId("week-grid").boundingBox())!;
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
@@ -157,11 +163,11 @@ test("margin notes: a note travels with its event during a swipe, never blinking
   await page.waitForTimeout(400);
   const r = await page.evaluate(() => {
     const f = (window as any).__follow;
-    return { seen: f.seen, missing: f.missing, offsets: f.offsets.size };
+    return { seen: f.seen, missing: f.missing, offsets: [...f.offsets] as number[] };
   });
   expect(r.seen).toBeGreaterThan(10);
   expect(r.missing).toBe(0);
-  expect(r.offsets).toBe(1); // rigidly attached
+  expect(r.offsets, `note/chip offsets: ${r.offsets.join(", ")}`).toHaveLength(1); // rigidly attached
 });
 
 test("margin notes: the note's text is written in full, emphasis underlined, no stage directions", async ({ page }) => {

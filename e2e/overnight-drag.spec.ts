@@ -7,7 +7,10 @@
 import { expect, test, type Page } from "@playwright/test";
 
 async function open(page: Page) {
-  const at = (d: number, h: number, m = 0) => new Date(2026, 9, d, h, m).toISOString();
+  // The app browser is pinned to Eastern; don't build these fixture instants
+  // in the Linux runner's Pacific timezone.
+  const at = (d: number, h: number, m = 0) =>
+    new Date(`2026-10-${String(d).padStart(2, "0")}T${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:00-04:00`).toISOString();
   const fixture = {
     calendars: [{ id: "p", summary: "Learning and Research", color: "#9fe1e7", is_primary: true, hidden: false, access_role: "owner" }],
     events: [{

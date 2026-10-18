@@ -71,7 +71,7 @@ Some cool small features that help [prime](https://en.wikipedia.org/wiki/Priming
 northstar is a [Tauri 2](https://tauri.app/) app: a Rust core and a React + TypeScript interface in the system's WebKit view. It is local-first. Events live in a local SQLite database and sync both ways with Google Calendar; the goal classification comes from a local model (via [Ollama](https://ollama.com/)), so nothing else leaves the machine.
 
 - **Sync core** ([`crates/sync-core`](crates/sync-core), Rust): the SQLite store and the Google Calendar client. Incremental sync with sync tokens (a 410 triggers a full resync), writes guarded by ETags (`If-Match`; on a 412 the remote copy wins), echo suppression for its own writes, and the OAuth refresh token kept in the macOS keychain.
-- **App shell** ([`src-tauri`](src-tauri)): the commands the interface calls (events, calendars, goals), the sync thread, the menu bar item, and the classifier ([`classify.rs`](src-tauri/src/classify.rs)) that asks the local model which events served a goal.
+- **App shell** ([`src-tauri`](src-tauri)): the commands the interface calls (events, calendars, goals), the sync thread, the menu bar item, and the goal classifier ([`classify.rs`](src-tauri/src/classify.rs)), which can ask a local model which events served a goal (switched off for now).
 - **Interface** ([`src`](src)): the week/day, month, agenda and insights views. The layout work is pure TypeScript in [`src/lib`](src/lib):
   - [`layout.ts`](src/lib/layout.ts) packs overlapping events into C-shapes, rabbet joints and clusters, never leaving horizontal gaps;
   - [`labelPlace.ts`](src/lib/labelPlace.ts) places each event's title and time inside the part of its shape that stays visible;

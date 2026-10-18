@@ -14,6 +14,12 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use tracing::{info, warn};
 
+/// Off (2026-10-17, at the author's request): the local model took too much
+/// of the machine (gemma3:12b, 8 GB, 6-14 s a title). With it off nothing
+/// talks to Ollama, and no hollow "suggested" stars are shown; stars the
+/// person set by hand are unaffected. Flip to true to bring it back.
+pub const GOAL_CLASSIFIER_ENABLED: bool = false;
+
 const OLLAMA: &str = "http://127.0.0.1:11434";
 const BATCH_PER_TICK: usize = 4;
 const TICK_SECS: u64 = 45;
@@ -348,6 +354,10 @@ pub fn spawn(app: AppHandle) {
         .spawn(move || {
             std::thread::sleep(Duration::from_secs(10));
             retire_drill_notes(&app);
+            if !GOAL_CLASSIFIER_ENABLED {
+                info!("goal classifier off: Ollama is never called");
+                return;
+            }
             loop {
                 run_once(&app);
                 std::thread::sleep(Duration::from_secs(TICK_SECS));
@@ -361,6 +371,10 @@ pub fn spawn(app: AppHandle) {
 /// be re-judged).
 #[tauri::command]
 pub fn get_goal_classifications(app: AppHandle) -> HashMap<String, String> {
+    // off: no suggestions, not even ones cached from earlier runs
+    if !GOAL_CLASSIFIER_ENABLED {
+        return HashMap::new();
+    }
     let Some((_, current)) = current_goals_hash(&app) else { return HashMap::new() };
     let read_only = read_only_calendars(&app);
     load_cache(&app)

@@ -16,12 +16,23 @@ pub struct Goal {
     pub horizon: String,
 }
 
+/// One line of the thought dump: something to think about, kept with the
+/// goals but never ticked or classified.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Thought {
+    pub id: String,
+    pub text: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct GoalsFile {
     pub goals: Vec<Goal>,
     /// goal id -> the period it was ticked in (a day, a week, or "done")
     #[serde(default)]
     pub checks: HashMap<String, String>,
+    /// the thought dump (a file written before it existed reads as empty)
+    #[serde(default)]
+    pub thoughts: Vec<Thought>,
 }
 
 fn path(app: &AppHandle) -> Option<PathBuf> {
@@ -52,4 +63,27 @@ pub fn write(app: &AppHandle, f: &GoalsFile) -> Result<(), String> {
 /// every goal's text, for the classifier
 pub fn texts(app: &AppHandle) -> Vec<String> {
     read(app).goals.into_iter().map(|g| g.text).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_goals_file_from_before_the_thought_dump_still_reads() {
+        let old = r#"{"goals":[{"id":"g1","text":"Ship it","horizon":"daily"}],"checks":{}}"#;
+        let f: GoalsFile = serde_json::from_str(old).unwrap();
+        assert_eq!(f.goals.len(), 1);
+        assert!(f.thoughts.is_empty());
+    }
+
+    #[test]
+    fn thoughts_survive_a_round_trip() {
+        let f = GoalsFile {
+            thoughts: vec![Thought { id: "t1".into(), text: "which project should come next?".into() }],
+            ..Default::default()
+        };
+        let back: GoalsFile = serde_json::from_str(&serde_json::to_string(&f).unwrap()).unwrap();
+        assert_eq!(back, f);
+    }
 }

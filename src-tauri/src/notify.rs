@@ -4,7 +4,7 @@
 //! in the app. A scheduler thread polls the local store; tray mutations are
 //! proxied to the main thread (macOS requirement).
 
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, Timelike};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -18,6 +18,63 @@ use tracing::{info, warn};
 
 const POLL: Duration = Duration::from_secs(20);
 const NOTIFY_LEAD_SECS: i64 = 60;
+
+// ---- the hourly nudge: "what are you actually doing?" ----
+// Once an hour, from 8:00 through 23:59, the app asks you to bring the
+// calendar up to date with what you're really doing. It replaces the
+// launchd job + helper app (~/bin/calendar-nudge.sh) that sent the same
+// banner and opened Notion Calendar on a click. Not at launch (the first
+// nudge waits for the next hour); after sleeping through an hour, once on
+// wake. Clicking the banner brings North Star to the front, which counts as
+// answering it (see answer_nudge): the app opens on now, on the event you're
+// in (or a new one for this hour).
+const NUDGE_FROM: u32 = 8;
+const NUDGE_TO: u32 = 23;
+/// bringing the app forward this soon after a nudge answers it
+const NUDGE_ANSWER_SECS: u64 = 15 * 60;
+static NUDGED_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+pub fn nudge_text(now: DateTime<Local>) -> String {
+    format!("{} — what are you actually doing? Update the current event.", now.format("%-I:%M %p"))
+}
+
+/// whether a nudge goes out on this tick: the hour changed since the last
+/// one (or since launch), and it's inside the nudging hours
+pub fn nudge_due(now: DateTime<Local>, last_hour: &str) -> bool {
+    let key = now.format("%Y-%m-%d %H").to_string();
+    key != last_hour && (NUDGE_FROM..=NUDGE_TO).contains(&now.hour())
+}
+
+pub fn send_nudge(app: &AppHandle, now: DateTime<Local>) {
+    info!("nudging");
+    let _ = app.notification().builder().title("North Star").body(nudge_text(now)).show();
+    *NUDGED_AT.lock().unwrap() = Some(std::time::Instant::now());
+}
+
+/// The app came to the front (a window took focus, or it was reopened). If
+/// a nudge went out recently, that was its answer: bring the window up and
+/// tell the interface to open on what's happening now. Only once per nudge.
+pub fn answer_nudge(app: &AppHandle) {
+    let fresh = {
+        let mut at = NUDGED_AT.lock().unwrap();
+        match *at {
+            Some(t) if t.elapsed().as_secs() <= NUDGE_ANSWER_SECS => {
+                *at = None;
+                true
+            }
+            _ => false,
+        }
+    };
+    if !fresh {
+        return;
+    }
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+    let _ = app.emit("nudge-open", ());
+}
 
 pub const TRAY_ID: &str = "main-tray";
 /// how far ahead the dropdown lists events
@@ -217,8 +274,14 @@ pub fn spawn_scheduler(app: AppHandle, db_path: PathBuf) {
             };
             let mut notified: HashSet<String> = HashSet::new();
             let mut last_tray_label = String::new();
+            // the hour the last nudge went out in; launch counts as one
+            let mut nudged_hour = Local::now().format("%Y-%m-%d %H").to_string();
             loop {
                 let now = Local::now();
+                if nudge_due(now, &nudged_hour) {
+                    send_nudge(&app, now);
+                }
+                nudged_hour = now.format("%Y-%m-%d %H").to_string();
                 let soon = upcoming(&db, 24);
 
                 // notifications at T-1min
@@ -413,6 +476,26 @@ mod tests {
         );
         let ids: Vec<&str> = got.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids, vec!["copy", "talk"]);
+    }
+
+    #[test]
+    fn nudges_once_an_hour_in_waking_hours_never_at_launch() {
+        let at = |d: u32, h: u32, m: u32| Local.with_ymd_and_hms(2026, 10, 17, h, m, 0).unwrap() + chrono::Duration::days(d as i64 - 17);
+        let key = |t: DateTime<Local>| t.format("%Y-%m-%d %H").to_string();
+        // launched at 9:40: nothing until 10:00
+        let launch = at(17, 9, 40);
+        assert!(!nudge_due(at(17, 9, 59), &key(launch)));
+        assert!(nudge_due(at(17, 10, 0), &key(launch)));
+        // once per hour, however many ticks
+        assert!(!nudge_due(at(17, 10, 20), &key(at(17, 10, 0))));
+        // slept through 11:00 and 12:00, woke at 12:35: one nudge then
+        assert!(nudge_due(at(17, 12, 35), &key(at(17, 10, 59))));
+        // 23:xx yes, past midnight and before 8 no
+        assert!(nudge_due(at(17, 23, 0), &key(at(17, 22, 59))));
+        assert!(!nudge_due(at(18, 0, 0), &key(at(17, 23, 59))));
+        assert!(!nudge_due(at(18, 7, 0), &key(at(18, 6, 59))));
+        assert!(nudge_due(at(18, 8, 0), &key(at(18, 7, 59))));
+        assert_eq!(nudge_text(at(17, 17, 0)), "5:00 PM — what are you actually doing? Update the current event.");
     }
 
     #[test]

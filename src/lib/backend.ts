@@ -36,10 +36,16 @@ async function tauriBackend(): Promise<Backend> {
       invoke("get_series_master", { calendarId, masterId }),
     getSeriesInstances: (calendarId, masterId) =>
       invoke<any[]>("get_series_instances", { calendarId, masterId }),
-    updateSeriesMaster: (calendarId, masterId, patch, destinationId) =>
-      invoke("update_series_master", { calendarId, masterId, patch, destinationId: destinationId ?? null }),
-    splitSeries: (calendarId, masterId, recurrence, input) =>
-      invoke<string>("split_series", { calendarId, masterId, recurrence, input }),
+    updateSeriesMaster: (calendarId, masterId, patch, destinationId, previousStart) =>
+      invoke("update_series_master", {
+        calendarId,
+        masterId,
+        patch,
+        destinationId: destinationId ?? null,
+        previousStart: previousStart ?? null,
+      }),
+    splitSeries: (calendarId, masterId, recurrence, input, countSplit) =>
+      invoke<string>("split_series", { calendarId, masterId, recurrence, input, countSplit: countSplit ?? null }),
     moveSeriesMaster: (calendarId, masterId, destinationId) =>
       invoke("move_series_master", { calendarId, masterId, destinationId }),
     goalsRead: () => invoke("goals_read"),
@@ -62,6 +68,7 @@ async function tauriBackend(): Promise<Backend> {
     updateEvent: (eventId, input, prevCalendarId) =>
       invoke("update_event", { eventId, input, prevCalendarId: prevCalendarId ?? null }),
     deleteEvent: (calendarId, eventId) => invoke("delete_event", { calendarId, eventId }),
+    restoreRecurringOccurrence: (event) => invoke("restore_recurring_occurrence", { event }),
     setEventNote: (calendarId, eventId, note) =>
       invoke<string | null>("set_event_note", { calendarId, eventId, note }),
     onDbChanged(cb) {

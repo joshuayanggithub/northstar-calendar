@@ -11,12 +11,18 @@ async function open(page: Page) {
   const cal = (id: string, summary: string, access_role = "owner") => ({
     id, summary, color: "#4986e7", is_primary: id === "p", hidden: false, access_role,
   });
-  const at = (d: number, h: number) => new Date(2026, 9, d, h).toISOString();
+  // Keep fixture construction independent of the Node host timezone. The
+  // Playwright browser is pinned to New York, which is UTC-04 in October.
+  const at = (d: number, h: number) =>
+    new Date(`2026-10-${String(d).padStart(2, "0")}T${String(h).padStart(2, "0")}:00:00-04:00`).toISOString();
   let n = 0;
   const ev = (calendar_id: string, summary: string, d: number, h0: number, h1: number) => ({
     id: `g${++n}`, calendar_id, etag: null, summary, description: null, location: null,
     start: at(d, h0), end: at(d, h1), all_day: false, timezone: null, status: "confirmed",
-    recurrence: null, recurring_event_id: null, conference_url: null, updated: null, raw: {},
+    recurrence: null, recurring_event_id: null, conference_url: null, updated: null,
+    raw: summary === "Alpha"
+      ? { attendees: [{ email: "guest@example.invalid", responseStatus: "accepted" }] }
+      : {},
   });
   const fixture = {
     calendars: [cal("p", "Personal"), cal("team", "Team (view only)", "reader")],
@@ -80,6 +86,11 @@ test("group drag: every selected event moves together, with a ghost each, and st
   expect(await timeOf(page, "Beta")).toBe("12 – 1 PM");
   expect(await timeOf(page, "Gamma")).toBe("2 – 3 PM");
   await expect(page.locator(".chip-timed.selected"), "the group stays selected").toHaveCount(2);
+  const guestStatus = await page.evaluate(async () =>
+    (await (window as any).__mockBackend.listEvents("2026-10-11", "2026-10-18"))
+      .find((event: any) => event.summary === "Alpha").raw.attendees[0].responseStatus,
+  );
+  expect(guestStatus, "a time-only move must not rewrite guest RSVP state").toBe("accepted");
 
   // drag the same group again: it moves from where it is now
   await dragBy(page, "Beta", 0, 1);
@@ -92,6 +103,30 @@ test("group drag: every selected event moves together, with a ghost each, and st
   expect(await timeOf(page, "Alpha")).toBe("10 – 11 AM");
 });
 
+test("group drag: partial update failure is reported and successful moves remain undoable", async ({ page }) => {
+  await open(page);
+  await page.evaluate(() => {
+    const backend = (window as any).__mockBackend;
+    const update = backend.updateEvent.bind(backend);
+    backend.updateEvent = (eventId: string, input: any, previousCalendarId?: string) =>
+      eventId === "g2"
+        ? Promise.reject(new Error("simulated update failure"))
+        : update(eventId, input, previousCalendarId);
+  });
+  await chip(page, "Alpha").click({ modifiers: ["Shift"] });
+  await chip(page, "Beta").click({ modifiers: ["Shift"] });
+  await dragBy(page, "Alpha", 1, 1);
+
+  expect(await timeOf(page, "Alpha")).toBe("10 – 11 AM");
+  expect(await timeOf(page, "Beta")).toBe("11 AM – 12 PM");
+  await expect(page.getByTestId("toast")).toContainText("Moved 1 of 2 events");
+  await expect(page.getByTestId("toast").getByRole("button", { name: /Undo/ })).toBeVisible();
+
+  await page.getByTestId("toast").getByRole("button", { name: /Undo/ }).click();
+  await expect.poll(() => timeOf(page, "Alpha")).toBe("9 – 10 AM");
+  expect(await timeOf(page, "Beta")).toBe("11 AM – 12 PM");
+});
+
 test("group drag: an event from a view-only calendar stays where it is", async ({ page }) => {
   await open(page);
   await chip(page, "Alpha").click({ modifiers: ["Shift"] });
@@ -102,6 +137,46 @@ test("group drag: an event from a view-only calendar stays where it is", async (
   expect(await timeOf(page, "Alpha")).toBe("11 AM – 12 PM");
   expect(await timeOf(page, "Standup (theirs)")).toBe("12 – 1 PM");
   await expect(page.getByTestId("toast")).toContainText("stayed");
+});
+
+test("selection drops an event deleted by a sync before the next group drag", async ({ page }) => {
+  await open(page);
+  await chip(page, "Alpha").click({ modifiers: ["Shift"] });
+  await chip(page, "Beta").click({ modifiers: ["Shift"] });
+  await expect(page.locator(".chip-timed.selected")).toHaveCount(2);
+
+  // Simulate a remote deletion arriving through the same mock DB-change path
+  // used by the real sync engine, without using the UI's local delete action.
+  await page.evaluate(async () => {
+    const { mockBackend } = await import("/src/lib/mockBackend.ts");
+    await mockBackend.deleteEvent("p", "g2");
+  });
+
+  await expect(page.locator(".chip-timed.selected"), "deleted events must not stay in the multi-selection").toHaveCount(1);
+  await expect(chip(page, "Alpha")).toHaveClass(/selected/);
+  await expect(chip(page, "Beta")).toHaveCount(0);
+
+  // A stale selected snapshot was still counted by WeekView, so dragging the
+  // surviving chip showed a ghost for the deleted event and sent a doomed
+  // second update alongside the valid move.
+  await dragBy(page, "Alpha", 0, 1, async () => {
+    await expect(page.getByTestId("group-ghost"), "no ghost for the remotely deleted event").toHaveCount(0);
+  });
+  expect(await timeOf(page, "Alpha")).toBe("10 – 11 AM");
+});
+
+test("sync deletion closes the event editor instead of leaving a stale snapshot", async ({ page }) => {
+  await open(page);
+  await chip(page, "Alpha").click();
+  const panel = page.getByTestId("event-panel");
+  await expect(panel).toBeVisible();
+
+  await page.evaluate(async () => {
+    const { mockBackend } = await import("/src/lib/mockBackend.ts");
+    await mockBackend.deleteEvent("p", "g1");
+  });
+
+  await expect(panel, "the editor must not remain actionable for a remotely deleted event").toHaveCount(0);
 });
 
 test("wall-clock shift: 9:00 stays 9:00 on the new day across the end of daylight saving", () => {

@@ -7,7 +7,7 @@
 // remembered relative to its event (lib/notePins.ts). Double-clicking a
 // moved note gives it back to the placer.
 
-import { Fragment, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { cleanDrill, splitDrill } from "../lib/drill";
 import { rgbToOklab } from "../lib/color";
 import {
@@ -82,8 +82,8 @@ const union = (rs: Rect[]): Rect | null =>
  *  note along with its event (followChips) */
 type Placed = { places: NotePlace[]; anchors: Map<string, Rect>; colW: number; chipX: Map<string, number> };
 const EMPTY: Placed = { places: [], anchors: new Map(), colW: 1, chipX: new Map() };
-/** how long the strip must rest after a swipe step before notes re-place */
-const PAN_SETTLE_MS = 160;
+/** Wait past WeekView's 180ms wheel-idle reset before re-placing notes. */
+const PAN_SETTLE_MS = 220;
 /** the sizes −/+ step through (1 = 12px); the placer's own crowded sizes
  *  (lib/marginNotes NOTE_SCALES) are among them. The corner scales freely
  *  between the ends. */
@@ -100,6 +100,8 @@ function reshaped(q: NotePlace, s: Shape): NotePlace {
 
 /** one placement worker for the app; null where workers aren't available */
 let worker: Worker | null | undefined;
+let workerBusy = false;
+let workerJobCleanup: (() => void) | null = null;
 function placer(): Worker | null {
   if (worker === undefined) {
     try {
@@ -109,6 +111,18 @@ function placer(): Worker | null {
     }
   }
   return worker;
+}
+
+/** A newer page supersedes any placement still queued in the worker. Stop
+ *  stale search/repair work instead of making the current notes wait behind
+ *  several layouts that can no longer be displayed. */
+function cancelPendingPlacement() {
+  if (!workerBusy) return;
+  workerJobCleanup?.();
+  worker?.terminate();
+  worker = undefined;
+  workerBusy = false;
+  workerJobCleanup = null;
 }
 
 export function MarginNotes(props: {
@@ -122,11 +136,15 @@ export function MarginNotes(props: {
   layoutKey: unknown;
   /** the first visible day; changing alone means the strip was swiped */
   firstDay: number;
+  /** pending visible-column shift for a wheel pan; null for other navigation */
+  panSteps: number | null;
   pxPerMin: number;
   keyOf: (e: CalendarEvent) => string;
   onSelect: (e: CalendarEvent) => void;
   onDelete: (e: CalendarEvent) => void;
 }) {
+  const hasRenderSink = typeof window !== "undefined" && Array.isArray((window as any).__marginRenderMarks);
+  const renderStartedAt = hasRenderSink ? performance.now() : null;
   const layerRef = useRef<HTMLDivElement>(null);
   const [placed, setPlaced] = useState<Placed>(EMPTY);
   /** the measured page last sent off, and the latest request number */
@@ -135,6 +153,16 @@ export function MarginNotes(props: {
   /** the box being sized, as it is under the pointer */
   const [sizing, setSizing] = useState<{ key: string; shape: Shape } | null>(null);
   const [pinTick, bumpPins] = useState(0);
+  useLayoutEffect(() => {
+    if (renderStartedAt === null) return;
+    const marks = (window as any).__marginRenderMarks;
+    if (Array.isArray(marks)) marks.push({
+      startTime: renderStartedAt,
+      commitTime: performance.now(),
+      placeCount: placed.places.length,
+      panSteps: props.panSteps,
+    });
+  });
   useLayoutEffect(() => subscribeNotePins(() => bumpPins((n) => n + 1)), []);
   const [fontTick, bumpFont] = useState(0);
   useLayoutEffect(() => {
@@ -149,12 +177,22 @@ export function MarginNotes(props: {
     };
   }, []);
 
-  const notesOf = new Map<string, { e: CalendarEvent; text: string }>();
-  for (const e of props.events) {
-    const t = cleanDrill(splitDrill(e.description).drill, e.summary);
-    if (t) notesOf.set(props.keyOf(e), { e, text: t });
-  }
-  const noteSig = [...notesOf].map(([k, v]) => k + "\u0001" + v.text).join("\u0002");
+  const noteIndexBuilds = typeof window !== "undefined" && Array.isArray((window as any).__marginNoteIndexBuilds)
+    ? (window as any).__marginNoteIndexBuilds as Array<{ eventCount: number; noteCount: number }>
+    : null;
+  const notesOf = useMemo(() => {
+    const notes = new Map<string, { e: CalendarEvent; text: string }>();
+    for (const e of props.events) {
+      const t = cleanDrill(splitDrill(e.description).drill, e.summary);
+      if (t) notes.set(props.keyOf(e), { e, text: t });
+    }
+    noteIndexBuilds?.push({ eventCount: props.events.length, noteCount: notes.size });
+    return notes;
+  }, [props.events, props.keyOf]);
+  const noteSig = useMemo(
+    () => [...notesOf].map(([k, v]) => k + "\u0001" + v.text).join("\u0002"),
+    [notesOf],
+  );
 
   /** A swipe step re-renders the strip one column over. Carry each placed
    *  note by exactly as far as its event's chip moved, in the same commit,
@@ -166,16 +204,31 @@ export function MarginNotes(props: {
     const layer = layerRef.current;
     const strip = props.stripRef.current;
     if (!layer || !strip || !placed.places.length) return;
-    const L = layer.getBoundingClientRect();
     const dxOf = new Map<string, number>();
     const chipX = new Map<string, number>();
-    for (const p of placed.places) {
-      const was = placed.chipX.get(p.key);
-      const el = strip.querySelector<HTMLElement>(`.chip-timed[data-ek="${CSS.escape(p.key)}"], .cluster-block [data-ek="${CSS.escape(p.key)}"]`);
-      if (was === undefined || !el) continue;
-      const x = el.getBoundingClientRect().left - L.left;
-      dxOf.set(p.key, x - was);
-      chipX.set(p.key, x);
+    if (props.panSteps != null && placed.colW > 0) {
+      // All three calendar strips move by the same cached column width. Notes
+      // follow that exact transform without querying chip geometry (which
+      // forced WebKit to lay out the dense grid after every day boundary).
+      const dx = -props.panSteps * placed.colW;
+      for (const p of placed.places) {
+        const was = placed.chipX.get(p.key);
+        if (was === undefined) continue;
+        dxOf.set(p.key, dx);
+        chipX.set(p.key, was + dx);
+      }
+    } else {
+      // Non-pan navigation can jump an arbitrary distance, so measure once
+      // and preserve the existing behavior for Today/arrows/mini-calendar.
+      const L = layer.getBoundingClientRect();
+      for (const p of placed.places) {
+        const was = placed.chipX.get(p.key);
+        const el = strip.querySelector<HTMLElement>(`.chip-timed[data-ek="${CSS.escape(p.key)}"], .cluster-block [data-ek="${CSS.escape(p.key)}"]`);
+        if (was === undefined || !el) continue;
+        const x = el.getBoundingClientRect().left - L.left;
+        dxOf.set(p.key, x - was);
+        chipX.set(p.key, x);
+      }
     }
     const shift = (r: Rect, dx: number): Rect => ({ x0: r.x0 + dx, y0: r.y0, x1: r.x1 + dx, y1: r.y1 });
     const anchors = new Map<string, Rect>();
@@ -197,12 +250,27 @@ export function MarginNotes(props: {
    *  keepShown: the notes on screen already point at the right events (they
    *  followed a swipe), so leave them up until the new spots are in. */
   const place = (keepShown: boolean) => {
+    const placeMeasures = typeof window === "undefined"
+      ? undefined
+      : (window as unknown as { __marginPlaceSyncMs?: Array<Record<string, number | boolean>> }).__marginPlaceSyncMs;
+    const measureStartedAt = Array.isArray(placeMeasures) ? performance.now() : null;
     const layer = layerRef.current;
     const strip = props.stripRef.current;
-    if (!layer || !strip) return;
+    if (!layer || !strip) {
+      lastRef.current.seq++;
+      cancelPendingPlacement();
+      return;
+    }
     const L = layer.getBoundingClientRect();
     if (L.width < 10 || L.height < 10 || !notesOf.size) {
+      // An in-flight worker still owns the current sequence unless explicitly
+      // invalidated. Without this, deleting the last visible annotation can
+      // clear it synchronously and then let an older placement draw it again.
+      lastRef.current.seq++;
+      cancelPendingPlacement();
       lastRef.current.page = "";
+      lastRef.current.notes = "";
+      layer.dataset.pending = "0";
       if (placed.places.length) setPlaced(EMPTY);
       return;
     }
@@ -312,6 +380,9 @@ export function MarginNotes(props: {
     const r1 = (r: Rect) => `${Math.round(r.x0)},${Math.round(r.y0)},${Math.round(r.x1)},${Math.round(r.y1)}`;
     const page = `${Math.round(field.w)}x${Math.round(field.h)}|${text.map(r1).join(";")}|${fills.map((f) => r1(f.r) + (f.poor ? "!" : "")).join(";")}`;
     const notesSig = JSON.stringify(specs.map((sp) => [sp.key, r1(sp.anchor), sp.words, sp.pin]));
+    if (measureStartedAt !== null && Array.isArray(placeMeasures)) {
+      placeMeasures.push({ durationMs: performance.now() - measureStartedAt, eventCount: props.events.length, chipCount: chips.length, noteCount: specs.length, keepShown });
+    }
     const last = lastRef.current;
     if (page === last.page && notesSig === last.notes) return;
     // the page itself changed (another week, a zoom): old notes would point
@@ -330,18 +401,52 @@ export function MarginNotes(props: {
       if (seq !== lastRef.current.seq) return; // a newer page is on its way
       if (layerRef.current) layerRef.current.dataset.pending = "0";
       (window as unknown as { __marginMs?: number }).__marginMs = ms;
-      setPlaced({ places, anchors, colW, chipX });
+      setPlaced((cur) => {
+        if (!keepShown) return { places, anchors, colW, chipX };
+        // A swipe has already carried every visible note by exactly the
+        // distance its chip moved. The settled placement is still needed to
+        // add notes entering the viewport and discard notes that left, but
+        // replacing surviving notes with its newly chosen positions makes
+        // them snap after the user's fingers stop (often by a whole column).
+        // Keep each survivor's event-relative position; use fresh placement
+        // only for newly visible notes.
+        const surviving = new Map(cur.places.map((p) => [p.key, p]));
+        return {
+          places: places.map((p) => surviving.get(p.key) ?? p),
+          anchors,
+          colW,
+          chipX,
+        };
+      });
     };
+    cancelPendingPlacement();
     const wk = placer();
     if (wk) {
       const t0 = performance.now();
-      const onMsg = (ev: MessageEvent<{ seq: number; places: NotePlace[] }>) => {
+      const onMsg = (ev: MessageEvent<{ seq: number; places: NotePlace[]; stages?: Array<{ stage: string; durationMs: number }> }>) => {
+        cleanup();
         if (ev.data.seq !== seq) return;
-        wk.removeEventListener("message", onMsg);
+        const stages = (window as any).__marginWorkerStages;
+        if (Array.isArray(stages) && ev.data.stages) stages.push(...ev.data.stages);
         done(ev.data.places, performance.now() - t0);
       };
+      const cleanup = () => {
+        wk.removeEventListener("message", onMsg);
+        if (worker === wk) {
+          workerBusy = false;
+          workerJobCleanup = null;
+        }
+      };
+      workerBusy = true;
+      workerJobCleanup = cleanup;
       wk.addEventListener("message", onMsg);
-      wk.postMessage({ seq, field, specs, widths: w });
+      wk.postMessage({
+        seq,
+        field,
+        specs,
+        widths: w,
+        profile: Array.isArray((window as any).__marginWorkerStages),
+      });
     } else {
       const t0 = performance.now();
       done(placeNotes(field, specs, (x) => w[x] ?? measure(x)), performance.now() - t0);
@@ -351,30 +456,77 @@ export function MarginNotes(props: {
   const placeRef = useRef(place);
   placeRef.current = place;
   const settleRef = useRef<number | null>(null);
+  const panSettlePendingRef = useRef(false);
+  const lastPanWheelAtRef = useRef(Number.NEGATIVE_INFINITY);
+  const scheduleSettleRef = useRef<() => void>(() => {});
+  scheduleSettleRef.current = () => {
+    if (settleRef.current != null) clearTimeout(settleRef.current);
+    panSettlePendingRef.current = true;
+    settleRef.current = window.setTimeout(() => {
+      settleRef.current = null;
+      panSettlePendingRef.current = false;
+      const runs = (window as unknown as { __marginSettleRuns?: number[] }).__marginSettleRuns;
+      if (Array.isArray(runs)) runs.push(performance.now());
+      placeRef.current(true);
+    }, PAN_SETTLE_MS);
+  };
   const depsRef = useRef<unknown[] | null>(null);
+  const firstDayRef = useRef(props.firstDay);
+  useEffect(() => {
+    const grid = props.stripRef.current?.closest<HTMLElement>(".weekview");
+    if (!grid) return;
+    const onWheel = (event: WheelEvent) => {
+      if (event.deltaX === 0) return;
+      lastPanWheelAtRef.current = performance.now();
+      if (!panSettlePendingRef.current) {
+        panSettlePendingRef.current = true;
+        // A worker result from before the gesture can otherwise commit new
+        // note boxes into the same frame as a trackpad packet. Invalidate and
+        // cancel it now; the settle pass below will measure the latest strip.
+        lastRef.current.seq++;
+        lastRef.current.page = "";
+        lastRef.current.notes = "";
+        if (layerRef.current) layerRef.current.dataset.pending = "1";
+        cancelPendingPlacement();
+      }
+      scheduleSettleRef.current();
+    };
+    grid.addEventListener("wheel", onWheel, { passive: true });
+    return () => grid.removeEventListener("wheel", onWheel);
+  }, [props.stripRef]);
   useLayoutEffect(() => {
     const deps = [props.layoutKey, props.days, props.pxPerMin, noteSig, pinTick, fontTick];
     const prev = depsRef.current;
     depsRef.current = deps;
+    const firstDayChanged = firstDayRef.current !== props.firstDay;
+    firstDayRef.current = props.firstDay;
     if (settleRef.current != null) {
       clearTimeout(settleRef.current);
       settleRef.current = null;
     }
-    if (prev && deps.every((d, i) => d === prev[i])) {
-      // only firstDay moved: a swipe step
+    const layoutUnchanged = prev && deps.every((d, i) => d === prev[i]);
+    const panIsActive = performance.now() - lastPanWheelAtRef.current < PAN_SETTLE_MS;
+    const isSwipeStep = firstDayChanged && !!layoutUnchanged;
+    if (firstDayChanged && (layoutUnchanged || panSettlePendingRef.current || panIsActive)) {
       followChips();
-      settleRef.current = window.setTimeout(() => {
-        settleRef.current = null;
-        placeRef.current(true);
-      }, PAN_SETTLE_MS);
+    }
+    if (isSwipeStep || panSettlePendingRef.current || panIsActive) {
+      // A day-boundary update is only one part of a trackpad gesture. Keep
+      // deferring note measurement while later packets move within a column,
+      // or while range data/layout updates arrive during the same gesture.
+      scheduleSettleRef.current();
       return;
     }
+    if (layoutUnchanged) return;
+    panSettlePendingRef.current = false;
     place(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.layoutKey, props.days, props.pxPerMin, noteSig, pinTick, fontTick, props.firstDay]);
   useLayoutEffect(
     () => () => {
       if (settleRef.current != null) clearTimeout(settleRef.current);
+      lastRef.current.seq++;
+      cancelPendingPlacement();
     },
     [],
   );
@@ -536,12 +688,13 @@ export function MarginNotes(props: {
   };
 
   const pct = 100 / props.extN;
+  const overscanBefore = (props.extN - props.days) / 2;
   const shown = (p: NotePlace) => (sizing?.key === p.key ? reshaped(p, sizing.shape) : p);
   return (
     <div
       className="margin-notes"
       ref={layerRef}
-      style={{ left: `${pct}%`, width: `${pct * props.days}%` }}
+      style={{ left: `${pct * overscanBefore}%`, width: `${pct * props.days}%` }}
       data-testid="margin-notes"
     >
       <svg className="mn-leaders" aria-hidden>
