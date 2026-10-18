@@ -19,7 +19,10 @@ async function open(page: Page) {
   const ev = (calendar_id: string, summary: string, d: number, h0: number, h1: number) => ({
     id: `g${++n}`, calendar_id, etag: null, summary, description: null, location: null,
     start: at(d, h0), end: at(d, h1), all_day: false, timezone: null, status: "confirmed",
-    recurrence: null, recurring_event_id: null, conference_url: null, updated: null, raw: {},
+    recurrence: null, recurring_event_id: null, conference_url: null, updated: null,
+    raw: summary === "Alpha"
+      ? { attendees: [{ email: "guest@example.invalid", responseStatus: "accepted" }] }
+      : {},
   });
   const fixture = {
     calendars: [cal("p", "Personal"), cal("team", "Team (view only)", "reader")],
@@ -83,6 +86,11 @@ test("group drag: every selected event moves together, with a ghost each, and st
   expect(await timeOf(page, "Beta")).toBe("12 – 1 PM");
   expect(await timeOf(page, "Gamma")).toBe("2 – 3 PM");
   await expect(page.locator(".chip-timed.selected"), "the group stays selected").toHaveCount(2);
+  const guestStatus = await page.evaluate(async () =>
+    (await (window as any).__mockBackend.listEvents("2026-10-11", "2026-10-18"))
+      .find((event: any) => event.summary === "Alpha").raw.attendees[0].responseStatus,
+  );
+  expect(guestStatus, "a time-only move must not rewrite guest RSVP state").toBe("accepted");
 
   // drag the same group again: it moves from where it is now
   await dragBy(page, "Beta", 0, 1);
@@ -93,6 +101,30 @@ test("group drag: every selected event moves together, with a ghost each, and st
   await page.keyboard.press("ControlOrMeta+z");
   await expect.poll(() => timeOf(page, "Beta")).toBe("12 – 1 PM");
   expect(await timeOf(page, "Alpha")).toBe("10 – 11 AM");
+});
+
+test("group drag: partial update failure is reported and successful moves remain undoable", async ({ page }) => {
+  await open(page);
+  await page.evaluate(() => {
+    const backend = (window as any).__mockBackend;
+    const update = backend.updateEvent.bind(backend);
+    backend.updateEvent = (eventId: string, input: any, previousCalendarId?: string) =>
+      eventId === "g2"
+        ? Promise.reject(new Error("simulated update failure"))
+        : update(eventId, input, previousCalendarId);
+  });
+  await chip(page, "Alpha").click({ modifiers: ["Shift"] });
+  await chip(page, "Beta").click({ modifiers: ["Shift"] });
+  await dragBy(page, "Alpha", 1, 1);
+
+  expect(await timeOf(page, "Alpha")).toBe("10 – 11 AM");
+  expect(await timeOf(page, "Beta")).toBe("11 AM – 12 PM");
+  await expect(page.getByTestId("toast")).toContainText("Moved 1 of 2 events");
+  await expect(page.getByTestId("toast").getByRole("button", { name: /Undo/ })).toBeVisible();
+
+  await page.getByTestId("toast").getByRole("button", { name: /Undo/ }).click();
+  await expect.poll(() => timeOf(page, "Alpha")).toBe("9 – 10 AM");
+  expect(await timeOf(page, "Beta")).toBe("11 AM – 12 PM");
 });
 
 test("group drag: an event from a view-only calendar stays where it is", async ({ page }) => {

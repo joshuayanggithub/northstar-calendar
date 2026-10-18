@@ -1,4 +1,12 @@
-import { Profiler, useCallback, useEffect, useMemo, useState, type ProfilerOnRenderCallback } from "react";
+import {
+  Profiler,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useState,
+  type ProfilerOnRenderCallback,
+} from "react";
 import {
   addDays,
   addMonths,
@@ -87,6 +95,79 @@ function inputOf(e: CalendarEvent): EventInput {
   };
 }
 
+/** Full editable snapshot for undo. Copy/duplicate intentionally use inputOf
+ * so they don't inherit attendees or private editor-only metadata. */
+function undoInputOf(e: CalendarEvent): EventInput {
+  const raw = e.raw ?? {};
+  return {
+    ...inputOf(e),
+    // An omitted attendee list means "leave unchanged" to Google PATCH. For
+    // Undo, no original guests must be an explicit empty list so newly added
+    // guests are actually removed again.
+    attendee_details: Array.isArray(raw.attendees) ? raw.attendees : [],
+    reminders: raw.reminders ?? { useDefault: true },
+    transparency: raw.transparency ?? "opaque",
+    visibility: raw.visibility ?? "default",
+  };
+}
+
+/** Google replaces an attendee array supplied to PATCH. Avoid writing it when
+ *  the editor hasn't changed it; if it did change, preserve each retained
+ *  attendee resource (especially responseStatus) and default only new guests. */
+function attendeeSafeUpdate(e: CalendarEvent, input: EventInput): EventInput {
+  if (input.attendee_details !== undefined || input.attendees == null) return input;
+  const prior = Array.isArray(e.raw?.attendees)
+    ? e.raw.attendees as Array<Record<string, unknown>>
+    : [];
+  const priorEmails = prior
+    .map((attendee) => typeof attendee.email === "string" ? attendee.email : "")
+    .filter(Boolean);
+  const normalize = (emails: string[]) => [...emails].map((email) => email.toLowerCase()).sort();
+  const desiredEmails = normalize(input.attendees);
+  const currentEmails = normalize(priorEmails);
+  if (desiredEmails.length === currentEmails.length &&
+      desiredEmails.every((email, index) => email === currentEmails[index])) {
+    const unchanged = { ...input };
+    delete unchanged.attendees;
+    return unchanged;
+  }
+  const attendeesWithoutEmail = prior.filter((attendee) =>
+    typeof attendee.email !== "string" || !attendee.email,
+  );
+  return {
+    ...input,
+    attendee_details: [
+      ...attendeesWithoutEmail,
+      ...input.attendees.map((email) => {
+        const existing = prior.find((attendee) =>
+          typeof attendee.email === "string" && attendee.email.toLowerCase() === email.toLowerCase(),
+        );
+        return existing ? { ...existing } : { email, responseStatus: "needsAction" };
+      }),
+    ],
+  };
+}
+
+function reminderSafeUpdate(e: CalendarEvent, input: EventInput): EventInput {
+  if (input.reminders !== undefined || input.reminder_minutes === undefined) return input;
+  const raw = e.raw?.reminders as Record<string, any> | undefined;
+  const previousMinutes = raw?.useDefault === false
+    ? raw.overrides?.[0]?.minutes ?? null
+    : null;
+  if (input.reminder_minutes !== previousMinutes) return input;
+
+  // The editor exposes a single reminder choice, while Google resources may
+  // contain several methods/overrides. An untouched selector must round-trip
+  // the full resource instead of collapsing it to its first minutes value.
+  const unchanged = { ...input, reminders: raw ?? { useDefault: true } };
+  delete unchanged.reminder_minutes;
+  return unchanged;
+}
+
+function eventMetadataSafeUpdate(e: CalendarEvent, input: EventInput): EventInput {
+  return reminderSafeUpdate(e, attendeeSafeUpdate(e, input));
+}
+
 export interface EventActions {
   create(input: EventInput): Promise<string | null>;
   update(ev: CalendarEvent, input: EventInput, label?: string): Promise<void>;
@@ -115,6 +196,24 @@ function openExternal(url: string) {
 }
 
 export default function App() {
+  // Production pan diagnostics install these sinks before input begins. React's
+  // Profiler callback is intentionally development-only; measuring the app
+  // shell here catches work around WeekView (for example, a day-window state
+  // change) without clock reads or allocations during normal use.
+  const hasAppRenderSink = typeof window !== "undefined" && (
+    Array.isArray((window as any).__calendarAppRenderDurations) ||
+    Array.isArray((window as any).__calendarAppRenderMarks)
+  );
+  const appRenderStartedAt = hasAppRenderSink ? performance.now() : null;
+  useLayoutEffect(() => {
+    if (appRenderStartedAt === null) return;
+    const commitTime = performance.now();
+    const duration = commitTime - appRenderStartedAt;
+    const durations = (window as any).__calendarAppRenderDurations;
+    if (Array.isArray(durations)) durations.push(duration);
+    const marks = (window as any).__calendarAppRenderMarks;
+    if (Array.isArray(marks)) marks.push({ startTime: appRenderStartedAt, commitTime, actualDuration: duration });
+  });
   const backend = useBackendInit();
   const authed = useAuth(backend);
   const { calendars } = useCalendars(backend);
@@ -344,8 +443,8 @@ export default function App() {
           askScope({ kind: "edit", event: ev, input, label, canSplit: true });
           return;
         }
-        const prev = inputOf(ev);
-        await backend.updateEvent(ev.id, input, ev.calendar_id);
+        const prev = undoInputOf(ev);
+        await backend.updateEvent(ev.id, eventMetadataSafeUpdate(ev, input), ev.calendar_id);
         recordUndo(label ?? `Updated “${ev.summary}”`, async () => {
           // restore, including a calendar move back if one happened
           await backend.updateEvent(ev.id, prev, input.calendar_id);
@@ -361,7 +460,7 @@ export default function App() {
           askScope({ kind: "delete", event: ev, canSplit: true });
           return;
         }
-        const snapshot = inputOf(ev);
+        const snapshot = undoInputOf(ev);
         await backend.deleteEvent(ev.calendar_id, ev.id);
         // close any panel showing it and drop selection
         setPanel((p) =>
@@ -380,7 +479,7 @@ export default function App() {
           showToast(`“${ev.summary}” is on a read-only calendar`, false);
           return;
         }
-        const snapshot = inputOf(ev);
+        const snapshot = undoInputOf(ev);
         await backend.deleteEvent(ev.calendar_id, ev.id);
         setPanel((p) =>
           p.mode === "view" && p.event.id === ev.id && p.event.calendar_id === ev.calendar_id
@@ -389,7 +488,8 @@ export default function App() {
         );
         setSelected((sel) => sel.filter((s) => !(s.id === ev.id && s.calendar_id === ev.calendar_id)));
         recordUndo(`Didn't happen — deleted “${ev.summary}”`, async () => {
-          await backend.createEvent(snapshot);
+          if (ev.recurring_event_id) await backend.restoreRecurringOccurrence(ev);
+          else await backend.createEvent(snapshot);
         });
       },
       async setNote(ev, note) {
@@ -519,18 +619,38 @@ export default function App() {
         showToast("Selection is read-only", false);
         return;
       }
-      const snapshots = editable.map(inputOf);
-      await Promise.all(editable.map((e) => backend.deleteEvent(e.calendar_id, e.id)));
-      setSelected([]);
+      const results = await Promise.allSettled(
+        editable.map((e) => backend.deleteEvent(e.calendar_id, e.id)),
+      );
+      const deleted = editable.filter((_, index) => results[index].status === "fulfilled");
+      const failed = editable.length - deleted.length;
+      const deletedKeys = new Set(deleted.map((e) => `${e.calendar_id}/${e.id}`));
+      if (deleted.length === 0) {
+        showToast(
+          `Couldn't delete any of the ${editable.length} selected events` +
+            (skipped ? ` (${skipped} read-only skipped)` : ""),
+          false,
+        );
+        return;
+      }
+      const snapshots = deleted.map(undoInputOf);
+      setSelected((sel) => sel.filter((e) => !deletedKeys.has(`${e.calendar_id}/${e.id}`)));
       setPanel((p) =>
-        p.mode === "view" && editable.some((e) => keyOfEv(e) === keyOfEv(p.event))
+        p.mode === "view" && deletedKeys.has(`${p.event.calendar_id}/${p.event.id}`)
           ? { mode: "closed" }
           : p,
       );
       recordUndo(
-        `Deleted ${editable.length} events${skipped ? ` (${skipped} read-only skipped)` : ""}`,
+        (failed
+          ? `Deleted ${deleted.length} of ${editable.length} events; ${failed} failed`
+          : `Deleted ${deleted.length} events`) +
+          (skipped ? ` (${skipped} read-only skipped)` : ""),
         async () => {
-          await Promise.all(snapshots.map((snap) => backend.createEvent(snap)));
+          await Promise.all(deleted.map((event, index) =>
+            event.recurring_event_id
+              ? backend.restoreRecurringOccurrence(event)
+              : backend.createEvent(snapshots[index]),
+          ));
         },
       );
     },
@@ -541,21 +661,46 @@ export default function App() {
     async (evs: CalendarEvent[]) => {
       if (!backend) return;
       const ids: { cal: string; id: string }[] = [];
+      let failed = 0;
+      let skipped = 0;
       for (const ev of evs) {
         const input = inputOf(ev);
         if (isReadOnly(ev)) {
           const target =
             calendars.find((c) => calendarEditable(c) && c.is_primary) ??
             calendars.find((c) => calendarEditable(c));
-          if (!target) continue;
+          if (!target) {
+            skipped++;
+            continue;
+          }
           input.calendar_id = target.id;
         }
-        const id = await backend.createEvent(input);
-        if (id) ids.push({ cal: input.calendar_id, id });
+        try {
+          const id = await backend.createEvent(input);
+          if (id) ids.push({ cal: input.calendar_id, id });
+          else failed++;
+        } catch {
+          failed++;
+        }
       }
-      recordUndo(`Duplicated ${ids.length} events`, async () => {
-        await Promise.all(ids.map(({ cal, id }) => backend.deleteEvent(cal, id)));
-      });
+      if (ids.length === 0) {
+        showToast(
+          `Couldn't duplicate any of the ${evs.length} selected events` +
+            (skipped ? ` (${skipped} had no editable destination)` : ""),
+          false,
+        );
+        return;
+      }
+      const attempted = evs.length - skipped;
+      recordUndo(
+        (failed
+          ? `Duplicated ${ids.length} of ${attempted} events; ${failed} failed`
+          : `Duplicated ${ids.length} events`) +
+          (skipped ? ` (${skipped} had no editable destination)` : ""),
+        async () => {
+          await Promise.all(ids.map(({ cal, id }) => backend.deleteEvent(cal, id)));
+        },
+      );
     },
     [backend, calendars, isReadOnly],
   );
@@ -571,7 +716,7 @@ export default function App() {
       const movable = selected.filter((e) => !isReadOnly(e) && !e.all_day);
       if (movable.length === 0) return;
       const prevs = movable.map((e) => [e, inputOf(e)] as const);
-      await Promise.all(
+      const results = await Promise.allSettled(
         movable.map((e) => {
           const { start, end } = eventDates(e);
           const input = {
@@ -582,11 +727,20 @@ export default function App() {
           return backend.updateEvent(e.id, input, e.calendar_id);
         }),
       );
+      const movedPrevs = prevs.filter((_, index) => results[index].status === "fulfilled");
+      const failed = results.length - movedPrevs.length;
       const left = selected.length - movable.length;
+      if (movedPrevs.length === 0) {
+        showToast(`Couldn't move any of the ${movable.length} selected events`, false);
+        return;
+      }
       recordUndo(
-        `Moved ${movable.length} events` + (left ? ` (${left} read-only or all-day stayed)` : ""),
+        (failed
+          ? `Moved ${movedPrevs.length} of ${movable.length} events; ${failed} failed`
+          : `Moved ${movedPrevs.length} events`) +
+          (left ? ` (${left} read-only or all-day stayed)` : ""),
         async () => {
-          await Promise.all(prevs.map(([e, prev]) => backend.updateEvent(e.id, prev, e.calendar_id)));
+          await Promise.all(movedPrevs.map(([e, prev]) => backend.updateEvent(e.id, prev, e.calendar_id)));
         },
       );
     },
@@ -642,10 +796,9 @@ export default function App() {
       try {
         if (p.kind === "delete") {
           if (effectiveScope === "this") {
-            const snapshot = inputOf(ev);
             await backend.deleteEvent(ev.calendar_id, ev.id);
             recordUndo(`Deleted “${ev.summary}”`, async () => {
-              await backend.createEvent(snapshot);
+              await backend.restoreRecurringOccurrence(ev);
             });
           } else if (effectiveScope === "all") {
             await backend.deleteEvent(ev.calendar_id, masterId);
@@ -662,8 +815,8 @@ export default function App() {
         }
         const input = p.input!;
         if (effectiveScope === "this") {
-          const prev = inputOf(ev);
-          await backend.updateEvent(ev.id, input, ev.calendar_id);
+          const prev = undoInputOf(ev);
+          await backend.updateEvent(ev.id, eventMetadataSafeUpdate(ev, input), ev.calendar_id);
           recordUndo(p.label ?? `Updated “${ev.summary}”`, async () => {
             await backend.updateEvent(ev.id, prev, input.calendar_id);
           });
@@ -696,12 +849,50 @@ export default function App() {
                 : { useDefault: false, overrides: [{ method: "popup", minutes: input.reminder_minutes }] };
             }
           }
+          if (input.with_meet) {
+            patch.conferenceData = {
+              createRequest: {
+                requestId: crypto.randomUUID(),
+                conferenceSolutionKey: { type: "hangoutsMeet" },
+              },
+            };
+          }
           if (input.attendees) {
-            const prior = (ev.raw?.attendees ?? []) as { email: string }[];
-            const emails = (values: string[]) => [...values].map((email) => email.toLowerCase()).sort().join("\n");
-            if (emails(input.attendees) !== emails(prior.map((attendee) => attendee.email))) {
-              patch.attendees = input.attendees.map((email) =>
-                prior.find((attendee) => attendee.email.toLowerCase() === email.toLowerCase()) ?? { email });
+            const instanceAttendees = Array.isArray(ev.raw?.attendees)
+              ? ev.raw.attendees as Array<Record<string, unknown>>
+              : [];
+            const seriesAttendees = Array.isArray(master?.attendees)
+              ? master.attendees as Array<Record<string, unknown>>
+              : instanceAttendees;
+            const emailOf = (attendee: Record<string, unknown>) =>
+              typeof attendee.email === "string" && attendee.email ? attendee.email : null;
+            const normalizeEmails = (values: string[]) =>
+              [...values].map((email) => email.toLowerCase()).sort().join("\n");
+            const instanceEmails = instanceAttendees
+              .map(emailOf).filter((email): email is string => email !== null);
+            const seriesEmails = seriesAttendees
+              .map(emailOf).filter((email): email is string => email !== null);
+            if (normalizeEmails(input.attendees) !== normalizeEmails(instanceEmails)) {
+              // Apply only the user's attendee-list delta from this exception
+              // to the series master. Replacing the master from the exception's
+              // full list drops master-only guests whenever the two differ.
+              const before = new Set(instanceEmails.map((email) => email.toLowerCase()));
+              const desired = new Set(input.attendees.map((email) => email.toLowerCase()));
+              const removed = new Set([...before].filter((email) => !desired.has(email)));
+              const seriesSet = new Set(seriesEmails.map((email) => email.toLowerCase()));
+              // The editor only displays attendees with an email. Keep API
+              // attendee rows it cannot represent. A recurring-master patch
+              // must preserve the master attendee's RSVP, not copy a possibly
+              // different response from the selected exception instance.
+              patch.attendees = [
+                ...seriesAttendees.filter((attendee) => {
+                  const email = emailOf(attendee);
+                  return email === null || !removed.has(email.toLowerCase());
+                }),
+                ...input.attendees
+                  .filter((email) => !before.has(email.toLowerCase()) && !seriesSet.has(email.toLowerCase()))
+                  .map((email) => ({ email, responseStatus: "needsAction" })),
+              ];
             }
           }
           const timesChanged = input.all_day !== ev.all_day ||
@@ -758,8 +949,9 @@ export default function App() {
           // a sync pass between them pulled the old series' cancelled tail
           // before the new series existed, and the rest of the series
           // vanished from view until the next pass.
+          const splitInput = reminderSafeUpdate(ev, input);
           await backend.splitSeries(ev.calendar_id, masterId, [truncateRule(rrule, selectedOriginal, ev.all_day)], {
-            ...input,
+            ...splitInput,
             description: splitDrill(input.description).body || null,
             recurrence: [nextRule],
           }, countSplit);
@@ -1199,11 +1391,28 @@ export default function App() {
     const begin = (clientX: number): Pinch | null => {
       const { view: v, dayCount: n, days } = zoomStateRef.current;
       if ((v !== "week" && v !== "day") || !days.length) return null;
-      // the visible days (the strip also holds a column either side)
-      const clip = (el.querySelector(".day-clip") ?? el).getBoundingClientRect();
+      // Use the header viewport's unscrolled origin, not the rendered header
+      // edges. With fractional column widths, scrollLeft can be quantized by
+      // the browser; measuring the shifted headers then adds that rounding
+      // error to the pinch fraction and can move the anchor by a whole day.
       const shown = v === "week" ? days.length : n;
-      const frac = Math.min(0.999, Math.max(0, (clientX - clip.left) / Math.max(1, clip.width)));
-      return { base: shown, dayUnder: days[Math.min(days.length - 1, Math.floor(frac * shown))], frac, scale: 1, t: 0 };
+      const headers = [...el.querySelectorAll<HTMLElement>(".day-head")];
+      const first = headers[0]?.getBoundingClientRect();
+      const last = headers[headers.length - 1]?.getBoundingClientRect();
+      const weekGrid = el.querySelector<HTMLElement>(".weekview");
+      const clip = weekGrid?.querySelector<HTMLElement>(".day-headers .pan-clip");
+      const clipRect = clip?.getBoundingClientRect();
+      const fallback = (el.querySelector(".day-clip") ?? el).getBoundingClientRect();
+      const left = clipRect && weekGrid ? clipRect.left + weekGrid.scrollLeft : first?.left ?? fallback.left;
+      const width = clip?.clientWidth ?? (first && last ? last.right - first.left : fallback.width);
+      const frac = Math.min(0.999, Math.max(0, (clientX - left) / Math.max(1, width)));
+      const underHeader = headers.findIndex((header) => {
+        const rect = header.getBoundingClientRect();
+        return clientX >= rect.left && clientX < rect.right;
+      });
+      const index = underHeader >= 0 ? underHeader : Math.floor(frac * shown);
+      const dayUnder = days[Math.min(days.length - 1, index)];
+      return { base: shown, dayUnder, frac, scale: 1, t: 0 };
     };
     const apply = (p: Pinch) => {
       const n = Math.min(9, Math.max(1, Math.round(p.base / p.scale)));
@@ -1216,15 +1425,39 @@ export default function App() {
       setDayCount(n);
       setView("day");
     };
-    const onWheel = (e: WheelEvent) => {
+    const applyWheelPinch = (e: WheelEvent, cancelBrowserZoom: boolean) => {
       if (!e.ctrlKey || gesture) return;
-      e.preventDefault(); // not the page's own zoom
+      if (cancelBrowserZoom) e.preventDefault(); // not the page's own zoom
       const tNow = performance.now();
       if (!pinch || tNow - pinch.t > 300) pinch = begin(e.clientX);
       if (!pinch) return;
       pinch.t = tNow;
       pinch.scale *= Math.exp(-e.deltaY / 100);
       apply(pinch);
+    };
+    let controlHeld = false;
+    const onWheelPassive = (e: WheelEvent) => {
+      // Normal wheel/trackpad input must not wait for this main-thread
+      // listener. WebKit reports native pinch with gesture events; this branch
+      // also supports synthetic ctrl-wheel pinch events used by browser tests.
+      if (!controlHeld) applyWheelPinch(e, false);
+    };
+    const onControlWheel = (e: WheelEvent) => applyWheelPinch(e, true);
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Control" || controlHeld) return;
+      controlHeld = true;
+      // A real Ctrl+wheel gesture should zoom the app, not the web page. Keep
+      // the cancelable listener installed only while the user holds Control.
+      el.addEventListener("wheel", onControlWheel, { passive: false });
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key !== "Control" || !controlHeld) return;
+      controlHeld = false;
+      el.removeEventListener("wheel", onControlWheel);
+    };
+    const onBlur = () => {
+      controlHeld = false;
+      el.removeEventListener("wheel", onControlWheel);
     };
     type GestureLike = Event & { scale?: number; clientX?: number };
     const onGestureStart = (e: Event) => {
@@ -1244,12 +1477,19 @@ export default function App() {
       gesture = false;
       pinch = null;
     };
-    el.addEventListener("wheel", onWheel, { passive: false });
+    el.addEventListener("wheel", onWheelPassive, { passive: true });
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
     el.addEventListener("gesturestart", onGestureStart);
     el.addEventListener("gesturechange", onGestureChange);
     el.addEventListener("gestureend", onGestureEnd);
     return () => {
-      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("wheel", onWheelPassive);
+      el.removeEventListener("wheel", onControlWheel);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
       el.removeEventListener("gesturestart", onGestureStart);
       el.removeEventListener("gesturechange", onGestureChange);
       el.removeEventListener("gestureend", onGestureEnd);

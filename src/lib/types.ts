@@ -53,6 +53,10 @@ export interface EventInput {
   recurrence?: string[] | null;
   /** attendee emails */
   attendees?: string[] | null;
+  /** Full attendee resources when editing/undoing, to preserve RSVP metadata. */
+  attendee_details?: Record<string, unknown>[];
+  /** Full Google reminder resource, used by undo snapshots to preserve every override. */
+  reminders?: Record<string, unknown>;
   /** "opaque" (busy) | "transparent" (free) */
   transparency?: string | null;
   /** "default" | "public" | "private" */
@@ -114,6 +118,8 @@ export interface Backend {
   createEvent(input: EventInput): Promise<string>;
   updateEvent(eventId: string, input: EventInput, prevCalendarId?: string): Promise<void>;
   deleteEvent(calendarId: string, eventId: string): Promise<void>;
+  /** Restore a deleted recurring instance in place, preserving its series ID. */
+  restoreRecurringOccurrence(event: CalendarEvent): Promise<void>;
   /** Set (null clears) one event's red-pen note, read-modify-write on the
    *  stored description; only the description changes. Resolves to the
    *  note it replaced. */

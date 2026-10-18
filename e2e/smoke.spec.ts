@@ -243,6 +243,27 @@ test("parity: cmd+d duplicates the selected event", async ({ page }) => {
   await expect(page.locator(".chip-timed", { hasText: "Standup" })).toHaveCount(1);
 });
 
+test("multiselect duplicate: partial backend failure is reported and successful copies remain undoable", async ({ page }) => {
+  await open(page);
+  await page.evaluate(() => {
+    const backend = (window as any).__mockBackend;
+    const create = backend.createEvent.bind(backend);
+    backend.createEvent = (input: any) =>
+      input.summary === "Standup" ? Promise.reject(new Error("simulated create failure")) : create(input);
+  });
+  await page.locator(".chip-timed", { hasText: "Morning run" }).click({ modifiers: ["Shift"] });
+  await page.locator(".chip-timed", { hasText: "Standup" }).click({ modifiers: ["Shift"] });
+  await page.keyboard.press("ControlOrMeta+d");
+
+  await expect(page.locator(".chip-timed", { hasText: "Morning run" })).toHaveCount(2);
+  await expect(page.locator(".chip-timed", { hasText: "Standup" })).toHaveCount(1);
+  await expect(page.getByTestId("toast")).toContainText("Duplicated 1 of 2 events");
+  await expect(page.getByTestId("toast").getByRole("button", { name: /Undo/ })).toBeVisible();
+  await page.getByTestId("toast").getByRole("button", { name: /Undo/ }).click();
+  await expect(page.locator(".chip-timed", { hasText: "Morning run" })).toHaveCount(1);
+  await expect(page.locator(".chip-timed", { hasText: "Standup" })).toHaveCount(1);
+});
+
 test("parity: ended events fade once confirmed; now pill and global line shown", async ({ page }) => {
   await open(page); // now = 9:00, Morning run ends 8:00 -> ended but unconfirmed
   await expect(page.locator(".chip-timed", { hasText: "Morning run" })).toHaveClass(/unsettled/);
@@ -678,48 +699,202 @@ test("gesture: changing visible days clears a partial horizontal pan", async ({ 
   const box = (await grid.boundingBox())!;
   await page.mouse.move(box.x + box.width / 2, box.y + 200);
   await page.mouse.wheel(40, 0);
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   await page.keyboard.press("ControlOrMeta+Shift+e");
   await expect(page.locator(".day-head")).toHaveCount(5);
   const first = (await page.locator(".day-head").first().boundingBox())!;
-  const clip = (await page.locator(".day-headers .pan-clip").boundingBox())!;
-  expect(Math.abs(first.x - clip.x)).toBeLessThan(1);
+  const body = (await page.getByTestId("day-col-0").boundingBox())!;
+  const base = await page.locator(".day-clip").evaluate((el) => 2 * el.clientWidth / 5);
+  const scrollLeft = await grid.evaluate((el) => el.scrollLeft);
+  expect(Math.abs(first.x - body.x)).toBeLessThan(1);
+  expect(Math.abs(scrollLeft - base)).toBeLessThan(1);
 });
 
 test("gesture: partial horizontal scroll stays put and resumes without springback", async ({ page }) => {
   await open(page);
-  const grid = (await page.getByTestId("week-grid").boundingBox())!;
-  await page.mouse.move(grid.x + grid.width / 2, grid.y + 200);
+  const grid = page.getByTestId("week-grid");
+  const box = (await grid.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + 200);
   const first = page.locator(".day-head").first();
   const start = (await first.boundingBox())!.x;
   await page.mouse.wheel(40, 0);
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   const moved = (await first.boundingBox())!.x;
   expect(start - moved).toBeGreaterThan(35);
   await page.waitForTimeout(350);
   expect(Math.abs((await first.boundingBox())!.x - moved)).toBeLessThan(1);
   await page.mouse.wheel(40, 0);
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   expect(Math.abs((await first.boundingBox())!.x - (moved - 40))).toBeLessThan(2);
 });
 
-test("gesture: a wheel burst uses cached geometry and one transform paint per frame", async ({ page }) => {
+test("gesture: annotation placement waits for the full horizontal wheel stream to settle", async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as any).__marginSettleRuns = [];
+    (window as any).__marginPlaceSyncMs = [];
+    const events = Array.from({ length: 400 }, (_, i) => {
+      const day = 14 + Math.floor(i / 45);
+      const minuteOfDay = 8 * 60 + (i % 45) * 10;
+      const stamp = (minute: number) => {
+        const d = day + Math.floor(minute / 1440);
+        const m = minute % 1440;
+        return `2026-10-${String(d).padStart(2, "0")}T${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}:00-04:00`;
+      };
+      return {
+        id: `pan-note-${i}`,
+        calendar_id: "primary",
+        etag: null,
+        summary: `Pan event ${i}`,
+        description: i % 20 === 0 ? `[DRILL] Note ${i}` : null,
+        location: null,
+        start: stamp(minuteOfDay),
+        end: stamp(minuteOfDay + 30 + (i % 3) * 15),
+        all_day: false,
+        timezone: "America/New_York",
+        status: "confirmed",
+        recurrence: null,
+        recurring_event_id: null,
+        conference_url: null,
+        updated: null,
+        raw: {},
+      };
+    });
+    (window as any).__calFixture = {
+      calendars: [{ id: "primary", summary: "Personal", color: "#4f8cff", is_primary: true, hidden: false, access_role: "owner" }],
+      events,
+    };
+  });
+  await open(page);
+  await page.keyboard.press("9");
+  await expect(page.locator(".day-head")).toHaveCount(9);
+  await expect(page.locator(".margin-note")).toHaveCount(20);
+  await page.evaluate(() => {
+    (window as any).__marginSettleRuns.length = 0;
+    (window as any).__marginPlaceSyncMs.length = 0;
+  });
+
+  const stream = await page.evaluate(async () => {
+    const grid = document.querySelector<HTMLElement>("[data-testid=week-grid]")!;
+    const width = (document.querySelector<HTMLElement>(".day-clip")!.clientWidth) / 9;
+    const wheel = (deltaX: number) => grid.dispatchEvent(new WheelEvent("wheel", {
+      deltaX, deltaY: 0, bubbles: true, cancelable: true,
+    }));
+    wheel(width + 2);
+    await new Promise<void>((resolve, reject) => {
+      const deadline = performance.now() + 2000;
+      const waitForShift = () => {
+        if (document.querySelector(".day-head .dnum")?.textContent === "15") return resolve();
+        if (performance.now() > deadline) return reject(new Error("pan did not advance a day"));
+        requestAnimationFrame(waitForShift);
+      };
+      requestAnimationFrame(waitForShift);
+    });
+    const packetTimes: number[] = [];
+    for (let i = 0; i < 4; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      packetTimes.push(performance.now());
+      wheel(8);
+    }
+    return { packetTimes, settles: (window as any).__marginSettleRuns.length };
+  });
+  await page.waitForTimeout(60);
+  expect(stream.packetTimes).toHaveLength(4);
+  expect(stream.settles).toBe(0);
+  expect(await page.evaluate(() => (window as any).__marginSettleRuns.length)).toBe(0);
+  await expect.poll(async () => page.evaluate(() => (window as any).__marginSettleRuns.length)).toBe(1);
+  const settleMeasure = await page.evaluate(() =>
+    (window as any).__marginPlaceSyncMs.slice().reverse().find((sample: any) => sample.keepShown),
+  );
+  expect(settleMeasure.eventCount).toBe(400);
+  console.log(`dense annotation settle DOM scan: ${JSON.stringify(settleMeasure)}`);
+});
+
+test("gesture: a pending annotation worker cannot commit during horizontal pan", async ({ page }) => {
+  await page.addInitScript(() => {
+    const NativeWorker = window.Worker;
+    const delayed = new WeakMap<Worker, Map<EventListenerOrEventListenerObject, { wrapper: EventListener; timer?: number }>>();
+    (window as any).__panActive = false;
+    (window as any).__workerMessagesDeliveredDuringPan = 0;
+    (window as any).__workerMessagesScheduled = 0;
+    window.Worker = class extends NativeWorker {
+      addEventListener(type: string, listener: any, options?: any) {
+        if (type !== "message" || typeof listener !== "function") {
+          return super.addEventListener(type, listener, options);
+        }
+        let listeners = delayed.get(this);
+        if (!listeners) delayed.set(this, (listeners = new Map()));
+        const entry: { wrapper: EventListener; timer?: number } = {
+          wrapper: (event) => {
+            (window as any).__workerMessagesScheduled++;
+            entry.timer = window.setTimeout(() => {
+              entry.timer = undefined;
+              if ((window as any).__panActive) (window as any).__workerMessagesDeliveredDuringPan++;
+              listener.call(this, event);
+            }, 800);
+          },
+        };
+        listeners.set(listener, entry);
+        return super.addEventListener(type, entry.wrapper, options);
+      }
+      removeEventListener(type: string, listener: any, options?: any) {
+        const entry = type === "message" ? delayed.get(this)?.get(listener) : undefined;
+        if (entry?.timer !== undefined) window.clearTimeout(entry.timer);
+        delayed.get(this)?.delete(listener);
+        return super.removeEventListener(type, entry?.wrapper ?? listener, options);
+      }
+      terminate() {
+        for (const entry of delayed.get(this)?.values() ?? []) {
+          if (entry.timer !== undefined) window.clearTimeout(entry.timer);
+        }
+        return super.terminate();
+      }
+    };
+    (globalThis as any).__calFixture = {
+      calendars: [{ id: "primary", summary: "Personal", color: "#4f8cff", is_primary: true, hidden: false, access_role: "owner" }],
+      events: [{
+        id: "pan-note-worker", calendar_id: "primary", etag: null, summary: "Pan note",
+        description: "[DRILL] A note that must not reposition mid-gesture.", location: null,
+        start: "2026-10-14T10:00:00-04:00", end: "2026-10-14T11:00:00-04:00",
+        all_day: false, timezone: "America/New_York", status: "confirmed", recurrence: null,
+        recurring_event_id: null, conference_url: null, updated: null, raw: {},
+      }],
+    };
+  });
+  await open(page);
+  await expect(page.getByTestId("margin-notes")).toHaveAttribute("data-pending", "1");
+  await expect.poll(() => page.evaluate(() => (window as any).__workerMessagesScheduled)).toBeGreaterThan(0);
+
+  await page.evaluate(async () => {
+    const grid = document.querySelector<HTMLElement>("[data-testid=week-grid]")!;
+    (window as any).__panActive = true;
+    for (let i = 0; i < 24; i++) {
+      grid.dispatchEvent(new WheelEvent("wheel", { deltaX: 8, deltaY: 0, bubbles: true, cancelable: true }));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    (window as any).__panActive = false;
+  });
+  expect(await page.evaluate(() => (window as any).__workerMessagesDeliveredDuringPan)).toBe(0);
+  await expect(page.getByTestId("margin-notes")).toHaveAttribute("data-pending", "0", { timeout: 5000 });
+  await expect(page.getByTestId("margin-note")).toContainText("must not reposition mid-gesture");
+});
+
+test("gesture: a wheel burst uses cached geometry and updates one shared scroll surface", async ({ page }) => {
   await open(page);
   const result = await page.evaluate(async () => {
     const grid = document.querySelector<HTMLElement>("[data-testid=week-grid]")!;
     const clip = document.querySelector<HTMLElement>(".day-clip")!;
-    const strips = [...document.querySelectorAll<HTMLElement>(".pan-strip")];
     let layoutReads = 0;
     let styleWrites = 0;
+    const startScrollLeft = grid.scrollLeft;
     const rect = clip.getBoundingClientRect.bind(clip);
     clip.getBoundingClientRect = () => {
       layoutReads++;
       return rect();
     };
-    const observers = strips.map((strip) => {
-      const observer = new MutationObserver((records) => {
-        styleWrites += records.filter((record) => record.attributeName === "style").length;
-      });
-      observer.observe(strip, { attributes: true, attributeFilter: ["style"] });
-      return observer;
+    const observer = new MutationObserver((records) => {
+      styleWrites += records.filter((record) => record.attributeName === "style").length;
     });
+    observer.observe(grid, { attributes: true, attributeFilter: ["style"] });
     for (let i = 0; i < 50; i++) {
       grid.dispatchEvent(new WheelEvent("wheel", {
         deltaX: 1,
@@ -729,11 +904,68 @@ test("gesture: a wheel burst uses cached geometry and one transform paint per fr
       }));
     }
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    observers.forEach((observer) => observer.disconnect());
-    return { layoutReads, styleWrites };
+    observer.disconnect();
+    return { layoutReads, styleWrites, scrollDelta: grid.scrollLeft - startScrollLeft };
   });
   expect(result.layoutReads).toBe(0);
-  expect(result.styleWrites).toBeLessThanOrEqual(3);
+  expect(result.styleWrites).toBe(0);
+  expect(result.scrollDelta).toBe(50);
+});
+
+test("navigation: a stale event-range response cannot replace the latest week", async ({ page }) => {
+  await page.addInitScript(() => {
+    (globalThis as any).__calFixture = {
+      calendars: [{ id: "primary", summary: "Personal", color: "#4f8cff", is_primary: true, hidden: false, access_role: "owner" }],
+      events: [{
+        id: "latest-range-only", calendar_id: "primary", etag: null, summary: "Latest range only",
+        description: null, location: null,
+        start: "2026-11-12T10:00:00-05:00", end: "2026-11-12T11:00:00-05:00",
+        all_day: false, timezone: "America/New_York", status: "confirmed", recurrence: null,
+        recurring_event_id: null, conference_url: null, updated: null, raw: {},
+      }],
+    };
+  });
+  await open(page);
+  await page.evaluate(async () => {
+    const { mockBackend } = await import("/src/lib/mockBackend.ts");
+    const realListEvents = mockBackend.listEvents.bind(mockBackend);
+    const pending: Array<{ start: string; end: string; resolve: (events: unknown[]) => void }> = [];
+    (globalThis as any).__realListEvents = realListEvents;
+    (globalThis as any).__pendingEventRanges = pending;
+    (mockBackend as any).listEvents = (start: string, end: string) => new Promise((resolve) => {
+      pending.push({ start, end, resolve });
+    });
+  });
+
+  const grid = page.getByTestId("week-grid");
+  const width = await page.locator(".day-clip").evaluate((el) => el.clientWidth / 7);
+  const pan = async (days: number) => {
+    const firstDay = (await page.locator(".day-head .dnum").first().textContent())?.trim();
+    await grid.evaluate((el, dx) => el.dispatchEvent(new WheelEvent("wheel", {
+      deltaX: dx, deltaY: 0, bubbles: true, cancelable: true,
+    })), width * days + 2);
+    await expect.poll(async () => (await page.locator(".day-head .dnum").first().textContent())?.trim())
+      .not.toBe(firstDay);
+  };
+
+  await pan(7);
+  await expect.poll(() => page.evaluate(() => (globalThis as any).__pendingEventRanges.length)).toBe(1);
+  await pan(21);
+  await expect.poll(() => page.evaluate(() => (globalThis as any).__pendingEventRanges.length)).toBe(2);
+
+  await page.evaluate(async () => {
+    const pending = (globalThis as any).__pendingEventRanges;
+    const latest = pending[1];
+    latest.resolve(await (globalThis as any).__realListEvents(latest.start, latest.end));
+  });
+  await expect(page.locator(".chip-timed", { hasText: "Latest range only" })).toBeVisible();
+
+  await page.evaluate(async () => {
+    const stale = (globalThis as any).__pendingEventRanges[0];
+    stale.resolve(await (globalThis as any).__realListEvents(stale.start, stale.end));
+  });
+  await page.waitForTimeout(50);
+  await expect(page.locator(".chip-timed", { hasText: "Latest range only" })).toBeVisible();
 });
 
 test("gesture: a swipe never paints the old days pulled back a column", async ({ page }) => {
@@ -744,17 +976,17 @@ test("gesture: a swipe never paints the old days pulled back a column", async ({
   await page.evaluate(() => {
     const w = window as any;
     w.__swipe = [];
-    const head = document.querySelector(".day-headers .pan-strip") as HTMLElement;
+    const grid = document.querySelector<HTMLElement>("[data-testid=week-grid]")!;
     const colW = () => (document.querySelector(".day-clip") as HTMLElement).clientWidth /
       document.querySelectorAll(".day-head").length;
     const pos = () => {
-      const dnum = Number(head.querySelector(".day-head .dnum")!.textContent);
-      const m = /-\s*(-?[\d.]+)px/.exec(head.style.transform);
-      return dnum + (m ? Number(m[1]) : 0) / colW();
+      const dnum = Number(document.querySelector(".day-head .dnum")!.textContent);
+      return dnum + (grid.scrollLeft - 2 * colW()) / colW();
     };
     w.__swipe.push(pos());
+    grid.addEventListener("scroll", () => w.__swipe.push(pos()), { passive: true });
     new MutationObserver(() => w.__swipe.push(pos())).observe(
-      document.querySelector("[data-testid=week-grid]")!,
+      grid,
       { childList: true, subtree: true, attributes: true, attributeFilter: ["style"], characterData: true },
     );
   });
@@ -1431,6 +1663,7 @@ test("readonly: subscribed-calendar events cannot be dragged", async ({ page }) 
   await page.mouse.move(box.x + box.width / 2, box.y + 10 + 96, { steps: 5 });
   await page.mouse.up();
   await expect(chip.locator(".chip-time")).toHaveText(before!); // unmoved
+  await expect(page.getByTestId("event-panel")).toHaveCount(0); // a refused drag isn't a click
 });
 
 test("readonly: panel is view-only with a notice; no resize handle", async ({ page }) => {
@@ -1474,6 +1707,39 @@ test("recurring: drag-move asks for scope; 'this event' moves one instance", asy
     "title",
     /4 AM – 1 PM/,
   );
+});
+
+test("recurring: undoing a single-instance delete restores it to its series", async ({ page }) => {
+  const fixture = {
+    calendars: [{ id: "primary", summary: "Personal", color: "#4f8cff", is_primary: true, hidden: false, access_role: "owner" }],
+    events: [{
+      id: "series-instance-undo", calendar_id: "primary", etag: null, summary: "Recurring undo",
+      description: null, location: null, start: "2026-10-14T10:00:00-04:00",
+      end: "2026-10-14T11:00:00-04:00", all_day: false, timezone: "America/New_York",
+      status: "confirmed", recurrence: null, recurring_event_id: "series-undo-master",
+      conference_url: null, updated: null,
+      raw: {
+        originalStartTime: { dateTime: "2026-10-14T10:00:00-04:00" },
+        masterRecurrence: ["RRULE:FREQ=DAILY;COUNT=3"],
+      },
+    }],
+  };
+  await page.addInitScript((fx) => { (globalThis as any).__calFixture = fx; }, fixture);
+  await open(page);
+  await page.locator(".chip-timed", { hasText: "Recurring undo" }).click();
+  await page.getByTestId("event-panel").getByRole("button", { name: /Delete/ }).click();
+  await page.getByTestId("scope-dialog").getByTestId("scope-this").click();
+  await expect(page.getByTestId("toast")).toContainText("Deleted");
+  await page.getByTestId("toast").getByRole("button", { name: /Undo/ }).click();
+
+  const events = await page.evaluate(async () =>
+    (await (window as any).__mockBackend.listEvents("2026-10-14", "2026-10-15"))
+      .filter((event: any) => event.summary === "Recurring undo"),
+  );
+  expect(events).toHaveLength(1);
+  expect(events[0].id).toBe("series-instance-undo");
+  expect(events[0].recurring_event_id).toBe("series-undo-master");
+  expect(events[0].raw.originalStartTime.dateTime).toBe("2026-10-14T10:00:00-04:00");
 });
 
 test("recurring: 'all events' shifts every instance's time", async ({ page }) => {
@@ -1556,6 +1822,507 @@ test("recurring: 'all events' saves guests, busy, visibility, and reminders", as
     await expect(panel.locator(".panel-inline-select").nth(1)).toHaveValue("private");
     await expect(panel.locator(".panel-attendee")).toContainText("qa-test@example.invalid");
     await page.keyboard.press("Escape");
+  }
+});
+
+test("event editor: adding a guest preserves existing attendee RSVP state", async ({ page }) => {
+  const fixture = {
+    calendars: [{ id: "primary", summary: "Personal", color: "#4f8cff", is_primary: true, hidden: false, access_role: "owner" }],
+    events: [{
+      id: "attendee-rsvp-edit", calendar_id: "primary", etag: null, summary: "RSVP edit",
+      description: null, location: null, start: "2026-10-14T10:00:00-04:00",
+      end: "2026-10-14T11:00:00-04:00", all_day: false, timezone: "America/New_York",
+      status: "confirmed", recurrence: null, recurring_event_id: null,
+      conference_url: null, updated: null,
+      raw: { attendees: [{ email: "accepted@example.invalid", responseStatus: "accepted" }] },
+    }],
+  };
+  await page.addInitScript((fx) => { (globalThis as any).__calFixture = fx; }, fixture);
+  await open(page);
+  await page.locator(".chip-timed", { hasText: "RSVP edit" }).click();
+  const panel = page.getByTestId("event-panel");
+  await panel.locator(".panel-attendee-input").fill("new@example.invalid");
+  await panel.locator(".panel-attendee-input").press("Enter");
+  await panel.getByRole("button", { name: /Save/ }).click();
+
+  const attendees = await page.evaluate(async () =>
+    (await (window as any).__mockBackend.listEvents("2026-10-14", "2026-10-15"))
+      .find((event: any) => event.id === "attendee-rsvp-edit").raw.attendees,
+  );
+  expect(attendees.find((attendee: any) => attendee.email === "accepted@example.invalid").responseStatus)
+    .toBe("accepted");
+  expect(attendees.find((attendee: any) => attendee.email === "new@example.invalid").responseStatus)
+    .toBe("needsAction");
+
+  await page.locator(".chip-timed", { hasText: "RSVP edit" }).click();
+  await panel.locator(".panel-title").fill("RSVP edit renamed");
+  await panel.getByRole("button", { name: /Save/ }).click();
+  const afterTitleEdit = await page.evaluate(async () =>
+    (await (window as any).__mockBackend.listEvents("2026-10-14", "2026-10-15"))
+      .find((event: any) => event.id === "attendee-rsvp-edit").raw.attendees,
+  );
+  expect(afterTitleEdit.find((attendee: any) => attendee.email === "accepted@example.invalid").responseStatus)
+    .toBe("accepted");
+  expect(afterTitleEdit.find((attendee: any) => attendee.email === "new@example.invalid").responseStatus)
+    .toBe("needsAction");
+});
+
+test("event editor: changing guests keeps attendee entries without an email", async ({ page }) => {
+  const attendee = { id: "opaque-attendee", displayName: "Private guest", responseStatus: "accepted" };
+  const fixture = {
+    calendars: [{ id: "primary", summary: "Personal", color: "#4f8cff", is_primary: true, hidden: false, access_role: "owner" }],
+    events: [{
+      id: "opaque-attendee-edit", calendar_id: "primary", etag: null, summary: "Opaque attendee",
+      description: null, location: null, start: "2026-10-14T10:00:00-04:00",
+      end: "2026-10-14T11:00:00-04:00", all_day: false, timezone: "America/New_York",
+      status: "confirmed", recurrence: null, recurring_event_id: null,
+      conference_url: null, updated: null, raw: { attendees: [attendee] },
+    }],
+  };
+  await page.addInitScript((fx) => { (globalThis as any).__calFixture = fx; }, fixture);
+  await open(page);
+  await page.locator(".chip-timed", { hasText: "Opaque attendee" }).click();
+  const panel = page.getByTestId("event-panel");
+  await panel.locator(".panel-attendee-input").fill("new@example.invalid");
+  await panel.locator(".panel-attendee-input").press("Enter");
+  await panel.getByRole("button", { name: /Save/ }).click();
+
+  const attendees = await page.evaluate(async () =>
+    (await (window as any).__mockBackend.listEvents("2026-10-14", "2026-10-15"))
+      .find((event: any) => event.id === "opaque-attendee-edit").raw.attendees,
+  );
+  expect(attendees).toEqual([
+    attendee,
+    { email: "new@example.invalid", responseStatus: "needsAction" },
+  ]);
+});
+
+test("recurring: adding a guest preserves existing RSVP state across the series", async ({ page }) => {
+  const fixture = {
+    calendars: [{ id: "primary", summary: "Personal", color: "#4f8cff", is_primary: true, hidden: false, access_role: "owner" }],
+    events: ["2026-10-15", "2026-10-16"].map((date, index) => ({
+      id: `series-rsvp-${index}`, calendar_id: "primary", etag: null, summary: "Series RSVP",
+      description: null, location: null, start: `${date}T09:00:00-04:00`,
+      end: `${date}T10:00:00-04:00`, all_day: false, timezone: "America/New_York",
+      status: "confirmed", recurrence: null, recurring_event_id: "series-rsvp-master",
+      conference_url: null, updated: null,
+      raw: {
+        attendees: [{
+          email: "accepted@example.invalid",
+          responseStatus: "accepted",
+          displayName: "Accepted attendee",
+          optional: true,
+          organizer: false,
+          self: true,
+          asyncOperation: "inProgress",
+        }],
+        masterRecurrence: ["RRULE:FREQ=DAILY;COUNT=2"],
+        originalStartTime: { dateTime: `${date}T09:00:00-04:00` },
+      },
+    })),
+  };
+  await page.addInitScript((fx) => { (globalThis as any).__calFixture = fx; }, fixture);
+  await open(page);
+  await page.evaluate(() => {
+    const backend = (window as any).__mockBackend;
+    const update = backend.updateSeriesMaster.bind(backend);
+    backend.updateSeriesMaster = async (...args: any[]) => {
+      (window as any).__lastSeriesMasterPatch = args[2];
+      return update(...args);
+    };
+  });
+  await page.locator(".chip-timed", { hasText: "Series RSVP" }).first().click();
+  const panel = page.getByTestId("event-panel");
+  await panel.locator(".panel-attendee-input").fill("new@example.invalid");
+  await panel.locator(".panel-attendee-input").press("Enter");
+  await panel.getByRole("button", { name: /Save/ }).click();
+  await page.getByTestId("scope-dialog").getByTestId("scope-all").click();
+  await expect(page.getByTestId("toast")).toContainText("Updated all");
+
+  const attendees = await page.evaluate(async () =>
+    (await (window as any).__mockBackend.listEvents("2026-10-14", "2026-10-18"))
+      .filter((event: any) => event.recurring_event_id === "series-rsvp-master")
+      .map((event: any) => event.raw.attendees),
+  );
+  expect(attendees).toHaveLength(2);
+  for (const occurrence of attendees) {
+    expect(occurrence.find((attendee: any) => attendee.email === "accepted@example.invalid").responseStatus)
+      .toBe("accepted");
+    expect(occurrence.some((attendee: any) => attendee.email === "new@example.invalid")).toBe(true);
+  }
+  const patchedAttendee = await page.evaluate(() =>
+    (window as any).__lastSeriesMasterPatch.attendees.find(
+      (attendee: any) => attendee.email === "accepted@example.invalid",
+    ),
+  );
+  expect(patchedAttendee).toEqual({
+    email: "accepted@example.invalid",
+    responseStatus: "accepted",
+    displayName: "Accepted attendee",
+    optional: true,
+    organizer: false,
+    self: true,
+    asyncOperation: "inProgress",
+  });
+});
+
+test("recurring: adding a guest to all events uses the master RSVP, not an exception's RSVP", async ({ page }) => {
+  const fixture = {
+    calendars: [{ id: "primary", summary: "Personal", color: "#4f8cff", is_primary: true, hidden: false, access_role: "owner" }],
+    events: ["2026-10-15", "2026-10-16"].map((date, index) => ({
+      id: `series-exception-rsvp-${index}`, calendar_id: "primary", etag: null, summary: "Exception RSVP",
+      description: null, location: null, start: `${date}T09:00:00-04:00`,
+      end: `${date}T10:00:00-04:00`, all_day: false, timezone: "America/New_York",
+      status: "confirmed", recurrence: null, recurring_event_id: "series-exception-rsvp-master",
+      conference_url: null, updated: null,
+      raw: {
+        attendees: [{
+          email: "accepted@example.invalid",
+          responseStatus: index === 0 ? "declined" : "accepted",
+        }],
+        masterRecurrence: ["RRULE:FREQ=DAILY;COUNT=2"],
+        originalStartTime: { dateTime: `${date}T09:00:00-04:00` },
+      },
+    })),
+  };
+  await page.addInitScript((fx) => { (globalThis as any).__calFixture = fx; }, fixture);
+  await open(page);
+  await page.evaluate(() => {
+    const backend = (window as any).__mockBackend;
+    const get = backend.getSeriesMaster.bind(backend);
+    backend.getSeriesMaster = async (...args: any[]) => ({
+      ...await get(...args),
+      attendees: [{ email: "accepted@example.invalid", responseStatus: "accepted" }],
+    });
+    const update = backend.updateSeriesMaster.bind(backend);
+    backend.updateSeriesMaster = async (...args: any[]) => {
+      (window as any).__lastSeriesMasterPatch = args[2];
+      return update(...args);
+    };
+  });
+  await page.locator(".chip-timed", { hasText: "Exception RSVP" }).first().click();
+  const panel = page.getByTestId("event-panel");
+  await panel.locator(".panel-attendee-input").fill("new@example.invalid");
+  await panel.locator(".panel-attendee-input").press("Enter");
+  await panel.getByRole("button", { name: /Save/ }).click();
+  await page.getByTestId("scope-dialog").getByTestId("scope-all").click();
+  await expect(page.getByTestId("toast")).toContainText("Updated all");
+
+  const patchedAttendees = await page.evaluate(() => (window as any).__lastSeriesMasterPatch.attendees);
+  expect(patchedAttendees.find((attendee: any) => attendee.email === "accepted@example.invalid").responseStatus)
+    .toBe("accepted");
+  expect(patchedAttendees.find((attendee: any) => attendee.email === "new@example.invalid").responseStatus)
+    .toBe("needsAction");
+});
+
+test("recurring: adding a guest to all events retains master-only attendees", async ({ page }) => {
+  const fixture = {
+    calendars: [{ id: "primary", summary: "Personal", color: "#4f8cff", is_primary: true, hidden: false, access_role: "owner" }],
+    events: ["2026-10-15", "2026-10-16"].map((date, index) => ({
+      id: `series-different-guests-${index}`, calendar_id: "primary", etag: null, summary: "Different guests",
+      description: null, location: null, start: `${date}T09:00:00-04:00`,
+      end: `${date}T10:00:00-04:00`, all_day: false, timezone: "America/New_York",
+      status: "confirmed", recurrence: null, recurring_event_id: "series-different-guests-master",
+      conference_url: null, updated: null,
+      raw: {
+        attendees: [{ email: "exception-only@example.invalid", responseStatus: "accepted" }],
+        masterRecurrence: ["RRULE:FREQ=DAILY;COUNT=2"],
+        originalStartTime: { dateTime: `${date}T09:00:00-04:00` },
+      },
+    })),
+  };
+  await page.addInitScript((fx) => { (globalThis as any).__calFixture = fx; }, fixture);
+  await open(page);
+  await page.evaluate(() => {
+    const backend = (window as any).__mockBackend;
+    const get = backend.getSeriesMaster.bind(backend);
+    backend.getSeriesMaster = async (...args: any[]) => ({
+      ...await get(...args),
+      attendees: [{ email: "master-only@example.invalid", responseStatus: "accepted" }],
+    });
+    const update = backend.updateSeriesMaster.bind(backend);
+    backend.updateSeriesMaster = async (...args: any[]) => {
+      (window as any).__lastSeriesMasterPatch = args[2];
+      return update(...args);
+    };
+  });
+  await page.locator(".chip-timed", { hasText: "Different guests" }).first().click();
+  const panel = page.getByTestId("event-panel");
+  await panel.locator(".panel-attendee-input").fill("new@example.invalid");
+  await panel.locator(".panel-attendee-input").press("Enter");
+  await panel.getByRole("button", { name: /Save/ }).click();
+  await page.getByTestId("scope-dialog").getByTestId("scope-all").click();
+  await expect(page.getByTestId("toast")).toContainText("Updated all");
+
+  const patchedAttendees = await page.evaluate(() => (window as any).__lastSeriesMasterPatch.attendees);
+  expect(patchedAttendees.find((attendee: any) => attendee.email === "master-only@example.invalid").responseStatus)
+    .toBe("accepted");
+  expect(patchedAttendees.some((attendee: any) => attendee.email === "exception-only@example.invalid"))
+    .toBe(false);
+  expect(patchedAttendees.find((attendee: any) => attendee.email === "new@example.invalid").responseStatus)
+    .toBe("needsAction");
+});
+
+test("recurring: title-only edit of this event preserves RSVP state and reminder overrides", async ({ page }) => {
+  const fixture = {
+    calendars: [{ id: "primary", summary: "Personal", color: "#4f8cff", is_primary: true, hidden: false, access_role: "owner" }],
+    events: ["2026-10-15", "2026-10-16"].map((date, index) => ({
+      id: `single-series-rsvp-${index}`, calendar_id: "primary", etag: null, summary: "Single series RSVP",
+      description: null, location: null, start: `${date}T09:00:00-04:00`,
+      end: `${date}T10:00:00-04:00`, all_day: false, timezone: "America/New_York",
+      status: "confirmed", recurrence: null, recurring_event_id: "single-series-rsvp-master",
+      conference_url: null, updated: null,
+      raw: {
+        attendees: [{ email: "accepted@example.invalid", responseStatus: "accepted" }],
+        reminders: {
+          useDefault: false,
+          overrides: [
+            { method: "popup", minutes: 10 },
+            { method: "email", minutes: 1440 },
+          ],
+        },
+        masterRecurrence: ["RRULE:FREQ=DAILY;COUNT=2"],
+        originalStartTime: { dateTime: `${date}T09:00:00-04:00` },
+      },
+    })),
+  };
+  await page.addInitScript((fx) => { (globalThis as any).__calFixture = fx; }, fixture);
+  await open(page);
+  await page.locator(".chip-timed", { hasText: "Single series RSVP" }).first().click();
+  const panel = page.getByTestId("event-panel");
+  await panel.locator(".panel-title").fill("Renamed occurrence");
+  await panel.getByRole("button", { name: /Save/ }).click();
+  await page.getByTestId("scope-dialog").getByTestId("scope-this").click();
+  await expect(page.getByTestId("toast")).toContainText("Updated");
+
+  const occurrence = await page.evaluate(async () =>
+    (await (window as any).__mockBackend.listEvents("2026-10-14", "2026-10-17"))
+      .find((event: any) => event.id === "single-series-rsvp-0"),
+  );
+  expect(occurrence.summary).toBe("Renamed occurrence");
+  expect(occurrence.raw.attendees).toEqual([
+    { email: "accepted@example.invalid", responseStatus: "accepted" },
+  ]);
+  expect(occurrence.raw.reminders).toEqual({
+    useDefault: false,
+    overrides: [
+      { method: "popup", minutes: 10 },
+      { method: "email", minutes: 1440 },
+    ],
+  });
+});
+
+test("recurring: title-only save keeps attendee entries without an email", async ({ page }) => {
+  const attendee = { id: "opaque-attendee", displayName: "Private guest", responseStatus: "accepted" };
+  const fixture = {
+    calendars: [{ id: "primary", summary: "Personal", color: "#4f8cff", is_primary: true, hidden: false, access_role: "owner" }],
+    events: ["2026-10-15", "2026-10-16"].map((date, index) => ({
+      id: `opaque-series-${index}`, calendar_id: "primary", etag: null, summary: "Opaque series",
+      description: null, location: null, start: `${date}T09:00:00-04:00`,
+      end: `${date}T10:00:00-04:00`, all_day: false, timezone: "America/New_York",
+      status: "confirmed", recurrence: null, recurring_event_id: "opaque-series-master",
+      conference_url: null, updated: null,
+      raw: {
+        attendees: [attendee],
+        masterRecurrence: ["RRULE:FREQ=DAILY;COUNT=2"],
+        originalStartTime: { dateTime: `${date}T09:00:00-04:00` },
+      },
+    })),
+  };
+  await page.addInitScript((fx) => { (globalThis as any).__calFixture = fx; }, fixture);
+  await open(page);
+  await page.locator(".chip-timed", { hasText: "Opaque series" }).first().click();
+  const panel = page.getByTestId("event-panel");
+  await panel.locator(".panel-title").fill("Opaque series renamed");
+  await panel.getByRole("button", { name: /Save/ }).click();
+  await page.getByTestId("scope-dialog").getByTestId("scope-all").click();
+  await expect(page.getByTestId("toast")).toContainText("Updated all");
+
+  const rows = await page.evaluate(async () =>
+    (await (window as any).__mockBackend.listEvents("2026-10-14", "2026-10-18"))
+      .filter((event: any) => event.recurring_event_id === "opaque-series-master"),
+  );
+  expect(rows).toHaveLength(2);
+  for (const row of rows) {
+    expect(row.summary).toBe("Opaque series renamed");
+    expect(row.raw.attendees).toEqual([attendee]);
+  }
+
+  await page.locator(".chip-timed", { hasText: "Opaque series renamed" }).first().click();
+  await panel.locator(".panel-attendee-input").fill("new@example.invalid");
+  await panel.locator(".panel-attendee-input").press("Enter");
+  await panel.getByRole("button", { name: /Save/ }).click();
+  await page.getByTestId("scope-dialog").getByTestId("scope-all").click();
+  await expect(page.getByTestId("toast")).toContainText("Updated all");
+  const afterGuestEdit = await page.evaluate(async () =>
+    (await (window as any).__mockBackend.listEvents("2026-10-14", "2026-10-18"))
+      .filter((event: any) => event.recurring_event_id === "opaque-series-master"),
+  );
+  expect(afterGuestEdit).toHaveLength(2);
+  for (const row of afterGuestEdit) {
+    expect(row.raw.attendees).toEqual([
+      attendee,
+      { email: "new@example.invalid", responseStatus: "needsAction" },
+    ]);
+  }
+});
+
+test("event editor: undo restores guests, busy/free, visibility, and reminder metadata", async ({ page }) => {
+  const fixture = {
+    calendars: [{ id: "primary", summary: "Personal", color: "#4f8cff", is_primary: true, hidden: false, access_role: "owner" }],
+    events: [{
+      id: "metadata-undo", calendar_id: "primary", etag: null, summary: "Metadata undo",
+      description: null, location: null, start: "2026-10-14T10:00:00-04:00",
+      end: "2026-10-14T11:00:00-04:00", all_day: false, timezone: "America/New_York",
+      status: "confirmed", recurrence: null, recurring_event_id: null,
+      conference_url: null, updated: null,
+      raw: {
+        attendees: [{ email: "old@example.invalid", responseStatus: "accepted" }],
+        transparency: "opaque", visibility: "default",
+        reminders: {
+          useDefault: false,
+          overrides: [
+            { method: "popup", minutes: 10 },
+            { method: "email", minutes: 1440 },
+          ],
+        },
+      },
+    }],
+  };
+  await page.addInitScript((fx) => { (globalThis as any).__calFixture = fx; }, fixture);
+  await open(page);
+  await page.locator(".chip-timed", { hasText: "Metadata undo" }).click();
+  const panel = page.getByTestId("event-panel");
+  await panel.locator(".panel-inline-select").nth(0).selectOption("transparent");
+  await panel.locator(".panel-inline-select").nth(1).selectOption("private");
+  await panel.getByRole("button", { name: "Remove old@example.invalid" }).click();
+  await panel.locator(".panel-attendee-input").fill("new@example.invalid");
+  await panel.locator(".panel-attendee-input").press("Enter");
+  await panel.locator(".panel-section .panel-cal").last().selectOption("30");
+  await panel.getByRole("button", { name: /Save/ }).click();
+  await expect(page.getByTestId("toast")).toContainText("Updated");
+
+  await page.getByTestId("toast").getByRole("button", { name: /Undo/ }).click();
+  const restored = await page.evaluate(async () =>
+    (await (window as any).__mockBackend.listEvents("2026-10-14", "2026-10-15"))
+      .find((event: any) => event.id === "metadata-undo"),
+  );
+  expect(restored.raw.attendees.map((a: any) => a.email)).toEqual(["old@example.invalid"]);
+  expect(restored.raw.attendees[0].responseStatus).toBe("accepted");
+  expect(restored.raw.transparency).toBe("opaque");
+  expect(restored.raw.visibility).toBe("default");
+  expect(restored.raw.reminders).toEqual({
+    useDefault: false,
+    overrides: [
+      { method: "popup", minutes: 10 },
+      { method: "email", minutes: 1440 },
+    ],
+  });
+});
+
+test("event editor: undo removes guests added to an event that had none", async ({ page }) => {
+  const fixture = {
+    calendars: [{ id: "primary", summary: "Personal", color: "#4f8cff", is_primary: true, hidden: false, access_role: "owner" }],
+    events: [{
+      id: "first-guest-undo", calendar_id: "primary", etag: null, summary: "First guest undo",
+      description: null, location: null, start: "2026-10-14T10:00:00-04:00",
+      end: "2026-10-14T11:00:00-04:00", all_day: false, timezone: "America/New_York",
+      status: "confirmed", recurrence: null, recurring_event_id: null,
+      conference_url: null, updated: null,
+      raw: { transparency: "opaque", visibility: "default", reminders: { useDefault: true } },
+    }],
+  };
+  await page.addInitScript((fx) => { (globalThis as any).__calFixture = fx; }, fixture);
+  await open(page);
+  await page.locator(".chip-timed", { hasText: "First guest undo" }).click();
+  const panel = page.getByTestId("event-panel");
+  await panel.locator(".panel-attendee-input").fill("new@example.invalid");
+  await panel.locator(".panel-attendee-input").press("Enter");
+  await panel.getByRole("button", { name: /Save/ }).click();
+  await expect(page.getByTestId("toast")).toContainText("Updated");
+  await page.getByTestId("toast").getByRole("button", { name: /Undo/ }).click();
+
+  const restored = await page.evaluate(async () =>
+    (await (window as any).__mockBackend.listEvents("2026-10-14", "2026-10-15"))
+      .find((event: any) => event.id === "first-guest-undo"),
+  );
+  expect(restored.raw.attendees).toEqual([]);
+});
+
+test("event editor: Default reminder clears an existing event override", async ({ page }) => {
+  const fixture = {
+    calendars: [{ id: "primary", summary: "Personal", color: "#4f8cff", is_primary: true, hidden: false, access_role: "owner" }],
+    events: [{
+      id: "reminder-reset", calendar_id: "primary", etag: null, summary: "Reminder reset",
+      description: null, location: null, start: "2026-10-14T10:00:00-04:00",
+      end: "2026-10-14T11:00:00-04:00", all_day: false, timezone: "America/New_York",
+      status: "confirmed", recurrence: null, recurring_event_id: null,
+      conference_url: null, updated: null,
+      raw: {
+        visibility: "private",
+        reminders: { useDefault: false, overrides: [{ method: "popup", minutes: 10 }] },
+      },
+    }],
+  };
+  await page.addInitScript((fx) => { (globalThis as any).__calFixture = fx; }, fixture);
+  await open(page);
+  await page.locator(".chip-timed", { hasText: "Reminder reset" }).click();
+  const panel = page.getByTestId("event-panel");
+  await panel.locator(".panel-inline-select").nth(1).selectOption("default");
+  await panel.locator(".panel-section .panel-cal").last().selectOption("");
+  await panel.getByRole("button", { name: /Save/ }).click();
+  const updated = await page.evaluate(async () =>
+    (await (window as any).__mockBackend.listEvents("2026-10-14", "2026-10-15"))
+      .find((event: any) => event.id === "reminder-reset"),
+  );
+  expect(updated.raw.visibility).toBe("default");
+  expect(updated.raw.reminders).toEqual({ useDefault: true });
+});
+
+test("recurring: adding Google Meet to 'all events' updates the whole series", async ({ page }) => {
+  const fixture = {
+    calendars: [{ id: "primary", summary: "Personal", color: "#4f8cff", is_primary: true, hidden: false, access_role: "owner" }],
+    events: ["2026-10-15", "2026-10-16"].map((date, i) => ({
+      id: `meet-series-${i}`, calendar_id: "primary", etag: null, summary: "Meet series",
+      description: null, location: null, start: `${date}T09:00:00-04:00`,
+      end: `${date}T10:00:00-04:00`, all_day: false, timezone: "America/New_York",
+      status: "confirmed", recurrence: null, recurring_event_id: "meet-series-master",
+      conference_url: null, updated: null,
+      raw: { masterRecurrence: ["RRULE:FREQ=DAILY;COUNT=2"], originalStartTime: { dateTime: `${date}T09:00:00-04:00` } },
+    })),
+  };
+  await page.addInitScript((fx) => { (globalThis as any).__calFixture = fx; }, fixture);
+  await open(page);
+  await page.evaluate(() => {
+    const backend = (window as any).__mockBackend;
+    const update = backend.updateSeriesMaster.bind(backend);
+    backend.updateSeriesMaster = async (...args: any[]) => {
+      (window as any).__lastSeriesMasterPatch = args[2];
+      return update(...args);
+    };
+  });
+  await page.locator(".chip-timed", { hasText: "Meet series" }).first().click();
+  const panel = page.getByTestId("event-panel");
+  await panel.getByLabel("Add Google Meet").check();
+  await panel.getByRole("button", { name: /Save/ }).click();
+  await page.getByTestId("scope-dialog").getByTestId("scope-all").click();
+  await expect(page.getByTestId("toast")).toContainText("Updated all");
+  const links = await page.evaluate(async () =>
+    (await (window as any).__mockBackend.listEvents("2026-10-14", "2026-10-18"))
+      .filter((event: any) => event.recurring_event_id === "meet-series-master")
+      .map((event: any) => event.conference_url),
+  );
+  expect(links).toHaveLength(2);
+  expect(links.every((link: string | null) => link?.startsWith("https://meet.google.com/"))).toBe(true);
+  const createRequest = await page.evaluate(() =>
+    (window as any).__lastSeriesMasterPatch.conferenceData.createRequest,
+  );
+  expect(createRequest.conferenceSolutionKey).toEqual({ type: "hangoutsMeet" });
+  expect(createRequest.requestId).toBeTruthy();
+  const joinLinks = page.getByRole("link", { name: "Join" });
+  await expect(joinLinks).toHaveCount(2);
+  for (let i = 0; i < links.length; i++) {
+    await expect(joinLinks.nth(i)).toHaveAttribute("href", links[i]);
   }
 });
 
@@ -1894,6 +2661,31 @@ test("multiselect: shift-click builds a selection; backspace deletes all; undo r
   await page.keyboard.press("ControlOrMeta+z");
   await expect(page.locator(".chip-timed", { hasText: "Morning run" })).toHaveCount(1);
   await expect(page.locator(".chip-timed", { hasText: "Standup" })).toHaveCount(1);
+});
+
+test("multiselect delete: partial backend failure is reported and successful deletions remain undoable", async ({ page }) => {
+  await open(page);
+  const failedId = await page.evaluate(async () => {
+    const backend = (window as any).__mockBackend;
+    const rows = await backend.listEvents("2026-10-01", "2026-11-01");
+    const failed = rows.find((event: any) => event.summary === "Standup");
+    const remove = backend.deleteEvent.bind(backend);
+    backend.deleteEvent = (calendarId: string, eventId: string) =>
+      eventId === failed.id ? Promise.reject(new Error("simulated delete failure")) : remove(calendarId, eventId);
+    return failed.id as string;
+  });
+  await page.locator(".chip-timed", { hasText: "Morning run" }).click({ modifiers: ["Shift"] });
+  await page.locator(".chip-timed", { hasText: "Standup" }).click({ modifiers: ["Shift"] });
+  await page.keyboard.press("Backspace");
+
+  await expect(page.locator(".chip-timed", { hasText: "Morning run" })).toHaveCount(0);
+  await expect(page.locator(".chip-timed", { hasText: "Standup" })).toHaveCount(1);
+  await expect(page.getByTestId("toast")).toContainText("Deleted 1 of 2 events");
+  await expect(page.getByTestId("toast").getByRole("button", { name: /Undo/ })).toBeVisible();
+  await page.getByTestId("toast").getByRole("button", { name: /Undo/ }).click();
+  await expect(page.locator(".chip-timed", { hasText: "Morning run" })).toHaveCount(1);
+  await expect(page.locator(".chip-timed", { hasText: "Standup" })).toHaveCount(1);
+  expect(failedId).toBeTruthy();
 });
 
 test("multiselect delete clears selection and closes a panel for a deleted event", async ({ page }) => {
@@ -2348,6 +3140,10 @@ test("cluster: a cascade of 3+ tiny overlapping events merges into one block of 
   await expect(block).toHaveCount(1);
   await expect(block.locator(".cluster-row")).toHaveCount(5);
   await expect(block.locator(".cluster-row").first()).toContainText("Distraction: shopping");
+  const shoppingRow = block.locator(".cluster-row", { hasText: "Distraction: shopping" });
+  await expect(shoppingRow.locator(".cluster-dot")).toHaveCount(0);
+  expect(await shoppingRow.evaluate((row) => getComputedStyle(row, "::before").backgroundColor))
+    .toBe("rgb(121, 85, 72)");
   // the individual sliver chips are gone
   await expect(page.locator(".chip-timed", { hasText: "Browsing furniture" }).locator(".chip-title")).toHaveCount(0);
   // the block spans the full column: no indents, one rectangle
@@ -2514,6 +3310,52 @@ test("drill: a note added and erased in the same open editor is actually removed
   await expect(panel.getByTestId("panel-drill")).toHaveCount(0);
   await expect(page.getByTestId("margin-note").filter({ hasText: "Temporary reflection" })).toHaveCount(0);
   await expect(run).toHaveCount(1);
+});
+
+test("drill: erasing a note invalidates a placement result already in flight", async ({ page }) => {
+  await page.addInitScript(() => {
+    const NativeWorker = window.Worker;
+    const delayed = new WeakMap<Worker, Map<EventListenerOrEventListenerObject, EventListener>>();
+    window.Worker = class extends NativeWorker {
+      addEventListener(type: string, listener: any, options?: any) {
+        if (type !== "message" || typeof listener !== "function") {
+          return super.addEventListener(type, listener, options);
+        }
+        let listeners = delayed.get(this);
+        if (!listeners) delayed.set(this, (listeners = new Map()));
+        const wrapper: EventListener = (event) => {
+          window.setTimeout(() => listener.call(this, event), 800);
+        };
+        listeners.set(listener, wrapper);
+        return super.addEventListener(type, wrapper, options);
+      }
+      removeEventListener(type: string, listener: any, options?: any) {
+        const wrapper = type === "message" ? delayed.get(this)?.get(listener) : undefined;
+        return super.removeEventListener(type, wrapper ?? listener, options);
+      }
+    };
+    (globalThis as any).__calFixture = {
+      calendars: [{ id: "primary", summary: "Personal", color: "#4f8cff", is_primary: true, hidden: false, access_role: "owner" }],
+      events: [{
+        id: "erase-placement-race", calendar_id: "primary", etag: null, summary: "Morning run",
+        description: null, location: null, start: "2026-10-14T07:00:00-04:00", end: "2026-10-14T07:45:00-04:00",
+        all_day: false, timezone: "America/New_York", status: "confirmed", recurrence: null,
+        recurring_event_id: null, conference_url: null, updated: null, raw: {},
+      }],
+    };
+  });
+  await open(page);
+  await page.locator(".chip-timed", { hasText: "Morning run" }).click();
+  const panel = page.getByTestId("event-panel");
+  await panel.getByTestId("drill-add").click();
+  await panel.getByTestId("drill-input").fill("Must remain erased.");
+  await panel.getByTestId("drill-input").press("Enter");
+  await expect(page.getByTestId("margin-notes")).toHaveAttribute("data-pending", "1");
+
+  await panel.getByTestId("drill-erase").click();
+  await expect(panel.getByTestId("panel-drill")).toHaveCount(0);
+  await page.waitForTimeout(900);
+  await expect(page.getByTestId("margin-note")).toHaveCount(0);
 });
 
 test("notes: a note is written in the margin and splits in the editor", async ({ page }) => {
@@ -2790,6 +3632,44 @@ test("gesture: horizontal scroll slides the window day by day, proportional to t
   await expect(firstHead).toContainText("11");
 });
 
+test("gesture: trusted horizontal scrolling preserves fractional offsets across day rebases", async ({ page }) => {
+  await open(page);
+  await page.keyboard.press("9");
+  await expect(page.locator(".day-headers .day-head")).toHaveCount(9);
+  const grid = page.getByTestId("week-grid");
+  const box = (await grid.boundingBox())!;
+  const start = await grid.evaluate((el) => ({
+    scrollLeft: el.scrollLeft,
+    day: Number(document.querySelector(".day-head .dnum")!.textContent),
+  }));
+  await page.mouse.move(box.x + box.width / 2, box.y + 220);
+
+  // Each packet stays under the app's native-trackpad threshold. Six day
+  // shifts expose integer scrollLeft rounding at the fractional column width.
+  for (let i = 0; i < 20; i++) {
+    await page.mouse.wheel(36, 0);
+    await page.waitForTimeout(12);
+  }
+
+  const moved = await grid.evaluate((el, initial) => {
+    const dayWidth = document.querySelector<HTMLElement>(".day-col")!.getBoundingClientRect().width;
+    const day = Number(document.querySelector(".day-head .dnum")!.textContent);
+    return (day - initial.day) * dayWidth + el.scrollLeft - initial.scrollLeft;
+  }, start);
+  expect(Math.abs(moved - 720), "integer scrollLeft rebases must not accumulate subpixel loss").toBeLessThan(1);
+
+  for (let i = 0; i < 20; i++) {
+    await page.mouse.wheel(-36, 0);
+    await page.waitForTimeout(12);
+  }
+  const returned = await grid.evaluate((el, initial) => {
+    const dayWidth = document.querySelector<HTMLElement>(".day-col")!.getBoundingClientRect().width;
+    const day = Number(document.querySelector(".day-head .dnum")!.textContent);
+    return (day - initial.day) * dayWidth + el.scrollLeft - initial.scrollLeft;
+  }, start);
+  expect(Math.abs(returned), "the reverse swipe should return to its starting viewport without cumulative drift").toBeLessThan(1);
+});
+
 test("gesture: horizontal pan keeps dx when later trackpad packets contain vertical noise", async ({ page }) => {
   await open(page);
   const grid = page.getByTestId("week-grid");
@@ -2801,14 +3681,11 @@ test("gesture: horizontal pan keeps dx when later trackpad packets contain verti
   await page.mouse.wheel(4, 0);
   for (let i = 0; i < 29; i++) await page.mouse.wheel(4, 5);
   const moved = await grid.evaluate(async (grid, startDay) => {
-    const clip = grid.querySelector<HTMLElement>(".day-clip")!;
-    const strip = grid.querySelector<HTMLElement>(".day-headers .pan-strip")!;
-    const colWidth = clip.clientWidth / document.querySelectorAll(".day-head").length;
+    const dayClip = grid.querySelector<HTMLElement>(".day-clip")!;
+    const colWidth = dayClip.clientWidth / document.querySelectorAll(".day-head").length;
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-    const match = /([+-]) ([\d.]+)px/.exec(strip.style.transform);
-    const residual = match ? Number(match[2]) * (match[1] === "-" ? 1 : -1) : 0;
     const currentDay = Number(document.querySelector(".day-head .dnum")!.textContent);
-    return (currentDay - startDay) * colWidth + residual;
+    return (currentDay - startDay) * colWidth + grid.scrollLeft - 2 * colWidth;
   }, startDay);
   expect(Math.abs(moved - 120), "all horizontal deltas from the locked swipe should reach the viewport").toBeLessThan(1);
 });
@@ -2824,14 +3701,11 @@ test("gesture: horizontal pan retains its leading dx before axis lock", async ({
   await page.mouse.wheel(8, 10);
   for (let i = 0; i < 29; i++) await page.mouse.wheel(8, 6);
   const moved = await grid.evaluate(async (grid, startDay) => {
-    const clip = grid.querySelector<HTMLElement>(".day-clip")!;
-    const strip = grid.querySelector<HTMLElement>(".day-headers .pan-strip")!;
-    const colWidth = clip.clientWidth / document.querySelectorAll(".day-head").length;
+    const dayClip = grid.querySelector<HTMLElement>(".day-clip")!;
+    const colWidth = dayClip.clientWidth / document.querySelectorAll(".day-head").length;
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-    const match = /([+-]) ([\d.]+)px/.exec(strip.style.transform);
-    const residual = match ? Number(match[2]) * (match[1] === "-" ? 1 : -1) : 0;
     const currentDay = Number(document.querySelector(".day-head .dnum")!.textContent);
-    return (currentDay - startDay) * colWidth + residual;
+    return (currentDay - startDay) * colWidth + grid.scrollLeft - 2 * colWidth;
   }, startDay);
   expect(Math.abs(moved - 240), "the leading x component should join the swipe after its axis locks").toBeLessThan(1);
 });
@@ -2846,16 +3720,44 @@ test("gesture: ambiguous X movement expires when its wheel stream idles", async 
   await page.waitForTimeout(220); // candidate must expire with the wheel stream
   await page.mouse.wheel(8, 0); // new, clearly horizontal gesture
   const moved = await grid.evaluate(async (grid, startDay) => {
-    const clip = grid.querySelector<HTMLElement>(".day-clip")!;
-    const strip = grid.querySelector<HTMLElement>(".day-headers .pan-strip")!;
-    const colWidth = clip.clientWidth / document.querySelectorAll(".day-head").length;
+    const dayClip = grid.querySelector<HTMLElement>(".day-clip")!;
+    const colWidth = dayClip.clientWidth / document.querySelectorAll(".day-head").length;
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-    const match = /([+-]) ([\d.]+)px/.exec(strip.style.transform);
-    const residual = match ? Number(match[2]) * (match[1] === "-" ? 1 : -1) : 0;
     const currentDay = Number(document.querySelector(".day-head .dnum")!.textContent);
-    return (currentDay - startDay) * colWidth + residual;
+    return (currentDay - startDay) * colWidth + grid.scrollLeft - 2 * colWidth;
   }, startDay);
   expect(Math.abs(moved - 8), "a new swipe must not inherit an expired X candidate").toBeLessThan(1);
+});
+
+test("gesture: sustained vertical trackpad noise does not accumulate into a later horizontal jump", async ({ page }) => {
+  await open(page);
+  const grid = page.getByTestId("week-grid");
+  const box = (await grid.boundingBox())!;
+  const startDay = Number(await grid.locator(".day-head .dnum").first().textContent());
+  const startScrollTop = await grid.evaluate((el) => el.scrollTop);
+  await page.mouse.move(box.x + box.width / 2, box.y + 220);
+
+  // A prolonged slightly-diagonal vertical stream is still vertical intent.
+  // Its small X components must not be replayed if a later gesture is clear.
+  for (let i = 0; i < 20; i++) {
+    await page.mouse.wheel(4, 5);
+    await page.waitForTimeout(10);
+  }
+  await page.mouse.wheel(12, 0);
+
+  const result = await grid.evaluate(async (grid, startDay) => {
+    const dayClip = grid.querySelector<HTMLElement>(".day-clip")!;
+    const colWidth = dayClip.clientWidth / document.querySelectorAll(".day-head").length;
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    const currentDay = Number(document.querySelector(".day-head .dnum")!.textContent);
+    return {
+      horizontal: (currentDay - startDay) * colWidth + grid.scrollLeft - 2 * colWidth,
+      vertical: grid.scrollTop,
+    };
+  }, startDay);
+  expect(Math.abs(result.horizontal - 12), "only the later horizontal gesture should move the strip").toBeLessThan(1);
+  expect(result.vertical - startScrollTop, "vertical movement with a small cross-axis component should still scroll vertically")
+    .toBeGreaterThan(50);
 });
 
 test("gesture: vertical scrolling resumes after a horizontal swipe idles", async ({ page }) => {
@@ -2879,10 +3781,9 @@ test("gesture: narrow week headers stay aligned with their day columns while pan
   const checkAlignment = async () => {
     const h = (await header.boundingBox())!;
     const b = (await body.boundingBox())!;
-    const c = (await clip.boundingBox())!;
     expect(Math.abs(h.x - b.x)).toBeLessThan(1);
     expect(Math.abs(h.width - b.width)).toBeLessThan(1);
-    expect(await clip.evaluate((el) => getComputedStyle(el).overflowX)).toBe("hidden");
+    expect(await clip.evaluate((el) => getComputedStyle(el).overflowX)).toBe("visible");
     for (const day of await page.locator(".day-headers .day-head").all()) {
       const cell = (await day.boundingBox())!;
       for (const label of await day.locator(".dow, .dnum, .score-wrap").all()) {
@@ -2905,7 +3806,6 @@ test("gesture: nine-day pan keeps every four-pixel step across day boundaries", 
   await expect(page.locator(".day-headers .day-head")).toHaveCount(9);
   const positions = await page.evaluate(async () => {
     const grid = document.querySelector<HTMLElement>("[data-testid=week-grid]")!;
-    const strip = document.querySelector<HTMLElement>(".day-headers .pan-strip")!;
     const firstDay = () => Number(document.querySelector(".day-head .dnum")!.textContent);
     const dayWidth = document.querySelector(".day-head")!.getBoundingClientRect().width;
     const startDay = firstDay();
@@ -2913,9 +3813,8 @@ test("gesture: nine-day pan keeps every four-pixel step across day boundaries", 
     for (let i = 0; i < 40; i++) {
       grid.dispatchEvent(new WheelEvent("wheel", { deltaX: 4, deltaY: 0, bubbles: true, cancelable: true }));
       await new Promise((resolve) => requestAnimationFrame(resolve));
-      const m = strip.style.transform.match(/([+-]) ([\d.]+)px/);
-      const residual = m ? Number(m[2]) * (m[1] === "-" ? 1 : -1) : 0;
-      result.push((firstDay() - startDay) * dayWidth + residual);
+      const base = 2 * (document.querySelector(".day-clip") as HTMLElement).clientWidth / 9;
+      result.push((firstDay() - startDay) * dayWidth + grid.scrollLeft - base);
     }
     return result;
   });

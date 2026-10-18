@@ -396,7 +396,8 @@ html.pane-resizing * {
 /* ---------- week grid ---------- */
 .weekview {
   flex: 1;
-  overflow-y: auto;
+  overflow: auto;
+  overscroll-behavior-x: contain;
   position: relative;
   border-top: 1px solid var(--border);
   /* grid is drag-first UI: never let drags start text selection */
@@ -478,10 +479,14 @@ html.pane-resizing * {
 }
 
 .allday-label {
+  position: sticky;
+  left: 0;
+  z-index: 5;
   font-size: 9px;
   color: var(--fg-faint);
   text-align: right;
   padding: 4px 6px;
+  background: var(--bg);
 }
 
 .allday-cell {
@@ -511,7 +516,10 @@ html.pane-resizing * {
 .gutter {
   width: var(--gutter-w);
   flex: none;
-  position: relative;
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--bg);
 }
 
 .hour-label {
@@ -2329,6 +2337,10 @@ html.pane-resizing * {
 
 /* timezone abbreviation atop the time gutter (Notion) */
 .gutter-tz {
+  position: sticky;
+  left: 0;
+  z-index: 6;
+  background: var(--bg);
   display: flex;
   align-items: flex-end;
   justify-content: flex-end;
@@ -2707,6 +2719,11 @@ html.pane-resizing * {
   display: none; /* rows carry their own calendar dots */
 }
 
+.cluster-row-spacer {
+  flex: none;
+  pointer-events: none;
+}
+
 .cluster-row {
   display: flex;
   align-items: center;
@@ -2730,11 +2747,13 @@ html.pane-resizing * {
   background: color-mix(in srgb, var(--fg) 9%, transparent);
 }
 
-.cluster-dot {
+.cluster-row::before {
+  content: "";
   width: 6px;
   height: 6px;
   border-radius: 2px;
   flex: none;
+  background: var(--cluster-dot-color);
 }
 
 .cluster-time {
@@ -2754,7 +2773,7 @@ html.pane-resizing * {
   color: var(--fg-secondary);
 }
 
-.cluster-row.past .cluster-dot {
+.cluster-row.past::before {
   opacity: 0.4;
 }
 
@@ -2888,19 +2907,17 @@ html.pane-resizing * {
 /* ---------- pixel panning strips ---------- */
 .pan-clip {
   position: relative;
-  overflow: hidden;
+  overflow: visible;
   min-width: 0;
 }
 
-.pan-strip {
-  will-change: transform;
-  transform: translateX(0);
-}
+.pan-strip { transform: none; }
 
 .day-clip {
   flex: 1;
   position: relative;
-  overflow: hidden;
+  overflow: visible;
+  min-width: 0;
 }
 
 .day-head-x {

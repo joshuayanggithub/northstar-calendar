@@ -156,7 +156,14 @@ impl CalendarApi for FakeApi {
                 return Err(CoreError::Api { status: 412, body: "precondition".into() });
             }
         }
-        events.remove(event_id);
+        if ev["recurringEventId"].is_string() {
+            let ev = events.get_mut(event_id).unwrap();
+            ev["status"] = json!("cancelled");
+            ev["etag"] = json!(self.next_etag());
+            self.changed.borrow_mut().push(event_id.to_string());
+        } else {
+            events.remove(event_id);
+        }
         Ok(())
     }
 
@@ -353,6 +360,37 @@ fn remote_delete_removes_local_event() {
 
     engine.sync_once().unwrap();
     assert!(db.get_event("cal", &id).unwrap().is_none());
+}
+
+#[test]
+fn undo_delete_then_patch_restores_recurring_instance_membership() {
+    let (db, api) = setup();
+    let id = "series_20261020T100000Z";
+    let mut remote = event_body(id, "recurring instance");
+    remote["recurringEventId"] = json!("series");
+    remote["originalStartTime"] = json!({ "dateTime": "2026-10-20T10:00:00Z" });
+    remote["etag"] = json!("\"initial\"");
+    api.events.borrow_mut().insert(id.into(), remote);
+
+    let engine = SyncEngine::new(&db, &api);
+    engine.sync_once().unwrap();
+    let occurrence = db.get_event("cal", id).unwrap().unwrap();
+    assert_eq!(occurrence.recurring_event_id.as_deref(), Some("series"));
+
+    db.delete_event("cal", id).unwrap();
+    db.enqueue_op("cal", id, OpKind::Delete, None, occurrence.etag.as_deref()).unwrap();
+    db.upsert_event(&occurrence).unwrap();
+    db.enqueue_op("cal", id, OpKind::Patch, Some(&json!({ "status": "confirmed" })), None)
+        .unwrap();
+
+    let report = engine.sync_once().unwrap();
+    assert_eq!(report.pushed, 2, "delete then undo patch should both be applied in queue order");
+    let remote = &api.events.borrow()[id];
+    assert_eq!(remote["status"], "confirmed");
+    assert_eq!(remote["recurringEventId"], "series");
+    assert_eq!(remote["originalStartTime"]["dateTime"], "2026-10-20T10:00:00Z");
+    assert_eq!(db.get_event("cal", id).unwrap().unwrap().recurring_event_id.as_deref(), Some("series"));
+    assert!(db.list_pending_ops().unwrap().is_empty());
 }
 
 /// Local edit helper mirroring the app layer: optimistic row + patch op whose

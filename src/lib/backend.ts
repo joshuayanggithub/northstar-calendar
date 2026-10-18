@@ -68,6 +68,7 @@ async function tauriBackend(): Promise<Backend> {
     updateEvent: (eventId, input, prevCalendarId) =>
       invoke("update_event", { eventId, input, prevCalendarId: prevCalendarId ?? null }),
     deleteEvent: (calendarId, eventId) => invoke("delete_event", { calendarId, eventId }),
+    restoreRecurringOccurrence: (event) => invoke("restore_recurring_occurrence", { event }),
     setEventNote: (calendarId, eventId, note) =>
       invoke<string | null>("set_event_note", { calendarId, eventId, note }),
     onDbChanged(cb) {

@@ -219,6 +219,9 @@ async function applySeriesPatch(masterId: string, patch: any, destinationId?: st
       e.description = joinDrill(body, drill) || null;
     }
     if (patch.location !== undefined) e.location = patch.location;
+    if (patch.conferenceData?.createRequest) {
+      e.conference_url = "https://meet.google.com/mock-series";
+    }
     if (patch.transparency !== undefined || patch.visibility !== undefined ||
         patch.reminders !== undefined || patch.attendees !== undefined) {
       e.raw = {
@@ -363,9 +366,16 @@ export const mockBackend: Backend = {
     await applySeriesPatch(masterId, {}, destinationId === calendarId ? undefined : destinationId);
   },
   async listEvents(start, end) {
+    // Tauri serializes every DB query into fresh event objects. Mirror that
+    // snapshot boundary in browser E2E so stale-reference bugs cannot hide.
     return events
       .filter((e) => e.status !== "cancelled" && e.end >= start && e.start < end)
-      .sort((a, b) => a.start.localeCompare(b.start));
+      .sort((a, b) => a.start.localeCompare(b.start))
+      .map((event) => ({
+        ...event,
+        recurrence: event.recurrence ? [...event.recurrence] : event.recurrence,
+        raw: event.raw == null ? event.raw : JSON.parse(JSON.stringify(event.raw)),
+      }));
   },
   async createEvent(input: EventInput) {
     const ev = mk(
@@ -384,12 +394,12 @@ export const mockBackend: Backend = {
     ev.location = input.location ?? null;
     ev.recurrence = input.recurrence ?? null;
     ev.raw = {
-      attendees: (input.attendees ?? []).map((email) => ({ email, responseStatus: "needsAction" })),
+      attendees: input.attendee_details ?? (input.attendees ?? []).map((email) => ({ email, responseStatus: "needsAction" })),
       transparency: input.transparency ?? "opaque",
       visibility: input.visibility ?? "default",
-      reminders: input.reminder_minutes != null
+      reminders: input.reminders ?? (input.reminder_minutes != null
         ? { useDefault: false, overrides: [{ method: "popup", minutes: input.reminder_minutes }] }
-        : { useDefault: true },
+        : { useDefault: true }),
     };
     events.push(ev);
     notifyDb();
@@ -410,15 +420,16 @@ export const mockBackend: Backend = {
       all_day: input.all_day,
       raw: {
       ...(ev.raw ?? {}),
-      attendees: (input.attendees ?? ev.raw?.attendees?.map((a: any) => a.email) ?? []).map(
-        (e: any) => (typeof e === "string" ? { email: e, responseStatus: "needsAction" } : e),
-      ),
+      attendees: input.attendee_details ?? (input.attendees != null
+        ? input.attendees.map((email) => ({ email, responseStatus: "needsAction" }))
+        : ev.raw?.attendees ?? []),
       transparency: input.transparency ?? ev.raw?.transparency ?? "opaque",
       visibility: input.visibility ?? ev.raw?.visibility ?? "default",
-      reminders:
-        input.reminder_minutes != null
-          ? { useDefault: false, overrides: [{ method: "popup", minutes: input.reminder_minutes }] }
-          : (ev.raw?.reminders ?? { useDefault: true }),
+      reminders: input.reminders ?? (input.reminder_minutes !== undefined
+        ? input.reminder_minutes == null
+          ? { useDefault: true }
+          : { useDefault: false, overrides: [{ method: "popup", minutes: input.reminder_minutes }] }
+        : (ev.raw?.reminders ?? { useDefault: true })),
       },
     };
     // Match the native backend: a db change returns fresh event snapshots.
@@ -436,6 +447,18 @@ export const mockBackend: Backend = {
         if (events[j].recurring_event_id === eventId) events.splice(j, 1);
       }
     }
+    notifyDb();
+  },
+  async restoreRecurringOccurrence(event) {
+    const restored = {
+      ...event,
+      recurrence: event.recurrence ? [...event.recurrence] : event.recurrence,
+      status: event.status === "cancelled" ? "confirmed" : event.status,
+      raw: event.raw == null ? event.raw : JSON.parse(JSON.stringify(event.raw)),
+    };
+    const index = events.findIndex((e) => e.calendar_id === event.calendar_id && e.id === event.id);
+    if (index >= 0) events.splice(index, 1, restored);
+    else events.push(restored);
     notifyDb();
   },
   async goalsRead() {

@@ -102,12 +102,68 @@ pub struct EventInput {
     pub recurrence: Option<Vec<String>>,
     /// attendee emails
     pub attendees: Option<Vec<String>>,
+    /// full attendee resources for edits/undo (preserves RSVP state)
+    pub attendee_details: Option<Vec<serde_json::Value>>,
+    /// full reminder resource for undo snapshots (preserves multiple overrides)
+    pub reminders: Option<serde_json::Value>,
     /// "opaque" (busy) | "transparent" (free)
     pub transparency: Option<String>,
     /// "default" | "public" | "private"
     pub visibility: Option<String>,
-    /// popup reminder minutes before start; None = calendar default
-    pub reminder_minutes: Option<i64>,
+    /// popup reminder minutes before start; null = calendar default, absent = unchanged
+    #[serde(default, deserialize_with = "deserialize_reminder_minutes")]
+    pub reminder_minutes: ReminderMinutes,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum ReminderMinutes {
+    /// The caller omitted the field, so a PATCH must leave reminders unchanged.
+    #[default]
+    Unchanged,
+    /// The caller explicitly selected the calendar's default reminders.
+    CalendarDefault,
+    /// One event-specific popup reminder in minutes.
+    At(i64),
+}
+
+fn writable_attendee(attendee: &serde_json::Value) -> serde_json::Value {
+    const WRITABLE: &[&str] = &[
+        "additionalGuests",
+        "comment",
+        "displayName",
+        "email",
+        "id",
+        "optional",
+        "resource",
+        "responseStatus",
+    ];
+    let Some(fields) = attendee.as_object() else {
+        return attendee.clone();
+    };
+    serde_json::Value::Object(
+        fields
+            .iter()
+            .filter(|(name, _)| WRITABLE.contains(&name.as_str()))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect(),
+    )
+}
+
+fn writable_google_patch(mut patch: serde_json::Value) -> serde_json::Value {
+    if let Some(attendees) = patch.get_mut("attendees").and_then(serde_json::Value::as_array_mut) {
+        *attendees = attendees.iter().map(writable_attendee).collect();
+    }
+    patch
+}
+
+fn deserialize_reminder_minutes<'de, D>(deserializer: D) -> Result<ReminderMinutes, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<i64>::deserialize(deserializer)? {
+        Some(minutes) => ReminderMinutes::At(minutes),
+        None => ReminderMinutes::CalendarDefault,
+    })
 }
 
 fn google_body(id: &str, input: &EventInput) -> serde_json::Value {
@@ -146,7 +202,11 @@ fn google_body(id: &str, input: &EventInput) -> serde_json::Value {
             }
         }
     }
-    if let Some(att) = &input.attendees {
+    if let Some(attendees) = &input.attendee_details {
+        body["attendees"] = serde_json::json!(
+            attendees.iter().map(writable_attendee).collect::<Vec<_>>()
+        );
+    } else if let Some(att) = &input.attendees {
         body["attendees"] = serde_json::json!(att
             .iter()
             .map(|e| serde_json::json!({ "email": e }))
@@ -156,15 +216,23 @@ fn google_body(id: &str, input: &EventInput) -> serde_json::Value {
         body["transparency"] = serde_json::json!(t);
     }
     if let Some(v) = &input.visibility {
-        if v != "default" {
-            body["visibility"] = serde_json::json!(v);
-        }
+        body["visibility"] = serde_json::json!(v);
     }
-    if let Some(mins) = input.reminder_minutes {
-        body["reminders"] = serde_json::json!({
-            "useDefault": false,
-            "overrides": [{ "method": "popup", "minutes": mins }]
-        });
+    if let Some(reminders) = &input.reminders {
+        body["reminders"] = reminders.clone();
+    } else {
+        match input.reminder_minutes {
+            ReminderMinutes::Unchanged => {}
+            ReminderMinutes::CalendarDefault => {
+                body["reminders"] = serde_json::json!({ "useDefault": true });
+            }
+            ReminderMinutes::At(mins) => {
+                body["reminders"] = serde_json::json!({
+                    "useDefault": false,
+                    "overrides": [{ "method": "popup", "minutes": mins }]
+                });
+            }
+        }
     }
     if input.with_meet == Some(true) {
         body["conferenceData"] = serde_json::json!({
@@ -414,6 +482,51 @@ fn delete_event(
     do_delete_event(&app, &app_state, calendar_id, event_id)
 }
 
+/// Re-enable a previously deleted occurrence without turning it into a new
+/// standalone event. Google retains cancelled recurring exceptions by id, so
+/// PATCHing their status restores membership in the original series.
+pub(crate) fn do_restore_recurring_occurrence(
+    app: &AppHandle,
+    app_state: &AppState,
+    event: Event,
+) -> CmdResult<()> {
+    if event.recurring_event_id.is_none() {
+        return Err("event is not a recurring occurrence".into());
+    }
+    let calendar_id = event.calendar_id.clone();
+    let event_id = event.id.clone();
+    let status = if event.status == "cancelled" {
+        "confirmed".to_string()
+    } else {
+        event.status.clone()
+    };
+    app_state
+        .db(|db| {
+            db.upsert_event(&event)?;
+            db.enqueue_op(
+                &calendar_id,
+                &event_id,
+                OpKind::Patch,
+                Some(&serde_json::json!({ "status": status })),
+                None,
+            )?;
+            Ok(())
+        })
+        .map_err(err_str)?;
+    let _ = app.emit("db-changed", ());
+    app_state.kick_sync(SyncKick::Calendars(vec![calendar_id]));
+    Ok(())
+}
+
+#[tauri::command]
+fn restore_recurring_occurrence(
+    app: AppHandle,
+    app_state: State<AppState>,
+    event: Event,
+) -> CmdResult<()> {
+    do_restore_recurring_occurrence(&app, &app_state, event)
+}
+
 pub(crate) fn do_add_calendar(
     app: &AppHandle,
     app_state: &AppState,
@@ -536,6 +649,10 @@ async fn update_series_master(
     previous_start: Option<String>,
 ) -> CmdResult<()> {
     off_main(app, move |app, st| {
+        // Keep the full patch for the local optimistic snapshot (opaque
+        // attendee fields may be needed to round-trip data the editor cannot
+        // represent), but send only writable attendee fields to Google.
+        let google_patch = writable_google_patch(patch.clone());
         let destination = destination_id.filter(|d| *d != calendar_id);
         let _gate = st.sync_gate.lock().unwrap_or_else(|p| p.into_inner());
         let previous = st
@@ -561,8 +678,8 @@ async fn update_series_master(
 
         let remote = (|| -> CmdResult<()> {
             let client = st.google_client().map_err(err_str)?;
-            if patch.as_object().map_or(false, |o| !o.is_empty()) {
-                client.patch_event(&calendar_id, &master_id, &patch, None).map_err(err_str)?;
+            if google_patch.as_object().map_or(false, |o| !o.is_empty()) {
+                client.patch_event(&calendar_id, &master_id, &google_patch, None).map_err(err_str)?;
             }
             if let Some(dest) = &destination {
                 client.move_event(&calendar_id, &master_id, dest).map_err(err_str)?;
@@ -776,6 +893,7 @@ pub fn run() {
             update_event,
             set_event_note,
             delete_event,
+            restore_recurring_occurrence,
             add_calendar,
             get_series_master,
             get_series_instances,
@@ -835,6 +953,84 @@ mod series_tests {
         let mut v: Vec<_> = db.list_series_instances(cal, "m").unwrap().into_iter().map(|e| e.id).collect();
         v.sort();
         v
+    }
+
+    fn event_input(reminder_field: Option<serde_json::Value>) -> EventInput {
+        let mut value = json!({
+            "calendar_id": "cal",
+            "summary": "Reminder semantics",
+            "start": "2026-10-14T10:00:00-04:00",
+            "end": "2026-10-14T11:00:00-04:00",
+            "all_day": false,
+            "visibility": "default",
+        });
+        if let Some(reminder_field) = reminder_field {
+            value["reminder_minutes"] = reminder_field;
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn omitted_reminders_are_unchanged_but_null_resets_to_calendar_default() {
+        let omitted = event_input(None);
+        assert_eq!(omitted.reminder_minutes, ReminderMinutes::Unchanged);
+        assert!(google_body("event", &omitted).get("reminders").is_none());
+
+        let reset = event_input(Some(serde_json::Value::Null));
+        let body = google_body("event", &reset);
+        assert_eq!(reset.reminder_minutes, ReminderMinutes::CalendarDefault);
+        assert_eq!(body["reminders"], json!({ "useDefault": true }));
+        assert_eq!(body["visibility"], "default");
+
+        let mut clear_attendees = event_input(None);
+        clear_attendees.attendee_details = Some(vec![]);
+        assert_eq!(google_body("event", &clear_attendees)["attendees"], json!([]));
+
+        let mut restore = event_input(None);
+        restore.attendee_details = Some(vec![json!({
+            "email": "accepted@example.invalid",
+            "responseStatus": "accepted",
+            "displayName": "Accepted attendee",
+            "optional": true,
+            "organizer": false,
+            "self": true,
+            "asyncOperation": "inProgress"
+        })]);
+        restore.reminders = Some(json!({
+            "useDefault": false,
+            "overrides": [
+                { "method": "popup", "minutes": 10 },
+                { "method": "email", "minutes": 1440 }
+            ]
+        }));
+        let body = google_body("event", &restore);
+        assert_eq!(body["attendees"][0]["responseStatus"], "accepted");
+        assert_eq!(body["attendees"][0]["displayName"], "Accepted attendee");
+        assert_eq!(body["attendees"][0]["optional"], true);
+        assert!(body["attendees"][0].get("organizer").is_none());
+        assert!(body["attendees"][0].get("self").is_none());
+        assert!(body["attendees"][0].get("asyncOperation").is_none());
+        assert_eq!(body["reminders"]["overrides"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn recurring_patch_keeps_opaque_local_attendees_but_strips_read_only_wire_fields() {
+        let local_patch = json!({
+            "attendees": [{
+                "id": "opaque-attendee",
+                "displayName": "Private guest",
+                "responseStatus": "accepted",
+                "self": true,
+                "asyncOperation": "inProgress"
+            }]
+        });
+        let google_patch = writable_google_patch(local_patch.clone());
+        assert_eq!(local_patch["attendees"][0]["id"], "opaque-attendee");
+        assert_eq!(google_patch["attendees"][0], json!({
+            "id": "opaque-attendee",
+            "displayName": "Private guest",
+            "responseStatus": "accepted"
+        }));
     }
 
     #[test]
