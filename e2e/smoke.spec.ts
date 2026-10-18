@@ -971,7 +971,8 @@ test("navigation: a stale event-range response cannot replace the latest week", 
 test("gesture: a swipe never paints the old days pulled back a column", async ({ page }) => {
   // At every day boundary the offset used to drop by a whole column before
   // React rendered the shifted days, so one frame showed the previous days
-  // jumped back under the pointer: the swipe's jitter.
+  // jumped back under the pointer: the swipe's jitter. The synchronous day
+  // commit also makes this fail if pan.pending is recorded after onPan.
   await open(page);
   await page.evaluate(() => {
     const w = window as any;

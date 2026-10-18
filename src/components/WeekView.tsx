@@ -413,6 +413,8 @@ export function WeekView(props: {
   // pending: day steps already requested from onPan but not rendered yet.
   // The outer weekview scroll surface moves all three strips together; acc
   // carries any distance past the one-column overscan while React shifts days.
+  // Record pending before calling onPan: a synchronous React commit reads it
+  // in the firstDay layout effect to distinguish a swipe from navigation.
   const panRef = useRef({ acc: 0, pending: 0 });
   const programmaticScrollLeftRef = useRef<number | null>(null);
   const observedScrollLeftRef = useRef<number | null>(null);
@@ -576,8 +578,9 @@ export function WeekView(props: {
           pan.acc += carry;
           const want = Math.trunc(pan.acc / base);
           if (want !== pan.pending) {
-            onPan(want - pan.pending);
+            const steps = want - pan.pending;
             pan.pending = want;
+            onPan(steps);
           }
           observedScrollLeftRef.current = el.scrollLeft;
           programmaticScrollLeftRef.current = el.scrollLeft;
@@ -600,8 +603,9 @@ export function WeekView(props: {
       pan.acc += deltaX;
       const want = Math.trunc(pan.acc / colPxRef.current);
       if (want !== pan.pending) {
-        onPan(want - pan.pending);
+        const steps = want - pan.pending;
         pan.pending = want;
+        onPan(steps);
       }
       el.scrollLeft = PAN_OVERSCAN_DAYS * base + Math.max(-base, Math.min(base, pan.acc));
       observedScrollLeftRef.current = el.scrollLeft;
@@ -639,8 +643,9 @@ export function WeekView(props: {
       observedScrollLeftRef.current = actual;
       const want = Math.trunc(pan.acc / colPxRef.current);
       if (want === pan.pending) return;
-      onPan(want - pan.pending);
+      const steps = want - pan.pending;
       pan.pending = want;
+      onPan(steps);
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     el.addEventListener("scroll", onScroll, { passive: true });
@@ -1354,6 +1359,7 @@ export function WeekView(props: {
             <div
               key={d.toISOString()}
               className={"day-head" + (isSameDay(d, nowDate) ? " today" : "")}
+              data-day={format(d, "yyyy-MM-dd")}
               style={{ gridColumn: gridCol, gridRow: 1 }}
             >
               <span className="dow">{format(d, "EEE")}</span>

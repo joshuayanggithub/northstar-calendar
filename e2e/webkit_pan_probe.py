@@ -26,6 +26,7 @@ EVENTS_PER_DAY = int(os.environ.get("CAL_PAN_EVENTS_PER_DAY", "240"))
 DAY_COUNT = int(os.environ.get("CAL_PAN_DAY_COUNT", "21"))
 CSS_OVERRIDE = os.environ.get("CAL_PAN_STYLE", "")
 WHEEL_DX = float(os.environ.get("CAL_PAN_WHEEL_DX", "12"))
+WHEEL_COUNT = int(os.environ.get("CAL_PAN_WHEEL_COUNT", "60"))
 NATIVE_BODY = os.environ.get("CAL_PAN_NATIVE_BODY") == "1"
 NATIVE_OUTER = os.environ.get("CAL_PAN_NATIVE_OUTER") == "1"
 PASSIVE_WHEEL_CONTROL = os.environ.get("CAL_PAN_PASSIVE_WHEEL") == "1"
@@ -218,7 +219,7 @@ def start_probe(_unused=None):
           grid.scrollLeft += event.deltaX;
         }, {capture:true, passive:true});
       }
-      const gaps = [], wheelTimes = window.__transformWheelTimes || [], trustedWheelTimes = [], wheelSamples = [], preventedSamples = [], dispatches = window.__transformDispatches || [], visualChanges = [];
+      const gaps = [], wheelTimes = window.__transformWheelTimes || [], trustedWheelTimes = [], wheelSamples = [], preventedSamples = [], dispatches = window.__transformDispatches || [], visualChanges = [], framePositions = [];
       let defaultPreventedCount = 0;
       const bodyMoves = [];
       new MutationObserver(records => {
@@ -230,6 +231,10 @@ def start_probe(_unused=None):
       let live = true, previous = performance.now();
       function tick(time) {
         gaps.push({time, gap:time-previous}); previous=time;
+        const head = document.querySelector('.day-head');
+        const width = document.querySelector('.day-clip').clientWidth / document.querySelectorAll('.day-head').length;
+        const day = head?.dataset.day;
+        if (day) framePositions.push({time, day, left:grid.scrollLeft, headX:head.getBoundingClientRect().left, position:Date.parse(day+'T00:00:00Z')/86400000*width+grid.scrollLeft-2*width});
         if (live) requestAnimationFrame(tick);
       }
       requestAnimationFrame(tick);
@@ -237,7 +242,7 @@ def start_probe(_unused=None):
         new MutationObserver(() => visualChanges.push({time:performance.now(), left:grid.scrollLeft}))
           .observe(strip, {attributes:true,attributeFilter:['style']});
       } else {
-        grid.addEventListener('scroll', () => visualChanges.push({time:performance.now(), left:grid.scrollLeft}), {passive:true});
+        grid.addEventListener('scroll', () => visualChanges.push({time:performance.now(), left:grid.scrollLeft, day:document.querySelector('.day-head')?.dataset.day}), {passive:true});
       }
       window.__weekViewRenderMarks = [];
       window.__weekViewRenderDurations = [];
@@ -262,6 +267,7 @@ def start_probe(_unused=None):
         }
       });
       window.__beginPanInput = () => {
+        window.__panBeginTime = performance.now();
         window.__weekViewRenderMarks = [];
         window.__weekViewRenderDurations = [];
         window.__weekRenderStages = [];
@@ -307,6 +313,9 @@ def start_probe(_unused=None):
           wheels:wheelTimes.filter(t=>t>x.time-x.gap&&t<=x.time).length,
           commits:commits.filter(c=>c.commitTime>x.time-x.gap&&c.startTime<x.time)
         }));
+        const frameSteps=framePositions.slice(1).map((after,i)=>({
+          before:framePositions[i],after,delta:after.position-framePositions[i].position
+        })).filter(x=>x.after.time>=window.__panBeginTime);
         const panNoteSamples=window.__panNoteSamples||[];
         window.__webkitPanResult={
           agent:navigator.userAgent,
@@ -343,6 +352,7 @@ def start_probe(_unused=None):
           panScrollDelta:(window.__panStartScrollLeft==null)?null:grid.scrollLeft-window.__panStartScrollLeft,
           panStartDate:window.__panStartDate??null,
           panEndDate:window.__panEndDate??null,
+          finalDate:document.querySelector('.day-head')?.dataset.day??null,
           panWheelCount:wheelTimes.length-(window.__panStartWheelCount??0),
           panMotionRange,
           movementVerified:__TRANSFORM_CONTROL__
@@ -375,6 +385,8 @@ def start_probe(_unused=None):
           p95WheelToScrollLatency:lag[Math.min(lag.length-1,Math.floor(lag.length*.95))]??0,
           maxWheelToScrollLatency:lag[lag.length-1]??0,
           visualUpdateEvents:visualChanges.length,
+          maxFrameBack:Math.min(0,...frameSteps.map(x=>x.delta)),
+          frameBackSteps:frameSteps.filter(x=>x.delta<-2).slice(0,12),
           transformOffset:window.__transformPanState?.offset??null,
           maxCommit:Math.max(0,...commits.map(c=>c.actualDuration)),
           bodyMoveCount:bodyMoves.filter(m=>m.time>=first&&m.time<=last).length,
@@ -433,9 +445,9 @@ def begin_gdk_pan():
         Gtk.main_do_event(event)
         return False
 
-    for index in range(60):
+    for index in range(WHEEL_COUNT):
         GLib.timeout_add(index * 12, dispatch_one)
-    GLib.timeout_add(750, lambda: (evaluate("window.__endPanInput()", lambda _value: None), False)[1])
+    GLib.timeout_add(WHEEL_COUNT * 12 + 30, lambda: (evaluate("window.__endPanInput()", lambda _value: None), False)[1])
     return False
 
 

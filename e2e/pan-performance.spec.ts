@@ -152,6 +152,71 @@ test("gesture: a clear trackpad stream switches to passive native scrolling", as
   await page.keyboard.up("Control");
 });
 
+for (const [label, deltaY] of [["native", 0], ["mixed-axis", 2]] as const) {
+test(`gesture: sustained ${label} horizontal input keeps a continuous visual position`, async ({ page }) => {
+  const fixture = panFixture(900, "trusted-snap", false, nyDateBase(), 120, -3);
+  await page.addInitScript((fx) => { (globalThis as any).__calFixture = fx; }, fixture);
+  await page.goto("/");
+  await page.keyboard.press("9");
+  await expect(page.locator(".day-head")).toHaveCount(9);
+  const grid = page.getByTestId("week-grid");
+  const bounds = (await grid.boundingBox())!;
+  await page.evaluate(() => {
+    const element = document.querySelector<HTMLElement>("[data-testid=week-grid]")!;
+    const ordinal = () => Date.parse(document.querySelector<HTMLElement>(".day-head")!.dataset.day + "T00:00:00Z") / 86400000;
+    const initialDay = ordinal();
+    const samples: { position: number; width: number; input: number; day: number }[] = [];
+    let input = 0;
+    let trusted = 0;
+    let prevented = 0;
+    let live = true;
+    element.addEventListener("wheel", (event) => {
+      input += event.deltaX;
+      if (event.isTrusted) trusted++;
+      if (event.defaultPrevented) prevented++;
+    }, { passive: true });
+    const tick = () => {
+      const width = document.querySelector<HTMLElement>(".day-clip")!.clientWidth / document.querySelectorAll(".day-head").length;
+      samples.push({ position: (ordinal() - initialDay) * width + element.scrollLeft - 2 * width,
+        width, input, day: ordinal() - initialDay });
+      if (live) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+    (window as any).__trustedPanTrace = {
+      samples,
+      stop: () => { live = false; return { samples, trusted, prevented, input }; },
+    };
+  });
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
+  for (let index = 0; index < 80; index++) {
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseWheel", x: bounds.x + bounds.width / 2, y: bounds.y + 200,
+      deltaX: 50, deltaY,
+    });
+    await page.waitForTimeout(8);
+  }
+  await page.waitForTimeout(200);
+  const result = await page.evaluate(() => (window as any).__trustedPanTrace.stop()) as {
+    samples: { position: number; width: number; input: number; day: number }[];
+    trusted: number; prevented: number; input: number;
+  };
+  const steps = result.samples.slice(1).map((sample, index) => sample.position - result.samples[index].position);
+  const summary = {
+    trusted: result.trusted, prevented: result.prevented, input: result.input,
+    movement: result.samples.at(-1)!.position - result.samples[0].position,
+    maxBack: Math.min(...steps), maxForward: Math.max(...steps),
+    widthRange: Math.max(...result.samples.map((sample) => sample.width)) - Math.min(...result.samples.map((sample) => sample.width)),
+    daySteps: result.samples.at(-1)!.day,
+  };
+  console.log(`trusted horizontal pan: ${JSON.stringify(summary)}`);
+  expect(summary.trusted).toBeGreaterThan(60);
+  expect(summary.daySteps).toBeGreaterThan(2);
+  expect(summary.maxBack, "a date rebase must not move the calendar backward").toBeGreaterThan(-1);
+  expect(Math.abs(summary.movement - summary.input), "day rebases must preserve horizontal distance").toBeLessThan(2);
+});
+}
+
 test("pan: a dense day step reuses cluster rows when the live clock is unchanged", async ({ page }) => {
   const fixture = panFixture(400, "cluster-cache", false, nyDateBase());
   expect(new Intl.DateTimeFormat("en-US", {

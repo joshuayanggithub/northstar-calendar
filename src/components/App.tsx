@@ -7,6 +7,7 @@ import {
   useState,
   type ProfilerOnRenderCallback,
 } from "react";
+import { flushSync } from "react-dom";
 import {
   addDays,
   addMonths,
@@ -968,8 +969,13 @@ export default function App() {
 
   const pan = useCallback(
     (deltaDays: number) => {
-      if (view === "week") setPanDays((p) => p + deltaDays);
-      else setAnchor((prev) => addDays(prev, deltaDays));
+      if (view === "week") {
+        // A native scroll can paint between the wheel/scroll event and React's
+        // deferred commit. Rebase the rendered days and scroll offset together.
+        flushSync(() => setPanDays((p) => p + deltaDays));
+      } else {
+        setAnchor((prev) => addDays(prev, deltaDays));
+      }
     },
     [view],
   );

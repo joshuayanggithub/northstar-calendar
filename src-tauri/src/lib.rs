@@ -918,6 +918,7 @@ pub fn run() {
         .run(|app, event| {
             // macOS: clicking the nudge (or the Dock icon) reopens the app;
             // bring the window back even if it was closed or minimized
+            #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.unminimize();
@@ -926,6 +927,8 @@ pub fn run() {
                 }
                 notify::answer_nudge(app);
             }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, event);
         });
 }
 
