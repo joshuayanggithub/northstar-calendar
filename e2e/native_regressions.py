@@ -229,9 +229,20 @@ try:
           rect.right > viewport.left && rect.left < viewport.right;
       }).length;
       const frames = [];
+      const positions = [];
+      const visualPosition = () => {
+        const day = document.querySelector('.day-head');
+        const ordinal = Date.parse(day.dataset.day + 'T00:00:00Z') / 86400000;
+        const width = colW();
+        return ordinal * width + grid.scrollLeft - 14 * width; // PAN_OVERSCAN_DAYS
+      };
       const wheelDispatch = [];
       let last = performance.now(), live = true;
-      const tick = (t) => { frames.push(t - last); last = t; if (live) requestAnimationFrame(tick); };
+      const tick = (t) => {
+        frames.push(t - last); last = t;
+        positions.push(visualPosition());
+        if (live) requestAnimationFrame(tick);
+      };
       requestAnimationFrame(tick);
       let i = 0;
       const step = () => {
@@ -248,8 +259,15 @@ try:
             values.sort((a, b) => a - b);
             return values[Math.floor(values.length * 0.95)] || 0;
           };
+          const positionSteps = positions.slice(1).map((position, index) => position - positions[index]);
           done({back, travelled: samples[samples.length - 1] - samples[0], n: samples.length,
                 rows, visibleRows, p95: percentile95(frames), slow: frames.filter((f) => f > 50).length,
+                frameCount: frames.length,
+                firstDay: document.querySelector('.day-head')?.getAttribute('data-day'),
+                columnWidth: colW(),
+                firstVisualPosition: positions[0],
+                maxForwardStep: Math.max(0, ...positionSteps),
+                maxBackwardStep: Math.min(0, ...positionSteps),
                 wheelDispatchP95: percentile95(wheelDispatch),
                 wheelDispatchMax: Math.max(...wheelDispatch)});
         }, 400);

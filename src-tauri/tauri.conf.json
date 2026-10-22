@@ -11,13 +11,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "title": "North Star",
-        "width": 800,
-        "height": 600
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }

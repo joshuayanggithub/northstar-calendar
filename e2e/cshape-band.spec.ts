@@ -27,7 +27,7 @@ test("layout: an event at a C-shape's top keeps its start; the C-shape's band go
   expect(slab.top + slab.height).toBeCloseTo(m(9) * PX, 5);
 
   // with room only at the very top (nothing open below the enclosed event
-  // that could hold a title), the old rule stands: the band stays on top
+  // that could hold a title), the band stays on top: one title row
   const short = { item: "short", startMin: 0, endMin: m(1, 40) };
   const q = packDayWithSleeves([short, { item: "inner", startMin: 0, endMin: m(1, 30) }], PX);
   expect(q.regular.find((r) => r.item === "inner")!.top).toBeGreaterThan(0);
@@ -78,4 +78,23 @@ test("overnight: the part after midnight starts on the 12 AM line, under a sleep
   await expect(title).toBeVisible();
   const tb = (await title.boundingBox())!;
   expect(tb.y).toBeGreaterThanOrEqual(b.y + b.height - 1);
+});
+
+test("layout: an enclosed event keeps its time under a C-shape's long title (7 PM lines up across days)", () => {
+  // a three-line title + time row asks for a ~56px band; dinner starts 30
+  // minutes (24px) into the C-shape
+  const band = (item: string) => (item === "review" ? 56 : 17);
+  const review = { item: "review", startMin: m(18, 30), endMin: m(20, 30) };
+  const dinner = { item: "dinner", startMin: m(19), endMin: m(19, 30) };
+  const shower = { item: "shower", startMin: m(19, 30), endMin: m(20) };
+  const p = packDayWithSleeves([review, dinner, shower], PX, 17, true, band);
+  expect(p.regular.find((r) => r.item === "dinner")!.top, "dinner drew below the title, not at 7 PM").toBeCloseTo(m(19) * PX, 5);
+  expect(p.regular.find((r) => r.item === "shower")!.top).toBeCloseTo(m(19, 30) * PX, 5);
+  // the same dinner on a day without the review sits at the same height
+  const alone = packDayWithSleeves([dinner, shower], PX, 17, true, band);
+  expect(alone.regular.find((r) => r.item === "dinner")!.top).toBeCloseTo(m(19) * PX, 5);
+  // the C-shape still spans its own time
+  const slab = p.containers.find((c) => c.item === "review")!;
+  expect(slab.top).toBeCloseTo(m(18, 30) * PX, 5);
+  expect(slab.top + slab.height).toBeCloseTo(m(20, 30) * PX, 5);
 });

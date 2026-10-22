@@ -6,6 +6,7 @@
 
 import { useEffect, useState } from "react";
 import { now, toDateOnly, weekStart } from "./dates";
+import { renameStarGoal } from "./stars";
 import type { Backend } from "./types";
 
 export type Horizon = "daily" | "weekly" | "long";
@@ -100,8 +101,11 @@ export function useGoals(backend: Backend | null) {
     isDone: (g: Goal) => isDone(file, g),
     add: (horizon: Horizon, text: string) =>
       edit((f) => ({ ...f, goals: [...f.goals, { id: newId(), text: text.trim(), horizon }] })),
-    rename: (id: string, text: string) =>
-      edit((f) => ({ ...f, goals: f.goals.map((g) => (g.id === id ? { ...g, text: text.trim() } : g)) })),
+    rename: (id: string, text: string) => {
+      const old = file.goals.find((g) => g.id === id)?.text;
+      if (old !== undefined) renameStarGoal(old, text.trim());
+      edit((f) => ({ ...f, goals: f.goals.map((g) => (g.id === id ? { ...g, text: text.trim() } : g)) }));
+    },
     remove: (id: string) =>
       edit((f) => {
         const checks = { ...f.checks };

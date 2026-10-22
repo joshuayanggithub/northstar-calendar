@@ -55,7 +55,7 @@ test("margin notes: drag one to adjust it; the arrow follows, the spot survives 
   expect(end.dy).toBeGreaterThan(-6);
   expect(end.dy).toBeLessThan(end.h + 6);
   const pins = await page.evaluate(() => JSON.parse(localStorage.getItem("note-pins") ?? "{}"));
-  expect(Object.keys(pins)).toContain(key);
+  expect(Object.keys(pins)).toContain(key.slice(key.lastIndexOf("/") + 1)); // (pins are kept by event id)
 
   // remembered where it was put
   await page.reload();
@@ -250,7 +250,7 @@ test("margin notes: size a note's box from its edges and corner; the text re-wra
   expect(back.lines).toBeLessThan(narrow.lines);
   expect(back.oh).toBe(back.lines * 14 + 6);
 
-  const pin = (await page.evaluate(() => JSON.parse(localStorage.getItem("note-pins") ?? "{}")))[key];
+  const pin = (await page.evaluate(() => JSON.parse(localStorage.getItem("note-pins") ?? "{}")))[key.slice(key.lastIndexOf("/") + 1)];
   expect(pin.h).toBe(0);
   expect(pin.w).toBeGreaterThan(0);
 
@@ -294,7 +294,7 @@ test("margin notes: the corner scales the whole note — writing and box togethe
   expect(big.ow).toBeGreaterThan(before.ow * 1.3);
   expect(big.oh).toBeGreaterThan(before.oh * 1.3);
   expect(Math.abs(big.x - before.x)).toBeLessThan(4);
-  const pin = (await page.evaluate(() => JSON.parse(localStorage.getItem("note-pins") ?? "{}")))[key];
+  const pin = (await page.evaluate(() => JSON.parse(localStorage.getItem("note-pins") ?? "{}")))[key.slice(key.lastIndexOf("/") + 1)];
   expect(pin.scale).toBeGreaterThan(1.25);
 
   // back in, past where it started: smaller than at first
@@ -315,4 +315,62 @@ test("margin notes: the corner scales the whole note — writing and box togethe
   await tikTok(page).click();
   await page.keyboard.press("+");
   await expect.poll(async () => (await shapeOf(page)).font).toBeGreaterThan(small.font);
+});
+
+// ---- found by the 2026-10-18 bug-finder pass (run 2)
+
+test("notes: a note after Google web's HTML line breaks is found; [DRILL] stays out of the description", async ({ page }) => {
+  await open(page);
+  await page.evaluate(async () => {
+    const be = (window as any).__mockBackend;
+    const ev = (await be.listEvents("2026-01-01T00:00:00Z", "2027-01-01T00:00:00Z")).find((e: any) => /TikTok/.test(e.summary));
+    await be.updateEvent(ev.id, { ...ev, description: "Agenda<br><br>[DRILL] Forty minutes of scrolling. Phone stays in the other room." }, ev.calendar_id);
+  });
+  await expect(tikTok(page)).toHaveCount(1);
+  await page.locator(".chip-timed", { hasText: "TikTok" }).first().click();
+  await expect(page.getByTestId("event-panel").locator(".panel-desc")).not.toHaveValue(/\[DRILL\]/);
+});
+
+test("notes: a note starting with the event's title is kept whole", async ({ page }) => {
+  await open(page);
+  await page.locator(".chip-timed", { hasText: "Gym" }).first().click();
+  const p = page.getByTestId("event-panel");
+  await p.getByTestId("drill-add").click();
+  await p.getByTestId("drill-input").fill("Gymnastics class next door was loud");
+  await p.getByTestId("drill-input").press("Enter");
+  await expect(p.getByTestId("drill-text")).toHaveText("Gymnastics class next door was loud");
+});
+
+test("notes: a hand-placed note stays on screen in 1-day view", async ({ page }) => {
+  await open(page);
+  const note = tikTok(page);
+  const b = (await note.boundingBox())!;
+  await page.mouse.move(b.x + b.width / 2, b.y + 6);
+  await page.mouse.down();
+  await page.mouse.move(b.x + b.width / 2 - 20, b.y + 6 - 60, { steps: 8 });
+  await page.mouse.up();
+  await page.keyboard.press("1");
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("ArrowLeft"); // Mon, the note's day
+  await expect(tikTok(page)).toHaveCount(1);
+  const layer = (await page.getByTestId("margin-notes").boundingBox())!;
+  const nb = (await tikTok(page).boundingBox())!;
+  expect(nb.x).toBeGreaterThanOrEqual(layer.x - 1);
+});
+
+// 2026-10-21: "when hovering an annotation we should highlight the event it
+// is referring to, not just on click"
+test("margin notes: hovering a note lights its event (and its arrow), leaving it unlights", async ({ page }) => {
+  await open(page);
+  const note = tikTok(page);
+  const key = (await note.getAttribute("data-ek"))!;
+  const chip = page.locator(`.chip-timed[data-ek="${key}"]`);
+  const leader = page.locator(`[data-testid=margin-leader][data-ek="${key}"]`);
+  await note.hover();
+  await expect(chip).toHaveClass(/note-hover/);
+  await expect(chip).not.toHaveClass(/selected/); // hover isn't a click
+  await expect(leader).toHaveClass(/hover/);
+  await page.mouse.move(2, 2);
+  await expect(chip).not.toHaveClass(/note-hover/);
+  await expect(leader).not.toHaveClass(/hover/);
 });

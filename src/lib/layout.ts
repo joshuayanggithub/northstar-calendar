@@ -128,6 +128,13 @@ export const SLEEVE_LANE_WIDTH = SLEEVE_LANE_PX;
 export const LABEL_PX = 17;
 /** visible height of a joint's step */
 const JOINT_PX = 12;
+/** the step for an event with `roomPx` before its next event (or its end):
+ *  what's left after one title row, up to a full step; none under 3px (the
+ *  two meet flat) */
+const stepFor = (roomPx: number) => {
+  const j = Math.min(JOINT_PX, Math.max(0, roomPx - LABEL_PX));
+  return j < 3 ? 0 : j;
+};
 
 /** Layered overlap layout. Two rules, never columns:
  *  - C-SHAPE for true enclosure: an event that fully contains another is a
@@ -190,8 +197,16 @@ export function packDayWithSleeves<T>(
       comp = [];
       compEnd = -Infinity;
     };
+    // a long event that starts well into a run (two rows or more) splits
+    // it there: the rows before keep their time, the rows after nest inside
+    // the event (one list wrapped under the event's title left the first
+    // hour blank). Closer to the run's start the whole list wraps instead:
+    // a split there stranded a short event below the wrapped list.
+    const longStarts = arr.filter((e) => e.endMin - e.startMin >= LONG_MIN).map((e) => e.startMin).sort((a, b) => a - b);
+    const splitsAt = (t: number) => comp.length > 0 && (t - comp[0].startMin) * pxPerMin >= 2 * ROW_PX;
     for (const e of shorts) {
       if (comp.length && e.startMin >= compEnd) flushComp();
+      if (longStarts.some((t) => t <= e.startMin && splitsAt(t))) flushComp();
       comp.push(e);
       compEnd = Math.max(compEnd, e.endMin);
     }
@@ -217,11 +232,27 @@ export function packDayWithSleeves<T>(
     }
     depth.set(e, d);
   }
-  // clusters sit inside the deepest event that encloses their whole span
+  // clusters sit inside the deepest event that encloses their whole span,
+  // or that starts inside their run and outlasts it: that event then starts
+  // at its own time with the list wrapped under its title (as any event
+  // nested in a longer one), instead of being pushed below the whole list
+  // (five 10 AM rows are 81px, so a 10:15 event drew from 11:41)
+  // ...when that moves the list less than being pushed below the whole list
+  // would move the event: the rows under its title cost the gap plus one
+  // title row; the event below the list costs the rows' height past its
+  // start (a 10:29 event under a 10:00 run of five wraps; a 10:45 one is
+  // placed below the 81px of rows, which ended by then anyway)
+  const wraps = (o: It, c: { startMin: number; endMin: number; height: number }) => {
+    if (o.endMin < c.endMin) return false;
+    if (o.startMin <= c.startMin) return true;
+    if (o.startMin >= c.endMin) return false;
+    const gap = (o.startMin - c.startMin) * pxPerMin;
+    return gap + LABEL_PX < c.height - gap;
+  };
   const clusterEncloser = clusters.map((c) => {
     let best: It | null = null;
     for (const o of arr) {
-      if (o.startMin <= c.startMin && o.endMin >= c.endMin) {
+      if (wraps(o, c)) {
         if (!best || depth.get(o)! > depth.get(best)!) best = o;
       }
     }
@@ -311,12 +342,9 @@ export function packDayWithSleeves<T>(
   for (const n of nodes) if (n.it) nodeOf.set(n.it, n);
   const ancestorsOf = (n: Node): Node[] =>
     arr
-      .filter((o) =>
-        n.it ? contains(o, n.it) : o.startMin <= n.startMin && o.endMin >= n.endMin,
-      )
+      .filter((o) => (n.it ? contains(o, n.it) : wraps(o, n.c!)))
       .map((o) => nodeOf.get(o)!);
-  const isAncestor = (a: Node, b: Node) =>
-    !!a.it && (b.it ? contains(a.it, b.it) : a.it.startMin <= b.startMin && a.it.endMin >= b.endMin);
+  const isAncestor = (a: Node, b: Node) => !!a.it && (b.it ? contains(a.it, b.it) : wraps(a.it, b.c!));
   // depth-first order: each node hangs under its deepest encloser (ties: the
   // later one, whose title it sits beneath)
   {
@@ -365,6 +393,10 @@ export function packDayWithSleeves<T>(
     if (!n.slab || !n.it) continue;
     const band = bandPx.get(n)!;
     const inside = nodes.filter((k) => k !== n && isAncestor(n, k));
+    // (a slab wrapping something that starts before it keeps its band at
+    // the top: that thing goes under the band; left at its own time it was
+    // inset beside a slab that hadn't started, a blank strip)
+    if (inside.some((k) => k.startMin < n.startMin)) continue;
     let y = n.startMin * pxPerMin;
     for (let moved = true; moved; ) {
       moved = false;
@@ -377,7 +409,52 @@ export function packDayWithSleeves<T>(
         }
       }
     }
-    if (y > n.startMin * pxPerMin + 0.5 && y + band <= n.endMin * pxPerMin + 0.5) lowBand.set(n, y);
+    // (not when an event beside it, not inside, starts before that low band:
+    // it would be pushed below the band, a 2:30 event drawn from 3:17)
+    // ...and only when dropping it frees that event: with the band at the
+    // top, what it encloses sits under one title row and keeps its own, so
+    // the crossing event lands no higher than two rows down (else a 9:00
+    // standup under it was pushed to 9:21 and the crossing event gained
+    // nothing)
+    const crossing = nodes.some((k) => k !== n && k.it && k.depth === n.depth && !isAncestor(n, k) && !isAncestor(k, n) &&
+      k.startMin > n.startMin && k.startMin * pxPerMin < y + band - 0.5 &&
+      Math.max(k.startMin * pxPerMin, n.startMin * pxPerMin + 2 * LABEL_PX) < y + band - 4);
+    if (!crossing && y > n.startMin * pxPerMin + 0.5 && y + band <= n.endMin * pxPerMin + 0.5) lowBand.set(n, y);
+  }
+  // A slab's title band at its top takes only the room before the first
+  // event it encloses starts (but always one title row): a band sized to a
+  // wrapped title pushed what it encloses down, so a 7 PM dinner under a
+  // three-line title drew at 7:40 in that column and at 7 in the next.
+  // Enclosed events keep their times; the title fits the room there is.
+  // (One row stays: an event starting with it at the same minute would
+  // otherwise hide its title completely.)
+  for (const n of nodes) {
+    if (!n.slab || !n.it || lowBand.has(n)) continue;
+    const firstInside = Math.min(
+      ...nodes.filter((k) => k !== n && isAncestor(n, k)).map((k) => k.startMin),
+    );
+    if (!Number.isFinite(firstInside)) continue;
+    const room = (firstInside - n.startMin) * pxPerMin;
+    if (room < bandPx.get(n)!) bandPx.set(n, Math.max(LABEL_PX, room));
+  }
+  // Likewise an event's band takes only the room before the next event that
+  // starts while it runs (a partial overlap, same depth): a wrapped title's
+  // three rows pushed a 3 PM call under a 2:30 seminar down to 3:40, and the
+  // 3:30 one after it to 4:05. The title fits the room; starts stay true.
+  // (its own top joint comes first when it overlaps an earlier event: the
+  // band sits under that step, so the step's height comes off the room)
+  // the start of the next same-depth event that begins while each runs
+  const nextStart = new Map<Node, number>();
+  for (const n of nodes) {
+    if (!n.it) continue;
+    const peers = nodes.filter((k) => k !== n && k.it && k.depth === n.depth && !isAncestor(n, k) && !isAncestor(k, n));
+    const next = Math.min(...peers.filter((k) => k.startMin > n.startMin && k.startMin < n.endMin).map((k) => k.startMin));
+    if (!Number.isFinite(next)) continue;
+    nextStart.set(n, next);
+    const stepped = joints && peers.some((k) => k.rank < n.rank && k.startMin <= n.startMin && k.endMin > n.startMin);
+    const roomPx = (next - n.startMin) * pxPerMin;
+    const room = roomPx - (stepped ? stepFor(roomPx) : 0);
+    if (room < bandPx.get(n)!) bandPx.set(n, Math.max(LABEL_PX, room));
   }
   /** a low band's events above it (they start before it) */
   const aboveBand = (a: Node, k: Node) => lowBand.has(a) && k.startMin * pxPerMin < lowBand.get(a)! - 0.5;
@@ -400,8 +477,14 @@ export function packDayWithSleeves<T>(
     const ancestors = ancestorsOf(n);
     n.T = natural;
     let partner: Node | null = null;
+    // the top the (a)/(c) constraints allow, before any joint moves it: the
+    // joint is placed from this (re-placing it from its own last position
+    // halved the overlap again each pass, sliding the lower chip down to
+    // the upper's end: a 10 AM "Call" drawn from 11:45)
+    let floor = natural;
     for (let guard = 0; guard < 200; guard++) {
       const before = n.T;
+      n.T = floor;
       // (a) beneath every enclosing event's title band (a low band: clear
       // of it, the events above it keeping their place)
       for (const a of ancestors) {
@@ -409,6 +492,7 @@ export function packDayWithSleeves<T>(
         const [ba, bb] = bandOf(a);
         if (!lowBand.has(a) || (n.T < bb - 0.5 && n.T + natH > ba + 0.5)) n.T = Math.max(n.T, bb);
       }
+      floor = Math.max(floor, n.T);
       // the box as it would be drawn at this top
       n.jt = 0;
       n.jtx = null;
@@ -425,33 +509,55 @@ export function packDayWithSleeves<T>(
           if (!partner || p.T > partner.T) partner = p;
         }
         if (partner) {
-          const ov = partner.B - n.T;
-          const J = ov >= 3 ? Math.min(ov, JOINT_PX) : 0;
+          const ov = partner.B - floor;
+          // (a short event's step fits inside it: a full one ran a 30-min
+          // event past its end and pushed the next event down)
+          // (and inside the room before the next event starts, title row
+          // included: a full step in a chain of half-hour starts sent each
+          // link 5px lower than the last, a 3 PM seminar drawn at 3:19)
+          const nextRoom = nextStart.has(n) ? nextStart.get(n)! * pxPerMin - floor : Infinity;
+          const J = ov >= 3 ? Math.min(ov, stepFor(Math.min(natH, nextRoom))) : 0;
+          // the upper's band gives back what it can (one row stays) when it
+          // was itself pushed down and its band now reaches past this start:
+          // the room was counted from its own start time
+          if (!lowBand.has(partner)) {
+            const fit = floor - bandOf(partner)[0];
+            if (fit < bandPx.get(partner)!) bandPx.set(partner, Math.max(LABEL_PX, fit));
+          }
           const lo = bandOf(partner)[1];
-          // a slab partner's bottom becomes the joint, so the joint may not
-          // sit above anything that slab already contains
-          const pDesc = placed.filter((k) => k !== partner && isAncestor(partner!, k));
-          const descFloor = pDesc.length ? Math.max(...pDesc.map((k) => k.B)) - J : -Infinity;
-          // the lower event's own label block needs room too: lift the joint
-          // toward the upper's band (at most one step above its real start)
-          const roomTop = Math.max(n.endMin * pxPerMin - J - bandPx.get(n)!, natural - J);
-          const a = Math.max(lo, Math.min(n.T + ov / 2 - J / 2, roomTop), descFloor);
+          // the lower event starts where it starts: its top edge on its own
+          // start time (the joint went halfway into the overlap, drawing a
+          // 10 AM event from 10:54), below the upper's title band at least;
+          // a C-shape partner's nested events too (they kept it down to
+          // their end: a 7 PM event drawn at 7:15), their titles kept by (c)
+          const a = Math.max(lo, floor);
           n.T = a;
-          n.jt = J;
-          // a C-shape steps at its spine: its left strip runs on to its end
-          // and the event below tucks in under its nested events, edge to
-          // edge, instead of meeting it halfway across
-          n.jtx = partner.slab ? SLEEVE_LANE_PX : null;
-          n.B = Math.max(n.endMin * pxPerMin, n.T + J + LABEL_PX, n.T + minHeight(n));
+          if (a >= partner.B - 0.5) {
+            // no room for a joint inside the partner (a 15-minute event's
+            // minimum height overhanging the next): they meet edge to edge,
+            // no step, the lower one's title where it belongs
+            partner = null;
+            n.B = Math.max(n.endMin * pxPerMin, n.T + natH - Math.max(0, n.T - natural), n.T + minHeight(n));
+          } else {
+            n.jt = J;
+            // a C-shape steps at its spine: its left strip runs on to its end
+            // and the event below tucks in under its nested events, edge to
+            // edge, instead of meeting it halfway across
+            n.jtx = partner.slab ? SLEEVE_LANE_PX : null;
+            n.B = Math.max(n.endMin * pxPerMin, n.T + J + LABEL_PX, n.T + minHeight(n));
+          }
         }
       }
       for (const q of placed) {
         if (q === partner || isAncestor(q, n)) continue;
         // (c) I would cover an already-placed title band: start below it
         const [qa, qb] = bandOf(q);
-        if (n.T < qb - 0.5 && n.B > qa + 0.5) n.T = Math.max(n.T, qb);
+        if (n.T < qb - 0.5 && n.B > qa + 0.5) {
+          n.T = Math.max(n.T, qb);
+          floor = Math.max(floor, qb);
+        }
       }
-      if (n.T <= before + 0.01 && guard > 0) break;
+      if (Math.abs(n.T - before) <= 0.01 && guard > 0) break;
     }
     // finalize the joint against the settled top
     if (partner) {

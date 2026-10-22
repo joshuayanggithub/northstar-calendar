@@ -9,6 +9,9 @@ function nyDateBase(date = new Date()) {
   return { year: part("year"), month: part("month"), day: part("day") };
 }
 
+/** days WeekView renders beyond each edge (PAN_OVERSCAN_DAYS) */
+const OVERSCAN = 14;
+
 const fixtureBase = liveClock ? nyDateBase() : { year: 2026, month: 10, day: 14 };
 
 function fixtureLocalTime(dayOffset: number, minute: number, base = fixtureBase): string {
@@ -97,7 +100,7 @@ test("gesture: a clear trackpad stream switches to passive native scrolling", as
         (window as any).__weekWheelOptions.push({
           passive: typeof options === "object" && options !== null ? options.passive === true : false,
           target: this.className,
-          nativePanHandler: String(listener).includes("nativeDeltaLimit"),
+          nativePanHandler: String(listener).includes("nativePanRef"),
         });
       }
       return add.call(this, type, listener, options);
@@ -152,6 +155,159 @@ test("gesture: a clear trackpad stream switches to passive native scrolling", as
   await page.keyboard.up("Control");
 });
 
+for (const [label, deltaY] of [["native", 0], ["mixed-axis", 2]] as const) {
+test(`gesture: sustained ${label} horizontal input scrolls natively and re-centres the days only once it rests`, async ({ page }) => {
+  const fixture = panFixture(900, "trusted-snap", false, nyDateBase(), 120, -3);
+  await page.addInitScript((fx) => { (globalThis as any).__calFixture = fx; }, fixture);
+  await page.goto("/");
+  await page.keyboard.press("9");
+  await expect(page.locator(".day-head")).toHaveCount(9);
+  const grid = page.getByTestId("week-grid");
+  const bounds = (await grid.boundingBox())!;
+  await page.evaluate((OVERSCAN) => {
+    const element = document.querySelector<HTMLElement>("[data-testid=week-grid]")!;
+    const ordinal = () => Date.parse(document.querySelector<HTMLElement>(".day-head")!.dataset.day + "T00:00:00Z") / 86400000;
+    const initialDay = ordinal();
+    const samples: { position: number; width: number; input: number; day: number }[] = [];
+    let input = 0;
+    let trusted = 0;
+    let prevented = 0;
+    let live = true;
+    let lastWheel = 0;
+    element.addEventListener("wheel", (event) => {
+      input += event.deltaX;
+      const at = performance.now();
+      if (lastWheel) (window as any).__wheelMaxGap = Math.max((window as any).__wheelMaxGap ?? 0, at - lastWheel);
+      lastWheel = at;
+      if (event.isTrusted) trusted++;
+      if (event.defaultPrevented) prevented++;
+    }, { passive: true });
+    const tick = () => {
+      const width = document.querySelector<HTMLElement>(".day-clip")!.clientWidth / document.querySelectorAll(".day-head").length;
+      samples.push({ position: (ordinal() - initialDay) * width + element.scrollLeft - OVERSCAN * width,
+        width, input, day: ordinal() - initialDay });
+      if (live) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+    (window as any).__trustedPanTrace = {
+      samples,
+      stop: () => { live = false; return { samples, trusted, prevented, input }; },
+    };
+  }, OVERSCAN);
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
+  // about six days: within the rendered days beyond the edge
+  for (let index = 0; index < 60; index++) {
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseWheel", x: bounds.x + bounds.width / 2, y: bounds.y + 200,
+      deltaX: 12, deltaY,
+    });
+    await page.waitForTimeout(8);
+  }
+  const duringStream = await page.evaluate(() =>
+    (window as any).__trustedPanTrace.samples.at(-1).day as number);
+  await page.waitForTimeout(400);
+  const result = await page.evaluate(() => (window as any).__trustedPanTrace.stop()) as {
+    samples: { position: number; width: number; input: number; day: number }[];
+    trusted: number; prevented: number; input: number;
+  };
+  const steps = result.samples.slice(1).map((sample, index) => sample.position - result.samples[index].position);
+  const summary = {
+    trusted: result.trusted, prevented: result.prevented, input: result.input,
+    movement: result.samples.at(-1)!.position - result.samples[0].position,
+    maxBack: Math.min(...steps), maxForward: Math.max(...steps),
+    widthRange: Math.max(...result.samples.map((sample) => sample.width)) - Math.min(...result.samples.map((sample) => sample.width)),
+    daySteps: result.samples.at(-1)!.day,
+  };
+  console.log(`trusted horizontal pan: ${JSON.stringify(summary)}`);
+  expect(summary.trusted).toBeGreaterThan(50);
+  expect(summary.prevented, "a horizontal trackpad stream is scrolled natively").toBe(0);
+  // a loaded test machine can stall the packet stream past the settle time,
+  // which a real trackpad gesture never does: only then is a re-centre fair
+  const maxGap = await page.evaluate(() => (window as any).__wheelMaxGap ?? 0);
+  if (maxGap < 140) expect(duringStream, "the days are not re-centred mid-swipe (WebKit would stop the scroll)").toBe(0);
+  else test.info().annotations.push({ type: "note", description: `packet stream stalled ${Math.round(maxGap)}ms` });
+  expect(summary.daySteps, "once it rests the days are re-centred").toBeGreaterThan(2);
+  expect(summary.maxBack, "a date rebase must not move the calendar backward").toBeGreaterThan(-1);
+  expect(Math.abs(summary.movement - summary.input), "day rebases must preserve horizontal distance").toBeLessThan(2);
+});
+}
+
+// The app's WKWebView on macOS: a scroll position set from script during a
+// swipe stops WebKit's native scroll and its momentum (the week snapped day
+// by day), while the calendar's own per-packet path ran at ~30 fps. So a
+// swipe and its momentum scroll natively through the rendered days, and the
+// days are re-centred only once it rests.
+test.describe("macOS WebKit (the app)", () => {
+  test.use({
+    userAgent:
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)",
+  });
+  test("gesture: a trackpad swipe with momentum scrolls natively, re-centring the days only once it rests", async ({ page }) => {
+    const fixture = panFixture(900, "mac-glide", false, nyDateBase(), 120, -3);
+    await page.addInitScript((fx) => { (globalThis as any).__calFixture = fx; }, fixture);
+    await page.goto("/");
+    await page.keyboard.press("9");
+    await expect(page.locator(".day-head")).toHaveCount(9);
+    const grid = page.getByTestId("week-grid");
+    const bounds = (await grid.boundingBox())!;
+    await page.evaluate((OVERSCAN) => {
+      const element = document.querySelector<HTMLElement>("[data-testid=week-grid]")!;
+      const ordinal = () => Date.parse(document.querySelector<HTMLElement>(".day-head")!.dataset.day + "T00:00:00Z") / 86400000;
+      const initialDay = ordinal();
+      const samples: { position: number; day: number }[] = [];
+      let input = 0, trusted = 0, live = true;
+      let prevented = 0;
+      // runs after the calendar's own listener (registered first)
+      let lastWheel = 0;
+      element.addEventListener("wheel", (event) => {
+        input += event.deltaX;
+        const at = performance.now();
+        if (lastWheel) (window as any).__wheelMaxGap = Math.max((window as any).__wheelMaxGap ?? 0, at - lastWheel);
+        lastWheel = at;
+        if (event.isTrusted) trusted++;
+        if (event.defaultPrevented) prevented++;
+      });
+      const tick = () => {
+        const width = document.querySelector<HTMLElement>(".day-clip")!.clientWidth / document.querySelectorAll(".day-head").length;
+        samples.push({ position: (ordinal() - initialDay) * width + element.scrollLeft - OVERSCAN * width, day: ordinal() - initialDay });
+        if (live) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+      (window as any).__macPan = { samples, stop: () => { live = false; return { samples, trusted, prevented, input }; } };
+    }, OVERSCAN);
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
+    // a swipe (steady small deltas, the native-path kind) then a decaying
+    // momentum tail
+    const deltas = [...Array(40).fill(14), ...Array.from({ length: 40 }, (_, i) => Math.max(1, Math.round(14 * 0.94 ** i)))];
+    for (const deltaX of deltas) {
+      await cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x: bounds.x + bounds.width / 2, y: bounds.y + 200, deltaX, deltaY: 0 });
+      await page.waitForTimeout(8);
+    }
+    const duringSwipe = await page.evaluate(() => (window as any).__macPan.samples.at(-1).day as number);
+    await page.waitForTimeout(400);
+    const r = await page.evaluate(() => (window as any).__macPan.stop()) as {
+      samples: { position: number; day: number }[]; trusted: number; prevented: number; input: number;
+    };
+    const steps = r.samples.slice(1).map((x, i) => x.position - r.samples[i].position);
+    const summary = {
+      trusted: r.trusted, prevented: r.prevented, input: r.input,
+      movement: r.samples.at(-1)!.position - r.samples[0].position,
+      maxBack: Math.min(...steps), daySteps: r.samples.at(-1)!.day,
+    };
+    console.log(`mac webkit pan: ${JSON.stringify(summary)}`);
+    expect(summary.trusted).toBeGreaterThan(70);
+    expect(summary.prevented, "the swipe is scrolled natively").toBe(0);
+    const maxGap = await page.evaluate(() => (window as any).__wheelMaxGap ?? 0);
+    if (maxGap < 140) expect(duringSwipe, "no day rebase while the swipe and its momentum run").toBe(0);
+    else test.info().annotations.push({ type: "note", description: `packet stream stalled ${Math.round(maxGap)}ms` });
+    expect(summary.daySteps, "the days are re-centred once it rests").toBeGreaterThan(2);
+    expect(summary.maxBack, "a day rebase never moves the calendar backward").toBeGreaterThan(-1);
+    expect(Math.abs(summary.movement - summary.input), "the glide covers exactly the swiped distance").toBeLessThan(2);
+  });
+});
+
 test("pan: a dense day step reuses cluster rows when the live clock is unchanged", async ({ page }) => {
   const fixture = panFixture(400, "cluster-cache", false, nyDateBase());
   expect(new Intl.DateTimeFormat("en-US", {
@@ -162,8 +318,12 @@ test("pan: a dense day step reuses cluster rows when the live clock is unchanged
   await expect(page.locator(".mock-badge")).toHaveText("browser mock mode");
   await page.keyboard.press("9");
   await expect(page.locator(".day-head")).toHaveCount(9);
+  // pin the scroll to the top: opened on the live clock, the grid scrolls by
+  // the time of day, and late enough the whole dense band mounts
+  await page.getByTestId("week-grid").evaluate((el) => { el.scrollTop = 0; });
+  // the row window follows the scroll a frame later
   await expect.poll(() => page.locator(".cluster-row").count()).toBeGreaterThan(0);
-  expect(await page.locator(".cluster-row").count()).toBeLessThan(400);
+  await expect.poll(() => page.locator(".cluster-row").count()).toBeLessThan(400);
   expect(await page.locator(".cluster-block").evaluateAll((blocks) => blocks.reduce((total, block) =>
     total + Number((block as HTMLElement).dataset.rowCount), 0))).toBe(400);
 
@@ -200,6 +360,9 @@ test("dense cluster rows retain their positions and mount as the vertical viewpo
   const blocks = page.getByTestId("cluster-block");
   await expect(blocks).toHaveCount(9);
   await grid.evaluate((element) => { element.scrollTop = 0; });
+  // the row window follows the scroll a frame later (and the open-time
+  // auto-scroll can land after this): read it once it shows the top rows
+  await expect.poll(() => blocks.locator(".cluster-row").first().getAttribute("data-ek")).toMatch(/row-window-0$/);
   const firstKeys = await blocks.locator(".cluster-row").evaluateAll((rows) => rows.map((row) => (row as HTMLElement).dataset.ek));
   const heights = await blocks.evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().height));
   await grid.evaluate((element) => { element.scrollTop = element.scrollHeight; });
@@ -223,9 +386,13 @@ test("pan: a day step replaces only the departing dense body column", async ({ p
   await page.goto("/");
   await page.keyboard.press("9");
   await expect(page.locator(".day-head")).toHaveCount(9);
+  // pin the scroll to the top: opened on the live clock, the grid scrolls by
+  // the time of day, and late enough the whole dense band mounts
+  await page.getByTestId("week-grid").evaluate((el) => { el.scrollTop = 0; });
+  // the row window follows the scroll a frame later
   await expect.poll(() => page.locator(".cluster-row").count()).toBeGreaterThan(0);
+  await expect.poll(() => page.locator(".cluster-row").count()).toBeLessThan(400);
   const mountedRows = await page.locator(".cluster-row").count();
-  expect(mountedRows).toBeLessThan(400);
 
   await page.evaluate(() => {
     const strip = document.querySelector(".day-cols")!;
@@ -360,7 +527,9 @@ test("pan: a fetched range shift only re-lays out days whose events changed", as
   const rebuiltDays = await page.evaluate(() =>
     ((window as any).__weekRenderStages as Array<{ id: string }>).filter(({ id }) => id === "day-layout").length,
   );
-  expect(rebuiltDays, "an overlapping fetch must preserve layouts for unchanged dates").toBeLessThanOrEqual(10);
+  // the 8 exposed days, plus those of them past the old fetch window (laid
+  // out empty, then again once fetched: up to a week of the runway)
+  expect(rebuiltDays, "an overlapping fetch must preserve layouts for unchanged dates").toBeLessThanOrEqual(15);
 });
 
 test("all-day index keeps a long event visible on every covered date", async ({ page }) => {
@@ -373,8 +542,9 @@ test("all-day index keeps a long event visible on every covered date", async ({ 
   await expect(page.locator(".mock-badge")).toHaveText("browser mock mode");
   await page.keyboard.press("9");
   await expect(page.locator(".day-head")).toHaveCount(9);
-  // WeekView includes the 9 visible columns and two scroll-runway columns on each side.
-  await expect(page.locator(".chip-allday")).toHaveCount(13);
+  // WeekView renders the 9 visible columns (from Oct 14) and OVERSCAN runway
+  // columns each side (Sep 30 – Nov 5); the event covers every one from Oct 7.
+  await expect(page.locator(".chip-allday")).toHaveCount(9 + 2 * OVERSCAN - 7);
 });
 
 test("timed day index keeps a 40-day event on every covered date", async ({ page }) => {
@@ -386,8 +556,9 @@ test("timed day index keeps a 40-day event on every covered date", async ({ page
   await expect(page.locator(".mock-badge")).toHaveText("browser mock mode");
   await page.keyboard.press("9");
   await expect(page.locator(".day-head")).toHaveCount(9);
-  // The event crosses the 31-day index bound and spans the entire visible window.
-  await expect(page.getByTestId("event-chip")).toHaveCount(13);
+  // The event crosses the 31-day index bound and covers every rendered column
+  // from Oct 7 (the runway starts Sep 30).
+  await expect(page.getByTestId("event-chip")).toHaveCount(9 + 2 * OVERSCAN - 7);
 });
 
 test("timed day index preserves a midnight end on the prior date", async ({ page }) => {
@@ -612,7 +783,7 @@ test("dense-calendar horizontal pan stays within a frame budget", async ({ page 
       },
       marginPlacementPending: document.querySelector<HTMLElement>('[data-testid="margin-notes"]')?.dataset.pending,
       marginPlacementMs: (window as any).__marginMs ?? null,
-      pixelsMoved: (lastDay - firstDay) * width + grid.scrollLeft - 2 * width,
+      pixelsMoved: (lastDay - firstDay) * width + grid.scrollLeft - 14 * width,
       frames: panGaps.length,
     };
   }, process.env.CAL_PAN_CPU_PROFILE !== "1");
@@ -1013,4 +1184,28 @@ test("diagnostic: browser-delivered wheel input keeps calendar pan responsive", 
     expect(metrics.clusterRows, "the default fixture should keep every visible and overscan day dense throughout the pan")
       .toBeGreaterThanOrEqual(eventsPerDay * 13);
   }
+});
+
+// The rows span the whole scroll width (WeekView rowW): with two weeks of
+// runway the week rests more than a screen into the scroll range, where a
+// viewport-wide row had scrolled its sticky time gutter (and the timezone
+// and all-day labels) off the left edge.
+test("pan: the time gutter and row labels stay at the left edge, at rest and after a swipe", async ({ page }) => {
+  await page.goto(profileUrl());
+  await expect(page.locator(".mock-badge")).toHaveText("browser mock mode");
+  const grid = page.getByTestId("week-grid");
+  const edges = () => grid.evaluate((el) => {
+    const left = el.getBoundingClientRect().left;
+    const at = (selector: string) => Math.round(document.querySelector(selector)!.getBoundingClientRect().left - left);
+    const head = document.querySelector(".day-head")!.getBoundingClientRect().left;
+    const body = document.querySelector("[data-testid=day-col-0]")!.getBoundingClientRect().left;
+    return { gutter: at(".gutter"), tz: at(".gutter-tz"), allDay: at(".allday-label"), aligned: Math.abs(head - body) < 1, scrolled: el.scrollLeft > el.clientWidth };
+  });
+  expect(await edges()).toEqual({ gutter: 0, tz: 0, allDay: 0, aligned: true, scrolled: true });
+  const box = (await grid.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + 200);
+  for (let i = 0; i < 25; i++) await page.mouse.wheel(-30, 0);
+  await page.waitForTimeout(400);
+  expect(await edges()).toEqual({ gutter: 0, tz: 0, allDay: 0, aligned: true, scrolled: true });
+  await expect(page.locator(".gutter .hour-label").first()).toBeVisible();
 });

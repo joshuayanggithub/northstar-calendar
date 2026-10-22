@@ -7,6 +7,147 @@ When something ships, move it to the "Shipped" log at the bottom with its
 commit, then into FEATURES.md / REQUESTS.md. Edits to this file are verified
 (read back), never fire-and-forget.
 
+## 2026-10-18 — horizontal pan follow-up
+
+- [x] Horizontal swipes now scroll natively and re-centre at rest
+  (`4c1fba4d`), measured with real HID trackpad swipes in the app's WKWebView
+  (`/tmp/claude/mn/pan/trackpad` + `probe2.py`; HOLD_AT/HOLD_MS = fingers
+  resting mid-swipe): p95 18–19ms, 0 frames >25ms. Still worth a feel-check
+  on the physical trackpad. Known limit: a single fling past 14 days stops at
+  the rendered edge until it rests (a mid-swipe re-centre made the week jump).
+- [ ] The optional 120-events/day native app suite stops before its pan check:
+  deleting its QA note also removes a second note DOM node, violating the
+  annotation test's exact removal count. Investigate separately; the default
+  native suite and dense browser pan profile pass.
+
+## 2026-10-18 — bug-finder leftovers (confirmed, not yet fixed)
+
+- [x] Split series keep their Meet/conference link and their own timezone
+  (`e4a38866`, and the conference_data commit after it).
+- [x] Runway days just swiped in take presses before the re-centre (pan-settling class).
+- [ ] native_regressions.py's swipe step times out (rAF paused) whenever
+  another app's window is in front of the sandbox window.
+
+## 2026-10-21 run 5 — design questions (locale), not bugs
+
+Found by the run 5 locale audit; the app is English / 12-hour / Sunday-first
+everywhere by design today, with one `LOCALE = "en-US"` constant for its
+hand-written labels. Decide before any of these changes:
+- [ ] 24-hour clock: follow the system (Notion does) or a setting? The
+  gutter, chips, now pill, panel labels/dropdown, Insights, tray and alerts
+  are all 12-hour; the panel's native time input accepts "14:30".
+- [ ] Week start: `WEEK_STARTS_ON = 0` (dates.ts) with no setting; de-DE users
+  get Sunday-first grids, mini-month, "This week" and weekly goal buckets.
+- [ ] UI language: day/month names are English for every locale.
+- [ ] Zone abbreviations use en-US names ("GMT+1" for London, not "BST").
+- [ ] Date order in quick create and ⌘K is US (3/11 = March 11); chrono has
+  `chrono.en.GB`. Natural-language input is English only ("Treffen 15 Uhr").
+- [ ] Right-to-left locales display but the page never sets dir="rtl".
+
+## 2026-10-21 run 5 — left open
+
+- [ ] "This and following" on a moved occurrence (b0c58f6e): the new
+  series keeps the series' days and starts on the moved day, with the
+  old slot as an EXDATE. Google counts DTSTART as an occurrence; if it
+  turns out not to for a day the rule doesn't name, start the new half on
+  the slot date instead (App.tsx applyScope "following", `slotExcluded`).
+  Verify once against a real series (sandbox, e2e/live_series_split.py).
+- [ ] The mock doesn't expand recurrence rules (series-edit.spec.ts
+  asserts the sent rule/EXDATE, not the occurrences); a small RRULE
+  expander in mockBackend would let specs assert what a person sees.
+- [ ] A cluster whose long event is NOT wrapped still pushes the list
+  down by its title row; and two events a few minutes apart still take a
+  title row each (run 4 item, unchanged).
+- [ ] Sync status while offline: a failed pass now emits sync-status with
+  its errors every interval; only Sync now toasts it. A persistent badge
+  ("Offline — changes will sync") would be clearer than nothing between
+  explicit syncs. A refresh-token revocation reports as a sync error, not
+  as a re-connect prompt (state.rs `failed_pass`).
+- [ ] Native-only, not reproduced in a browser: a dropped `listEvents`
+  on first paint leaves a blank week with no retry; a failed drag snaps
+  back silently (both need a DB error).
+- [ ] Google OAuth consent screen was in "Testing" (refresh tokens expire
+  after 7 days: sync silently died 2026-10-21 04:05 with 26 changes
+  queued). Joshua is publishing it (Console › Google Auth Platform ›
+  Audience › Publish app); if it's still Testing on Oct 28 the app will
+  now say so and ask to reconnect (29ec9419). A standing "N changes
+  waiting" / offline badge is still open (above).
+- [ ] No redo (⇧⌘Z): the native Edit menu's Redo is a text-field item only.
+- [ ] Mini-month shows only the anchor day, not the week/3-day range
+  (Notion highlights the range).
+- [ ] All-day switched off and SAVED, then switched back on, is one day
+  (the span is kept only within one editing session) — design call.
+- [ ] Native near-misses (w7b, unproven without Google): local attendee
+  rows lose `self`/`organizer` until the push response lands; a lost
+  response on an edit with attendees falls back to remote-wins and drops
+  the edits queued behind it; `strip_drill` leaves a leading newline on
+  HTML bodies (Google shows it); UTC "Z" query windows in App.tsx:1706
+  and :2282 against offset-stored rows (harmless in US zones).
+- [ ] A zero-length event exactly at midnight is listed ("12:00 AM –
+  12:00 AM") but not drawn in the week grid (dayItemsIndex excludes it).
+- [ ] ⌘K hit on a Saturday with weekends hidden opens the panel but the
+  Mon–Fri week doesn't show it — design call.
+- [ ] Google "moved exception" ambiguity: an occurrence Google moved to
+  another day keeps its original slot id; the panel's date field edits
+  the moved day while "All events" measures from the slot (by design
+  since 90726f63) — worth a sentence in the scope dialog.
+
+## 2026-10-19 run 4 — left open
+
+- [ ] Overlapping events now start on their lines (62a704d1, 02cd3087)
+  except where an earlier title row forces it: two events a few minutes
+  apart (4:30 and 4:31: the second sits one title row, ~17 min, lower, and
+  the next one after them too). Options: put the later title beside the
+  earlier one's, or let the step carry a title (src/lib/layout.ts,
+  packDayWithSleeves).
+- [ ] An existing series' repeat rule can't be edited in the panel (only a
+  "Repeats" label); a Meet link can't be removed, and ⌘Z after Add Google
+  Meet doesn't remove it (the mock ignores with_meet, so untested there).
+- [ ] Paste always lands on the anchored day (today), never the hovered
+  slot: decide whether ⌘V should follow the pointer like Notion.
+- [ ] Calendar color picks are this app's only; offer writing them to
+  Google (calendarList.patch colorId/backgroundColor) behind a confirm.
+- [ ] Native-only gaps no browser test reaches: menu accelerators while
+  typing in WKWebView (⌘N, ⌘[ may still reach the menu), IME commit with
+  keyCode 229, focus restore on WebKit (buttons don't take focus on click),
+  `add_calendar` making its Google call on the main thread (window freeze
+  while it runs).
+- [ ] Insights design questions: hidden calendars still count (App passes
+  `events`, not `visible`); a block canceled ahead of time counts as
+  "dropped" in plan kept; today's partial score is averaged into the day
+  score.
+## 2026-10-19 run 3 — left open
+
+- [x] Reviewer pass over run 3's own diff: done in run 4, 8 regressions
+  found and fixed `72a01905` (resize ghost vs drop, DST resize, false
+  joints, typed overnight end, weekend-hidden group drag, isolate Show all,
+  cancel+undo, weekday+date quick create).
+- [x] Grid hunt leftovers: cluster rows in a dragged group dim `0da58b19`.
+- [ ] Re-measure scroll with real trackpad swipes (still pending from run 2).
+
+## 2026-10-18 run 2 — left open
+
+- [ ] Live-Google check of the new RSVP write (`respond_event` sends
+  `{attendees: [...]}` with only self's responseStatus changed) and of the
+  this-and-following note patch on Google's computed instance id
+  (`{newId}_{UTC basic start}`; if Google ever names it differently the
+  patch 404s, reverts harmlessly and the note is lost).
+- [ ] Sync fuzz leftovers (second fuzz, 2026-10-18): a tokenless pull after
+  a 404-revert relies on Google listing tombstones (showDeleted) to drop
+  stale rows; `report.reverted` has an empty title for reverted Delete/Move
+  ops (it reads the already-deleted row).
+
+- [ ] Re-measure horizontal + vertical scroll with real HID trackpad swipes
+  after run 2's changes (the Mac screen was locked all run: no synthetic
+  input or frames reach a window then). Recipe: sandbox on a production
+  preview (`npm run build`, `npx vite preview --port 1420`, then
+  `e2e/sandbox_app.sh start`), `/tmp/claude/mn/pan/lock` must say locked: 0,
+  then `python3 /tmp/claude/mn/pan/probe2.py <pid> h -12 60 60`.
+- [ ] Perf: opening the event panel forces a whole-document layout
+  (GrowingTextarea.fit reads scrollHeight in a layout effect, ~33ms at 4x
+  CPU); week view mounts 35 columns to show 7 (~240ms at 4x when coming
+  back from month). Both measured on the real-data fixture; neither fixed.
+
 ## Features
 
 - Zooming in should decrease the # of days in the current view, and zooming out should increase it. Granularity should be by number of days until we get to 14 in which we can go to month next. 
@@ -218,7 +359,7 @@ browser server now runs independently. The 15:59 run had one transient
   the event disappearing. `useEvents` now ignores superseded requests, including
   older `db-changed` refreshes; the red/green navigation regression passes. The
   full browser suite then passed 308/372 (64 intentional skips).
-- [ ] Resolve remaining pan uncertainty in the actual macOS Tauri/WKWebView
+- [x] (superseded 2026-10-18 by the native-scroll pan, `4c1fba4d`: measured with real HID trackpad swipes in the macOS app, p95 18–19ms, 0 frames >25ms) Resolve remaining pan uncertainty in the actual macOS Tauri/WKWebView
   window with a physical trackpad. This host is Linux, so the user's reported
   macOS input/presentation path remains unverified; Joshua confirms the lag is
   on the macOS app with a trackpad and that it is worse with many events. One production-preview
@@ -242,7 +383,7 @@ browser server now runs independently. The 15:59 run had one transient
   p95/max 16.7-16.8ms and no >25ms gap (wheel-to-transform p95 <=0.4ms, max
   <=0.9ms; WeekView commits 2.0-8.2ms). These are headless Chromium/CDP,
   not physical trackpad or native WebKit evidence.
-- [ ] **Continue dense-pan root-cause work (2026-10-18):** an experimental
+- [x] (superseded 2026-10-18 by the native-scroll pan, `4c1fba4d`: measured with real HID trackpad swipes in the macOS app, p95 18–19ms, 0 frames >25ms) **Continue dense-pan root-cause work (2026-10-18):** an experimental
   shared horizontal scroll surface is now in the working tree. It removes the
   three per-frame strip transforms, but its wheel listener still calls
   `preventDefault()` and writes `scrollLeft`; it is not yet proven to improve
@@ -505,7 +646,7 @@ browser server now runs independently. The 15:59 run had one transient
     full browser suite then passed 330 tests with 64 intentional skips; the
     focused scroll/pinch suite passed 19/19. `npm run build` passed before
     test-only profiler edits. The physical Mac trackpad issue remains open.
-- [ ] **Horizontal pan: remove avoidable main-thread wheel blocking; verify Mac result.**
+- [x] (superseded 2026-10-18 by the native-scroll pan, `4c1fba4d`: measured with real HID trackpad swipes in the macOS app, p95 18–19ms, 0 frames >25ms) **Horizontal pan: remove avoidable main-thread wheel blocking; verify Mac result.**
   A new density-linked root cause is now fixed in the shared week renderer:
   cluster blocks previously mounted all their event buttons, including rows
   far outside the vertical viewport. A native dense fixture measured 2,645
@@ -771,7 +912,7 @@ browser server now runs independently. The 15:59 run had one transient
   cannot bind its loopback `TcpListener` (`PermissionDenied: Operation not
   permitted`) in this sandbox; the other 24 tests pass. This is a test-host
   permission limit, not a calendar regression.
-- [ ] Pan follow-up: reproduce the user's residual lag through physical
+- [x] (superseded 2026-10-18 by the native-scroll pan, `4c1fba4d`: measured with real HID trackpad swipes in the macOS app, p95 18–19ms, 0 frames >25ms) Pan follow-up: reproduce the user's residual lag through physical
   trackpad delivery and Linux WebKitGTK. Existing 18 production-Chromium
   profiles (12 synthetic + 6 browser-delivered; 400 events / 720px) measured
   p95 16.7–16.8ms; 8/18 had one 33.2–33.4ms gap, usually with no wheel event
@@ -836,7 +977,7 @@ browser server now runs independently. The 15:59 run had one transient
   10 PM–midnight height test and both previously failing narrow text-law cases
   pass. A React-transition scheduling experiment did not reduce the measured
   boundary hitch and was removed.
-- [ ] Pan is improved but not declared fixed. The corrected 4,000-event
+- [x] (superseded 2026-10-18 by the native-scroll pan, `4c1fba4d`: measured with real HID trackpad swipes in the macOS app, p95 18–19ms, 0 frames >25ms) Pan is improved but not declared fixed. The corrected 4,000-event
   production fixture now encodes its intended 8 AM New York event time across
   DST. Normal-speed synthetic profile: p50/p95/max 16.7ms, no >25ms frame;
   browser-delivered wheel profile p95/max 16.7/16.8ms, no >25ms frame, and
@@ -847,7 +988,7 @@ browser server now runs independently. The 15:59 run had one transient
   These Chromium results do not reproduce native macOS trackpad/WKWebView
   delivery or Linux WebKitGTK; keep the issue open and validate on the affected
   Mac before claiming lag is resolved.
-- [ ] **Dense event-list rendering remains the pan bottleneck at extreme
+- [x] (superseded 2026-10-18 by the native-scroll pan, `4c1fba4d`: measured with real HID trackpad swipes in the macOS app, p95 18–19ms, 0 frames >25ms) **Dense event-list rendering remains the pan bottleneck at extreme
   density.** Corrected the fixture to control events/day (the 8k/16k total
   event comparison alone had not increased viewport density). At 90/day,
   normal browser-delivered p95/max remained 16.8ms with no >25ms gaps. At
@@ -1317,7 +1458,7 @@ password; it made no system-package changes, so native setup remains blocked.
 
 - [ ] Stars + reconciliation + classifications sync via Google
   `extendedProperties` so ★/✓/✗ survive devices and reinstalls.
-- [ ] Insights plan-adherence stat (% of planned events that happened).
+- [ ] Insights plan-adherence stat (% of planned events that happened): a card on the new dashboard (InsightsView.tsx), from recon marks.
 - [x] ~~Pull a small Ollama model (qwen2.5:0.5b) for fast bulk classification~~ moot: the goal classifier is off (2026-10-17, too much of the machine); nothing calls Ollama. Flip `GOAL_CLASSIFIER_ENABLED` in src-tauri/src/classify.rs to bring it back.
 - [ ] Per-event color swatches in the context menu (Google `colorId` through
   db + sync + google_body; low prio — user has 0 colorId events).
@@ -1332,6 +1473,14 @@ password; it made no system-package changes, so native setup remains blocked.
 - [ ] Import/export (ICS), booking-rules in-app panel, E-then-key chords.
 
 ## Shipped log (newest first)
+
+- `af8b180d` Horizontal scroll continuous in the app again (no native hand-off on macOS WebKit)
+- `1235c726` Day headers cover what scrolls beneath (regression from the native horizontal pan); `96a8aae9` Linux dense-pan + editing fixes merged; GitHub main == linux-e2e at `0ce7930f`
+- `d0c3282` Fixed synchronous day-boundary pan resets by recording pending
+  shifts before React commits, and painted the sticky header rule across the
+  full overscan strip. Refreshed reviewed Linux week snapshots for current
+  sidebar UI. Browser E2E: 341 passed / 64 skipped; default native app suite
+  passed; 2,520-event pan measured 16.8 ms p95 frames.
 
 - `7d5cf733` Hourly nudge built in (replaces ~/bin/calendar-nudge.sh); `5865bae8` goal classifier off
 - `09434efd` Thought dump under the goals; Goals fold as a section

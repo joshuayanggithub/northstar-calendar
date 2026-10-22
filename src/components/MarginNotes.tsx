@@ -142,6 +142,8 @@ export function MarginNotes(props: {
   keyOf: (e: CalendarEvent) => string;
   onSelect: (e: CalendarEvent) => void;
   onDelete: (e: CalendarEvent) => void;
+  /** the pointer is over a note (null: left it): the grid lights its event */
+  onHover?: (e: CalendarEvent | null) => void;
 }) {
   const hasRenderSink = typeof window !== "undefined" && Array.isArray((window as any).__marginRenderMarks);
   const renderStartedAt = hasRenderSink ? performance.now() : null;
@@ -152,6 +154,8 @@ export function MarginNotes(props: {
   const [drag, setDrag] = useState<{ key: string; dx: number; dy: number } | null>(null);
   /** the box being sized, as it is under the pointer */
   const [sizing, setSizing] = useState<{ key: string; shape: Shape } | null>(null);
+  /** the note under the pointer: its leader is drawn bolder */
+  const [hoverKey, setHoverKey] = useState<string | null>(null);
   const [pinTick, bumpPins] = useState(0);
   useLayoutEffect(() => {
     if (renderStartedAt === null) return;
@@ -358,9 +362,11 @@ export function MarginNotes(props: {
         anchor,
         own,
         col: chip.col,
+        // (kept on the canvas: an offset placed in a narrow column scales
+        // with the column, and in 1-day view it put the note off screen)
         pin: pin && {
-          x: anchor.x0 + pin.dxCol * colW,
-          y: anchor.y0 + pin.dyMin * props.pxPerMin,
+          x: Math.max(0, Math.min(L.width - (pin.w || 120), anchor.x0 + pin.dxCol * colW)),
+          y: Math.max(0, Math.min(L.height - 20, anchor.y0 + pin.dyMin * props.pxPerMin)),
           w: pin.w,
           angle: pin.angle,
           scale: pin.scale ?? 1,
@@ -708,7 +714,7 @@ export function MarginNotes(props: {
           if (!g) return null;
           const f = (q: [number, number]) => `${q[0].toFixed(1)},${q[1].toFixed(1)}`;
           return (
-            <g key={p.key} data-testid="margin-leader" data-ek={p.key} className={d ? "dragging" : undefined}>
+            <g key={p.key} data-testid="margin-leader" data-ek={p.key} className={(d ? "dragging " : "") + (hoverKey === p.key ? "hover" : "") || undefined}>
               <path d={`M${f(g.s)} Q${f(g.c)} ${f(g.e)}`} />
               <path d={`M${f(g.head[0])} L${f(g.head[1])} L${f(g.head[2])}`} />
             </g>
@@ -755,6 +761,15 @@ export function MarginNotes(props: {
               transform: p.angle ? `rotate(${p.angle}deg)` : undefined,
             }}
             onPointerDown={(pe) => startDrag(pe, p)}
+            onPointerEnter={() => {
+              setHoverKey(p.key);
+              const n = notesOf.get(p.key);
+              if (n) props.onHover?.(n.e);
+            }}
+            onPointerLeave={() => {
+              setHoverKey((k) => (k === p.key ? null : k));
+              props.onHover?.(null);
+            }}
             onKeyDown={(e) => {
               if (e.target !== e.currentTarget) return;
               const bigger = e.key === "+" || e.key === "=";

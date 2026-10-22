@@ -3,13 +3,15 @@
 // sentence, never a paragraph.
 
 import { eventDates, startOfDay } from "./dates";
+import { myRsvp } from "./rsvp";
 import { readOnlyEvent, type Calendar, type CalendarEvent } from "./types";
+import { getPrefs, prefsVersion } from "./settings";
 
 export interface DayBucket {
   date: Date;
   sleepH: number;
   distractionH: number;
-  /** time on the deep-work calendars (DEEP_CALENDARS) */
+  /** time on the deep-work calendars (Settings > Insights) */
   deepH: number;
   otherH: number;
   switches: number;
@@ -19,9 +21,15 @@ export interface DayBucket {
 
 /** Deep work is ONLY time on these calendars (the user's definition): not
  *  class, career, meetings or "work" in general. Matched by exact name. */
-export const DEEP_CALENDARS = ["Homework", "Learning and Research", "Enrichment"];
-const DEEP_SET = new Set(DEEP_CALENDARS.map((n) => n.toLowerCase()));
-export const isDeepCalendar = (name: string | undefined) => DEEP_SET.has((name ?? "").trim().toLowerCase());
+/** the deep-work calendars, as set in Settings > Insights */
+export const deepCalendars = (): string[] => getPrefs().deepCalendars;
+let deepSet: { v: number; set: Set<string> } | null = null;
+export const isDeepCalendar = (name: string | undefined) => {
+  if (!deepSet || deepSet.v !== prefsVersion()) {
+    deepSet = { v: prefsVersion(), set: new Set(deepCalendars().map((n) => n.trim().toLowerCase())) };
+  }
+  return deepSet.set.has((name ?? "").trim().toLowerCase());
+};
 const SLEEP_CAL = /^sleep$/i;
 const DISTRACTION_CAL = /distraction/i;
 
@@ -40,15 +48,48 @@ function hoursOf(e: CalendarEvent): number {
   return Math.max(0, (end.getTime() - start.getTime()) / 3600000);
 }
 
+type WSpan = [number, number, number];
+/** length of the union of weighted spans, each instant at its largest weight */
+function weightedUnionMs(list: WSpan[]): number {
+  const cuts = [...new Set(list.flatMap(([a, b]) => [a, b]))].sort((x, y) => x - y);
+  let total = 0;
+  for (let k = 1; k < cuts.length; k++) {
+    const a = cuts[k - 1];
+    const b = cuts[k];
+    let w = 0;
+    for (const [s, e, ww] of list) if (s <= a && e >= b && ww > w) w = ww;
+    total += (b - a) * w;
+  }
+  return total;
+}
+
+/** What an event counts for under review: null when canceled; deep work at
+ *  what it settles to unreviewed (half once reviewing had started), so a
+ *  block still waiting for review counts the same as it will once aged out
+ *  and credit only rises, on confirmation. (Only deep work is reviewed:
+ *  sleep and the rest never get a mark, and halving them halved last
+ *  week's sleep.) */
+function reviewWeight(e: CalendarEvent, kind: Kind, endMs: number, review: Review): number | null {
+  const proof = proofOf(endMs, review.now.getTime(), review.recon(e), review.reconSince);
+  if (proof === "canceled") return null;
+  if (kind !== "deep") return 1;
+  const settled = proof === "pending" ? proofOf(endMs, Infinity, null, review.reconSince) : proof;
+  return settled === "unverified" ? FOCUS.unverified : 1;
+}
+
 /** Bucket timed events into local days over [from, to). */
 export function bucketDays(
   events: CalendarEvent[],
   calendars: Calendar[],
   from: Date,
   to: Date,
+  /** count only what has happened (up to `now`), as reviewed: canceled
+   *  blocks not at all, ones aged out unconfirmed at half (as the score) */
+  review?: { now: Date; recon: (e: CalendarEvent) => "done" | "canceled" | null; reconSince: number | null },
 ): DayBucket[] {
   const days: DayBucket[] = [];
-  for (let d = startOfDay(from); d < to; d = new Date(d.getTime() + 86400000)) {
+  // calendar days (DST days are 23h/25h: a 24h step doubled Nov 1)
+  for (let d = startOfDay(from); d < to; d = startOfDay(new Date(d.getTime() + 36 * 3600_000))) {
     days.push({
       date: new Date(d),
       sleepH: 0,
@@ -60,34 +101,57 @@ export function bucketDays(
       multitaskH: 0,
     });
   }
-  const idxOf = (t: Date) => Math.floor((startOfDay(t).getTime() - startOfDay(from).getTime()) / 86400000);
+  const idxOf = (t: Date) => Math.round((startOfDay(t).getTime() - startOfDay(from).getTime()) / 86400000);
   const timed = events.filter((e) => !e.all_day);
 
+  // each day's stretches per kind: overlapping blocks are one stretch of
+  // time (9-11 and 10-12 is 3h, not 4h), at the larger weight
+  const spans = new Map<number, Map<Kind, WSpan[]>>();
   for (const e of timed) {
-    const { start, end } = eventDates(e);
+    const { start, end: fullEnd } = eventDates(e);
     const kind = classify(e, calendars);
-    // split across days
+    let weight = 1;
+    let end = fullEnd;
+    if (review) {
+      const w = reviewWeight(e, kind, fullEnd.getTime(), review);
+      if (w == null) continue;
+      weight = w;
+      if (end > review.now) end = review.now; // not yet happened
+    }
+    // split across days (DST days are 23h/25h: a 24h step never got past
+    // 11 PM on Nov 1 and hung the app)
     let s = start;
     while (s < end) {
-      const dayEnd = new Date(startOfDay(s).getTime() + 86400000);
+      const dayEnd = startOfDay(new Date(startOfDay(s).getTime() + 36 * 3600_000));
       const segEnd = end < dayEnd ? end : dayEnd;
       const i = idxOf(s);
       if (i >= 0 && i < days.length) {
-        const h = (segEnd.getTime() - s.getTime()) / 3600000;
-        if (kind === "sleep") days[i].sleepH += h;
-        else if (kind === "distraction") days[i].distractionH += h;
-        else if (kind === "deep") days[i].deepH += h;
-        else days[i].otherH += h;
+        if (!spans.has(i)) spans.set(i, new Map());
+        const byKind = spans.get(i)!;
+        if (!byKind.has(kind)) byKind.set(kind, []);
+        byKind.get(kind)!.push([s.getTime(), segEnd.getTime(), weight]);
+        const h = ((segEnd.getTime() - s.getTime()) / 3600000) * weight;
         days[i].longestBlockH = Math.max(days[i].longestBlockH, kind !== "sleep" ? h : 0);
       }
       s = segEnd;
     }
   }
+  for (const [i, byKind] of spans) {
+    for (const [kind, list] of byKind) {
+      const h = weightedUnionMs(list) / 3600000;
+      if (kind === "sleep") days[i].sleepH += h;
+      else if (kind === "distraction") days[i].distractionH += h;
+      else if (kind === "deep") days[i].deepH += h;
+      else days[i].otherH += h;
+    }
+  }
 
-  // context switches + multitask per day (non-sleep events)
+  // context switches + multitask per day (non-sleep events that happened)
   const byDay = new Map<number, { start: Date; end: Date; cal: string }[]>();
   for (const e of timed) {
     if (classify(e, calendars) === "sleep") continue;
+    // a canceled block or one still ahead isn't a switch
+    if (review && (review.recon(e) === "canceled" || eventDates(e).start >= review.now)) continue;
     const { start, end } = eventDates(e);
     const i = idxOf(start);
     if (i < 0 || i >= days.length) continue;
@@ -116,8 +180,10 @@ export function bucketDays(
 }
 
 export const fmtH = (h: number): string => {
-  const hh = Math.floor(Math.abs(h));
-  const mm = Math.round((Math.abs(h) - hh) * 60);
+  // (minutes rounded first: 7.99h read "7h60")
+  const t = Math.round(Math.abs(h) * 60);
+  const hh = Math.floor(t / 60);
+  const mm = t % 60;
   const sign = h < 0 ? "−" : "";
   if (hh === 0) return `${sign}${mm}m`;
   if (mm === 0) return `${sign}${hh}h`;
@@ -258,6 +324,31 @@ function unionLen(spans: Span[], a: number, b: number): number {
   return total + (cur ? cur[1] - cur[0] : 0);
 }
 
+/** The night's main sleep: spans less than 3h apart are one block, and the
+ *  longest block is the night (an evening or afternoon nap made the night
+ *  start at 6:30 PM or end at 1:45 PM) */
+function mainSleep(spans: Span[]): Span[] {
+  const xs = [...spans].sort((p, q) => p[0] - q[0]);
+  const blocks: { spans: Span[]; end: number }[] = [];
+  for (const x of xs) {
+    const last = blocks[blocks.length - 1];
+    if (last && x[0] - last.end <= 3 * 3600000) {
+      last.spans.push(x);
+      last.end = Math.max(last.end, x[1]);
+    } else blocks.push({ spans: [x], end: x[1] });
+  }
+  let best: Span[] = [];
+  let bestLen = 0;
+  for (const b of blocks) {
+    const len = unionLen(b.spans, -Infinity, Infinity);
+    if (len > bestLen) {
+      best = b.spans;
+      bestLen = len;
+    }
+  }
+  return best;
+}
+
 export interface SleepNight {
   hours: number;
   /** clock hour of falling asleep; 24+ = after midnight */
@@ -281,7 +372,7 @@ export function sleepNight(events: CalendarEvent[], calendars: Calendar[], d0: n
     if (/^asleep/i.test(e.summary)) spans.push([s, en]);
     else if (!e.recurring_event_id && !/^in bed/i.test(e.summary)) fallback.push([s, en]);
   }
-  const use = spans.length ? spans : fallback;
+  const use = mainSleep(spans.length ? spans : fallback);
   if (!use.length) return null;
   const first = new Date(Math.min(...use.map((x) => x[0])));
   const h = first.getHours() + first.getMinutes() / 60;
@@ -301,6 +392,9 @@ export interface FocusInput {
   /** any time on the day being scored */
   day: Date;
   now: Date;
+  /** count only what happened before this (default now): last week's day
+   *  up to this moment, against this week so far */
+  until?: Date;
   /** events around the day: the week before (sleep regularity) to the next
    *  morning (late-night distraction) */
   events: CalendarEvent[];
@@ -352,7 +446,9 @@ export function focusScore(inp: FocusInput): FocusScore {
   const d0 = localMidnight(inp.day);
   const d1 = nextDay(d0);
   const nowMs = inp.now.getTime();
-  const upto = Math.min(d1, nowMs);
+  // what has happened by `until`; review status is still as of now
+  const clipMs = Math.min(nowMs, inp.until?.getTime() ?? Infinity);
+  const upto = Math.min(d1, clipMs);
   const lateDistA = atHour(d0, F.lateDistFrom);
   const lateDistB = atHour(d1, F.lateDeepUntil);
   const lateDeepB = atHour(d0, F.lateDeepUntil);
@@ -362,8 +458,9 @@ export function focusScore(inp: FocusInput): FocusScore {
   type Item = { e: CalendarEvent; kind: Kind; s: number; en: number; proof: Proof };
   const items: Item[] = [];
   for (const e of inp.events) {
-    // someone else's calendar scores nothing until it's copied into yours
-    if (e.all_day || readOnlyEvent(e, inp.calendars)) continue;
+    // someone else's calendar scores nothing until it's copied into yours,
+    // and a declined invitation isn't time spent
+    if (e.all_day || readOnlyEvent(e, inp.calendars) || myRsvp(e) === "declined") continue;
     const { start, end } = eventDates(e);
     const s = start.getTime();
     const en = end.getTime();
@@ -395,7 +492,7 @@ export function focusScore(inp: FocusInput): FocusScore {
   const deep = awake.filter((i) => i.kind === "deep").sort((p, q) => p.s - q.s);
   for (const dp of deep) {
     const a = Math.max(dp.s, d0);
-    const b = Math.min(dp.en, d1);
+    const b = Math.min(dp.en, upto);
     if (dp.proof === "pending") {
       pendingMin += (Math.min(b, nowMs) - a) / 60000;
       continue;
@@ -459,22 +556,24 @@ export function focusScore(inp: FocusInput): FocusScore {
   // distraction: counted whether or not it was confirmed; overlapping
   // entries are one stretch of time, not two
   const distSpans: Span[] = items
-    .filter((i) => i.kind === "distraction" && i.s < nowMs)
-    .map((i) => [i.s, Math.min(i.en, nowMs)] as Span);
+    .filter((i) => i.kind === "distraction" && i.s < clipMs)
+    .map((i) => [i.s, Math.min(i.en, clipMs)] as Span);
   const distractionMin = unionLen(distSpans, d0, upto) / 60000;
-  const lateDistractionMin = unionLen(distSpans, lateDistA, Math.min(lateDistB, nowMs)) / 60000;
+  const lateDistractionMin = unionLen(distSpans, lateDistA, Math.min(lateDistB, clipMs)) / 60000;
   const restraint =
     (1 / (1 + ((distractionMin + lateDistractionMin) / F.distHalf) ** 1.5)) * F.interruptKeep ** interruptions;
 
-  // recovery: last night's sleep: duration × timing × regularity
-  const night = sleepNight(inp.events, inp.calendars, d0);
+  // recovery: last night's sleep: duration × timing × regularity (a Sleep
+  // block canceled ahead of time, an all-nighter, isn't a night)
+  const sleepEvents = inp.recon ? inp.events.filter((e) => inp.recon!(e) !== "canceled") : inp.events;
+  const night = sleepNight(sleepEvents, inp.calendars, d0);
   let sleep: FocusScore["sleep"] = null;
   let recovery = F.noSleep;
   if (night) {
     const prev: number[] = [];
     for (let k = 1, d = d0; k <= 7; k++) {
       d = localMidnight(new Date(d - 12 * 3600000));
-      const n = sleepNight(inp.events, inp.calendars, d);
+      const n = sleepNight(sleepEvents, inp.calendars, d);
       if (n) prev.push(n.onset);
     }
     const drift = prev.length >= 3 ? Math.abs(night.onset - median(prev)) : null;
@@ -626,4 +725,178 @@ export function routineStat(
     hit,
     median: `${h}${mm ? ":" + String(mm).padStart(2, "0") : ""}${ap}`,
   };
+}
+
+// ---- the Insights dashboard's breakdowns -------------------------------
+
+export type Review = NonNullable<Parameters<typeof bucketDays>[4]>;
+
+/** What of an event counts: the part that has happened, not canceled,
+ *  unreviewed deep work at half once reviewing started (bucketDays' rules). */
+function counted(e: CalendarEvent, calendars: Calendar[], review?: Review): { s: number; e: number; w: number } | null {
+  if (e.all_day) return null;
+  const { start, end } = eventDates(e);
+  let s = start.getTime();
+  let en = end.getTime();
+  let w = 1;
+  if (review) {
+    const rw = reviewWeight(e, classify(e, calendars), en, review);
+    if (rw == null) return null;
+    w = rw;
+    en = Math.min(en, review.now.getTime());
+  }
+  return en > s ? { s, e: en, w } : null;
+}
+
+/** Hours per calendar per local day over the given days (index-aligned). */
+export function hoursByCalendar(
+  events: CalendarEvent[],
+  calendars: Calendar[],
+  days: Date[],
+  review?: Review,
+): Map<string, number[]> {
+  const out = new Map<string, number[]>();
+  if (!days.length) return out;
+  const t0 = startOfDay(days[0]).getTime();
+  const tEnd = startOfDay(new Date(days[days.length - 1].getTime() + 36 * 3600000)).getTime();
+  const idx = (t: number) => Math.round((startOfDay(new Date(t)).getTime() - t0) / 86400000);
+  for (const ev of events) {
+    const c = counted(ev, calendars, review);
+    if (!c || c.e <= t0 || c.s >= tEnd) continue;
+    let s = Math.max(c.s, t0);
+    const end = Math.min(c.e, tEnd);
+    while (s < end) {
+      const dayEnd = startOfDay(new Date(s + 36 * 3600000)).getTime();
+      const segEnd = Math.min(end, dayEnd);
+      const i = idx(s);
+      if (i >= 0 && i < days.length) {
+        if (!out.has(ev.calendar_id)) out.set(ev.calendar_id, days.map(() => 0));
+        out.get(ev.calendar_id)![i] += ((segEnd - s) / 3600000) * c.w;
+      }
+      s = segEnd;
+    }
+  }
+  return out;
+}
+
+export interface SleepWindow {
+  date: Date;
+  /** fell asleep / woke, as hours from the day's midnight (-1.5 = 10:30 PM before) */
+  from: number;
+  to: number;
+  hours: number;
+}
+
+/** The night ending on each day: first sleep start to last wake (the same
+ *  sources as the day score: "Asleep…" tracker entries first, else
+ *  non-recurring sleep events). */
+export function sleepWindows(events: CalendarEvent[], calendars: Calendar[], days: Date[]): (SleepWindow | null)[] {
+  return days.map((d) => {
+    const d0 = startOfDay(d).getTime();
+    const lo = d0 - 6 * 3600000;
+    const hi = d0 + 14 * 3600000;
+    const tracked: Span[] = [];
+    const other: Span[] = [];
+    for (const e of events) {
+      if (e.all_day || classify(e, calendars) !== "sleep") continue;
+      const { start, end } = eventDates(e);
+      const s = start.getTime();
+      const en = end.getTime();
+      if (en <= s || en < lo || en > hi) continue;
+      if (/^asleep/i.test(e.summary)) tracked.push([s, en]);
+      else if (!e.recurring_event_id && !/^in bed/i.test(e.summary)) other.push([s, en]);
+    }
+    const use = mainSleep(tracked.length ? tracked : other);
+    if (!use.length) return null;
+    const from = Math.min(...use.map((x) => x[0]));
+    const to = Math.max(...use.map((x) => x[1]));
+    // (as wall-clock hours from the day's midnight: elapsed hours read a
+    // 7 AM wake after a spring-forward night as 6 AM)
+    const wall = (t: number) => {
+      const x = new Date(t);
+      const days = Math.round((new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime() - d0) / 86400000);
+      return days * 24 + x.getHours() + x.getMinutes() / 60;
+    };
+    return { date: d, from: wall(from), to: wall(to), hours: unionLen(use, -Infinity, Infinity) / 3600000 };
+  });
+}
+
+/** Hours of a kind by weekday (0 = Sunday) and clock hour. */
+export function weekHourHeat(
+  events: CalendarEvent[],
+  calendars: Calendar[],
+  from: Date,
+  to: Date,
+  kind: Kind,
+  review?: Review,
+): number[][] {
+  // overlapping blocks count once, as in the headline (bucketDays): summed,
+  // two overlapping distractions put "133%" of the time after 6 PM
+  const spans = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => [] as WSpan[]));
+  const a = from.getTime();
+  const b = to.getTime();
+  for (const ev of events) {
+    if (classify(ev, calendars) !== kind) continue;
+    const c = counted(ev, calendars, review);
+    if (!c) continue;
+    let s = Math.max(c.s, a);
+    const end = Math.min(c.e, b);
+    while (s < end) {
+      const t = new Date(s);
+      const hourEnd = new Date(t);
+      hourEnd.setMinutes(60, 0, 0);
+      const segEnd = Math.min(end, hourEnd.getTime());
+      spans[t.getDay()][t.getHours()].push([s, segEnd, c.w]);
+      s = segEnd;
+    }
+  }
+  return spans.map((day) => day.map((list) => (list.length ? weightedUnionMs(list) / 3600000 : 0)));
+}
+
+/** Distraction hours by source ("Distraction: Twitch" -> Twitch), largest first. */
+export function distractionBySource(
+  events: CalendarEvent[],
+  calendars: Calendar[],
+  from: Date,
+  to: Date,
+  review?: Review,
+): [string, number][] {
+  // (a source's overlapping entries count once: two at once read "YouTube 2h"
+  // of a 1h30 total)
+  const spans = new Map<string, WSpan[]>();
+  for (const ev of events) {
+    if (classify(ev, calendars) !== "distraction") continue;
+    const c = counted(ev, calendars, review);
+    if (!c) continue;
+    const s = Math.max(c.s, from.getTime()), e = Math.min(c.e, to.getTime());
+    if (e <= s) continue;
+    const src = distractionSource(ev.summary);
+    const key = [...spans.keys()].find((k) => k.toLowerCase() === src.toLowerCase()) ?? src;
+    spans.set(key, [...(spans.get(key) ?? []), [s, e, 1]]);
+  }
+  return [...spans.entries()].map(([k, l]) => [k, weightedUnionMs(l) / 3600000] as [string, number]).sort((x, y) => y[1] - x[1]);
+}
+
+/** "9 AM" / "12 PM" for a clock hour (0–24+). */
+export function hourLabel(h: number): string {
+  const hh = ((Math.round(h) % 24) + 24) % 24;
+  return `${hh % 12 || 12} ${hh < 12 ? "AM" : "PM"}`;
+}
+
+/** The busiest `width`-hour window of a 24-slot profile: [start hour, share]. */
+export function peakWindow(profile: number[], width = 3): [number, number] | null {
+  const total = sum(profile);
+  if (total <= 0) return null;
+  let best = 0;
+  let at = 0;
+  for (let h = 0; h < 24; h++) {
+    let s = 0;
+    for (let k = 0; k < width; k++) s += profile[(h + k) % 24];
+    // ties go to the window that starts where the work starts
+    if (s > best || (s === best && profile[h] > profile[at])) {
+      best = s;
+      at = h;
+    }
+  }
+  return [at, best / total];
 }

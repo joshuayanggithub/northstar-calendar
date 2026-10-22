@@ -215,6 +215,15 @@ impl Db {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// A calendar gone from the account (unsubscribed or deleted in Google):
+    /// its row, events and sync state.
+    pub fn delete_calendar(&self, calendar_id: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM events WHERE calendar_id=?1", params![calendar_id])?;
+        self.conn.execute("DELETE FROM sync_state WHERE calendar_id=?1", params![calendar_id])?;
+        self.conn.execute("DELETE FROM calendars WHERE id=?1", params![calendar_id])?;
+        Ok(())
+    }
+
     pub fn delete_events_for_calendar(&self, calendar_id: &str) -> Result<()> {
         self.conn.execute("DELETE FROM events WHERE calendar_id=?1", params![calendar_id])?;
         Ok(())
@@ -306,6 +315,20 @@ impl Db {
         Ok(())
     }
 
+    /// A series moved to another calendar takes its occurrences' queued ops
+    /// along (ids `<master>` and `<master>_<slot>`): left on the source they
+    /// 404'd there, and a deleted occurrence came back with the pull of the
+    /// destination while a note was dropped. Unconditional from here on:
+    /// the move gave the instances new etags.
+    pub fn move_pending_ops(&self, from: &str, to: &str, master_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE pending_ops SET calendar_id=?2, base_etag=NULL \
+             WHERE calendar_id=?1 AND (event_id=?3 OR event_id LIKE ?3 || '\\_%' ESCAPE '\\')",
+            params![from, to, master_id],
+        )?;
+        Ok(())
+    }
+
     pub fn remove_ops_for_event(&self, calendar_id: &str, event_id: &str) -> Result<()> {
         self.conn.execute(
             "DELETE FROM pending_ops WHERE calendar_id=?1 AND event_id=?2",
@@ -318,6 +341,17 @@ impl Db {
     /// our own write produced. Queued ops for that event were made on top of
     /// that write, so their If-Match moves forward with it (ops sent without
     /// one stay unconditional).
+    /// Ops queued after `after_id` for (from, event) go to `to` instead: a
+    /// refused move leaves the event where it was, and what was done to it
+    /// on the destination meant it there.
+    pub fn retarget_ops(&self, event_id: &str, from: &str, to: &str, after_id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE pending_ops SET calendar_id=?3 WHERE event_id=?1 AND calendar_id=?2 AND id>?4",
+            params![event_id, from, to, after_id],
+        )?;
+        Ok(())
+    }
+
     pub fn rebase_pending_ops(&self, event_id: &str, etag: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE pending_ops SET base_etag=?2 WHERE event_id=?1 AND base_etag IS NOT NULL",

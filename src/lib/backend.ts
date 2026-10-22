@@ -27,7 +27,26 @@ async function tauriBackend(): Promise<Backend> {
     authStatus: () => invoke<boolean>("auth_status"),
     connectGoogle: () => invoke<boolean>("connect_google"),
     disconnectGoogle: () => invoke("disconnect_google"),
-    syncNow: () => invoke("sync_now"),
+    // sync_now only queues a pass: the promise settles on that pass's
+    // report (its errors reject), so "Synced" means it did and "Syncing…"
+    // lasts as long as it does
+    syncNow: async () => {
+      const report = new Promise<{ errors?: string[] }>((resolve, reject) => {
+        let un: (() => void) | undefined;
+        const timer = setTimeout(() => {
+          un?.();
+          reject("the sync pass didn't finish");
+        }, 90_000);
+        listen<{ errors?: string[] }>("sync-status", ({ payload }) => {
+          clearTimeout(timer);
+          un?.();
+          resolve(payload ?? {});
+        }).then((f) => (un = f));
+      });
+      await invoke("sync_now");
+      const { errors = [] } = await report;
+      if (errors.length) throw errors[0];
+    },
     listCalendars: () => invoke<Calendar[]>("list_calendars"),
     setCalendarHidden: (calendarId, hidden) =>
       invoke("set_calendar_hidden", { calendarId, hidden }),
@@ -44,8 +63,10 @@ async function tauriBackend(): Promise<Backend> {
         destinationId: destinationId ?? null,
         previousStart: previousStart ?? null,
       }),
-    splitSeries: (calendarId, masterId, recurrence, input, countSplit) =>
-      invoke<string>("split_series", { calendarId, masterId, recurrence, input, countSplit: countSplit ?? null }),
+    splitSeries: (calendarId, masterId, recurrence, input, countSplit, firstNote) =>
+      invoke<string>("split_series", {
+        calendarId, masterId, recurrence, input, countSplit: countSplit ?? null, firstNote: firstNote ?? null,
+      }),
     moveSeriesMaster: (calendarId, masterId, destinationId) =>
       invoke("move_series_master", { calendarId, masterId, destinationId }),
     goalsRead: () => invoke("goals_read"),
@@ -71,6 +92,8 @@ async function tauriBackend(): Promise<Backend> {
     restoreRecurringOccurrence: (event) => invoke("restore_recurring_occurrence", { event }),
     setEventNote: (calendarId, eventId, note) =>
       invoke<string | null>("set_event_note", { calendarId, eventId, note }),
+    respondEvent: (calendarId, eventId, status) =>
+      invoke<string>("respond_event", { calendarId, eventId, status }),
     onDbChanged(cb) {
       const un = listen("db-changed", cb);
       return () => {

@@ -113,6 +113,11 @@ export function noteWords(text: string): Word[] {
     if (!raw) continue;
     let t = raw;
     let open = false;
+    // a lone "*" ("5 * 3 sets") is the text, not an underline opening
+    if (/^\*+$/.test(t)) {
+      out.push({ t, em });
+      continue;
+    }
     if (/^\*+/.test(t)) {
       t = t.replace(/^\*+/, "");
       open = true;

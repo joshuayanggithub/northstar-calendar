@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import {
+  LOCALE,
   addDays,
   eventDates,
   fmtChipRange,
@@ -23,22 +24,46 @@ import {
 import { jointClipPath, jointPathD, packDayWithSleeves, SLEEVE_LANE_WIDTH } from "../lib/layout";
 import { blockBandPx } from "../lib/chipText";
 import { planText, visibleRegions, type PlacedText, type ShapeBox, type TextSpec } from "../lib/labelPlace";
-import { FOCUS, DEEP_CALENDARS, focusScore, fmtClock, fmtH, type FocusScore } from "../lib/insights";
+import { prefsVersion, usePrefs } from "../lib/settings";
+import { FOCUS, deepCalendars, focusScore, fmtClock, fmtH, type FocusScore } from "../lib/insights";
 import { starKey, starState, subscribeStars, toggleStar } from "../lib/stars";
-import { reconExempt, reconKey, reconOf, reconSince, reconState, setRecon, subscribeRecon } from "../lib/recon";
+import { isCanceled, markOf, reconExempt, reconKey, reconSince, reconState, setRecon, subscribeRecon, toggleCanceled } from "../lib/recon";
+import { rsvpClass } from "../lib/rsvp";
 import { colorOf } from "../lib/useBackend";
 import { MarginNotes } from "./MarginNotes";
 import { CopyTargets } from "./CopyTargets";
 import { calendarEditable } from "../lib/types";
-import type { Backend, Calendar, CalendarEvent } from "../lib/types";
+import type { Backend, Calendar, CalendarEvent, EventInput } from "../lib/types";
 import type { EventActions } from "./App";
+import { splitDrill } from "../lib/drill";
 
 const DEFAULT_HOUR_PX = 48;
 const SNAP_MIN = 15;
 const DAY_MIN = 24 * 60;
 const MAX_INDEXED_ALL_DAY_DAYS = 31;
 const MAX_INDEXED_TIMED_DAYS = 31;
-const PAN_OVERSCAN_DAYS = 2;
+/** Days rendered beyond each edge of the view. A horizontal trackpad swipe
+ *  is scrolled natively by the browser through these real days, exactly
+ *  like a vertical scroll (off the main thread: in the app's WKWebView the
+ *  calendar's own per-packet path ran at ~30 fps where native runs at 60).
+ *  The days are re-centred only once the swipe and its momentum have come
+ *  to rest (PAN_SETTLE_MS): in WebKit a scroll position set from script
+ *  stops a native scroll and its momentum, so re-centring mid-swipe made the
+ *  week snap from day to day, and during momentum WebKit's scrolling thread
+ *  can overwrite the script's position (the week jumped by the rebase).
+ *  Two weeks each side cover a hard fling; one that reaches the edge stops
+ *  there like any scroller, and re-centres when it rests. */
+const PAN_OVERSCAN_DAYS = 14;
+/** how long the strip must be still before the days are re-centred */
+const PAN_SETTLE_MS = 150;
+/** The app's WKWebView. WebKit already scrolls the rest of a gesture
+ *  asynchronously once its first wheel event isn't cancelled, and
+ *  re-registering the wheel listener as passive mid-gesture there costs a
+ *  long frame at the start of every swipe (measured with real trackpad
+ *  swipes), so the listener stays as it is. */
+const MAC_WEBKIT =
+  typeof navigator !== "undefined" &&
+  /Macintosh/.test(navigator.userAgent) && /AppleWebKit/.test(navigator.userAgent) && !/Chrome|Chromium|Edg\//.test(navigator.userAgent);
 
 export interface DraftEvent {
   start: Date;
@@ -65,6 +90,7 @@ interface DragState {
   /** move: where the pointer went down, and how many days the drag has
    *  switched so far (day switching goes by sideways travel, with slack) */
   grabX?: number;
+  grabY?: number;
   dayShift?: number;
 }
 
@@ -115,6 +141,27 @@ function ended(e: CalendarEvent, now: Date): boolean {
   return eventDates(e).end.getTime() <= now.getTime();
 }
 
+/** column widths measured, by day count | gutter | window width */
+const lastColPx = new Map<string, number>();
+
+/** the minutes the grid spans from start to end (wall clock: across a DST
+ *  change that isn't the elapsed time) */
+function wallMinutes(start: Date, end: Date): number {
+  const days = Math.round((startOfDay(end).getTime() - startOfDay(start).getTime()) / 86400000);
+  return minutesOfDay(end) + days * 1440 - minutesOfDay(start);
+}
+
+/** a resize's new end, in wall-clock minutes from the grabbed day's
+ *  midnight: the real end moved by the pointer's travel (a box drawn past its
+ *  end, by a joint or a tiny last child, resizes from where it was drawn).
+ *  One rule for the ghost and the drop: the drop used the real end, the ghost
+ *  the pointer, and a grab high on the handle saved 15 minutes past the
+ *  ghost; elapsed time (not the wall clock) put a DST day's end an hour off. */
+function resizedEndMin(d: { event?: CalendarEvent | null; curMin: number; anchorMin: number }, day: Date): number {
+  if (!d.event) return snap(d.curMin);
+  return snap(wallMinutes(startOfDay(day), eventDates(d.event).end) + d.curMin - d.anchorMin);
+}
+
 export function WeekView(props: {
   backend: Backend | null;
   days: Date[];
@@ -122,6 +169,8 @@ export function WeekView(props: {
   calendars: Calendar[];
   selected: CalendarEvent[];
   draft: DraftEvent | null;
+  /** the calendar a new event files on when not the primary (isolated) */
+  draftCalendarId?: string | null;
   onToggleSelect: (e: CalendarEvent) => void;
   onClipboard?: (e: CalendarEvent, cut: boolean) => void;
   onSelectMany: (evs: CalendarEvent[]) => void;
@@ -139,7 +188,20 @@ export function WeekView(props: {
   /** tail-overlap joint style; chips tile the column instead of painting over */
   seamStyle?: "scarf" | "rabbet" | "overlay";
 }) {
+  // notes hidden (A / ⇧⌘M / Settings) stay laid out, just unseen: a
+  // remounted notes layer didn't place its notes again
+  const showNotes = usePrefs().showNotes;
+  useEffect(() => {
+    document.body.classList.toggle("notes-hidden", !showNotes);
+    return () => document.body.classList.remove("notes-hidden");
+  }, [showNotes]);
   const { days, events, calendars } = props;
+  // the calendar a new event files on: the isolated one when it can be
+  // written, else the primary (a draft in an isolated Work wore Personal's
+  // colour while the panel said Work)
+  const newEventCalendarId =
+    (props.draftCalendarId && calendars.find((c) => c.id === props.draftCalendarId && calendarEditable(c))?.id) ||
+    (calendars.find((c) => c.is_primary) ?? calendars[0])?.id || "";
   // Development-only React Profiler callbacks are unavailable in the
   // production build used for frame-budget measurements. Let an opt-in E2E
   // sink time this component through its layout-effect commit instead; the
@@ -151,6 +213,19 @@ export function WeekView(props: {
   const componentRenderStartedAt = hasRenderSink ? performance.now() : null;
   const propsRef = useRef(props);
   propsRef.current = props;
+  // leaving the grid (another view) is leaving the hovered chip too: its
+  // pointerleave never fires, and x in month view selected that event
+  useEffect(() => () => propsRef.current.onHover?.(null), []);
+  // the event a hovered margin note refers to is lit like a selected one
+  // (only a click showed which event a note was about). Set on the chips
+  // directly: the columns are memoized, and a hover shouldn't re-lay out
+  // the grid.
+  const lightNoteEvent = (e: CalendarEvent | null) => {
+    const strip = colsStripRef.current;
+    if (!strip) return;
+    strip.querySelectorAll(".chip.note-hover").forEach((el) => el.classList.remove("note-hover"));
+    if (e) strip.querySelectorAll(`.chip-timed[data-ek="${CSS.escape(keyOf(e))}"]`).forEach((el) => el.classList.add("note-hover"));
+  };
   useLayoutEffect(() => {
     if (componentRenderStartedAt === null) return;
     const commitTime = performance.now();
@@ -185,12 +260,22 @@ export function WeekView(props: {
   });
   const pxPerMin = (props.hourPx ?? DEFAULT_HOUR_PX) / 60;
   const gutterW = props.secondaryTz ? 92 : 46;
+  // the gutters label the days on screen: from a day that isn't a DST
+  // change (the fall-back Sunday, first in its week, gave the whole week its
+  // pre-change hours), the middle one shown unless that one is
+  const labelDay = (() => {
+    const isChange = (d: Date) => startOfDay(addDays(d, 1)).getTime() - startOfDay(d).getTime() !== 86400000;
+    const mid = days[Math.floor(days.length / 2)] ?? now();
+    return isChange(mid) ? (days.find((d) => !isChange(d)) ?? mid) : mid;
+  })();
   const tzLabel = (h: number): string => {
     try {
-      return new Intl.DateTimeFormat([], {
+      // (with its minutes: India, Newfoundland, Nepal sit off the hour)
+      return new Intl.DateTimeFormat(LOCALE, {
         hour: "numeric",
+        minute: "2-digit",
         timeZone: props.secondaryTz!,
-      }).format(atWallClock(days[0] ?? now(), h * 60));
+      }).format(atWallClock(labelDay, h * 60)).replace(":00", "");
     } catch {
       return "";
     }
@@ -227,6 +312,11 @@ export function WeekView(props: {
       measure();
     });
     observer.observe(grid);
+    // (the all-day row too: it opening or closing moves the grid body by
+    // more than the window's margin without a scroll, and the rows on
+    // screen stayed unmounted in WebKit, which doesn't anchor scroll)
+    const allDay = grid.querySelector(".allday-row");
+    if (allDay) observer.observe(allDay);
     return () => {
       grid.removeEventListener("scroll", measure);
       observer.disconnect();
@@ -234,11 +324,19 @@ export function WeekView(props: {
   }, []);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [ctx, setCtx] = useState<CtxMenu | null>(null);
+  /** the all-day row showing every event, not three a day ("+N more") */
+  const [allDayOpen, setAllDayOpen] = useState(false);
   // Escape closes the right-click menu (and only that: the selection and the
   // open event stay)
   useEffect(() => {
     if (!ctx) return;
     const onKey = (e: KeyboardEvent) => {
+      // another layer opening over the menu (⌘K, Settings, Help) closes it:
+      // left under ⌘K it took ⌘K's Escape
+      if ((e.metaKey || e.ctrlKey) && [",", "k", "/"].includes(e.key.toLowerCase())) {
+        setCtx(null);
+        return;
+      }
       if (e.key !== "Escape") return;
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -266,22 +364,29 @@ export function WeekView(props: {
   // a day shift without forcing a React render inside the wheel handler; later
   // scroll deltas resume from the preserved partial-column offset.
   const dayClipRef = useRef<HTMLDivElement | null>(null);
-  const [colPx, setColPx] = useState(0);
-  const colPxRef = useRef(1);
+  // Seeded with the width last measured for this day count, window width
+  // and gutter: coming back to the week (from month or list) laid every
+  // day out at width 0, measured, then laid them all out again.
+  const colPxKey = `${days.length}|${gutterW}|${typeof window === "undefined" ? 0 : window.innerWidth}`;
+  const [colPx, setColPx] = useState(() => lastColPx.get(colPxKey) ?? 0);
+  const colPxRef = useRef(colPx || 1);
   const measuredColPxRef = useRef(0);
+  // Measured off the scroll container, not the day clip: the clip is sized
+  // from colPx (see rowW below).
   useEffect(() => {
-    const el = dayClipRef.current;
+    const el = gridRef.current;
     if (!el) return;
     const measure = () => {
-      const width = Math.max(1, el.clientWidth / Math.max(1, days.length));
+      const width = Math.max(1, (el.clientWidth - gutterW) / Math.max(1, days.length));
       colPxRef.current = width;
+      lastColPx.set(`${days.length}|${gutterW}|${window.innerWidth}`, width);
       setColPx(width);
     };
     measure();
     const ro = new ResizeObserver(measure);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [days.length]);
+  }, [days.length, gutterW]);
   const seamMode = props.seamStyle ?? "rabbet";
   /** inner text width of a full-width box at this inset (border, gap and
    *  horizontal padding off); unbounded until the column is measured */
@@ -413,11 +518,20 @@ export function WeekView(props: {
   // pending: day steps already requested from onPan but not rendered yet.
   // The outer weekview scroll surface moves all three strips together; acc
   // carries any distance past the one-column overscan while React shifts days.
+  // Record pending before calling onPan: a synchronous React commit reads it
+  // in the firstDay layout effect to distinguish a swipe from navigation.
   const panRef = useRef({ acc: 0, pending: 0 });
   const programmaticScrollLeftRef = useRef<number | null>(null);
   const observedScrollLeftRef = useRef<number | null>(null);
   const nativePanRef = useRef(false);
   const extN = days.length + PAN_OVERSCAN_DAYS * 2;
+  // The header, all-day and body rows span the whole scroll width, so their
+  // sticky time gutter stays put however far into the runway the week rests
+  // (a viewport-wide row scrolled its gutter away past one screen); the day
+  // clip inside stays the width of the visible days.
+  const clipW = colPx > 0 ? colPx * days.length : undefined;
+  const rowW = colPx > 0 ? gutterW + colPx * extN : undefined;
+  const rowCols = clipW ? `${gutterW}px ${clipW}px` : `${gutterW}px 1fr`;
   // The commit that renders a requested shift takes it out of acc, so the
   // strip's new days and its offset reach the screen in the same frame.
   const firstDay = days[0].getTime();
@@ -445,7 +559,8 @@ export function WeekView(props: {
       const grid = gridRef.current;
       if (grid) {
         const base = colPxRef.current;
-        grid.scrollLeft = PAN_OVERSCAN_DAYS * base + Math.max(-base, Math.min(base, pan.acc));
+        const room = (PAN_OVERSCAN_DAYS - 1) * base;
+        grid.scrollLeft = PAN_OVERSCAN_DAYS * base + Math.max(-room, Math.min(room, pan.acc));
         observedScrollLeftRef.current = grid.scrollLeft;
         programmaticScrollLeftRef.current = grid.scrollLeft;
       }
@@ -564,23 +679,18 @@ export function WeekView(props: {
       }
       const pan = panRef.current;
       const base = colPxRef.current;
-      const nativeDeltaLimit = Math.min(base / 2, 64);
-      if (e.isTrusted && e.deltaY === 0 && Math.abs(deltaX) < nativeDeltaLimit) {
-        // This is a clear, low-amplitude horizontal trackpad stream. Carry
-        // buffered lead-in X once, then let subsequent packets scroll natively
-        // without a cancelable listener on the hot path.
+      if (e.isTrusted && Math.abs(deltaX) > 2 * Math.abs(e.deltaY * unitY)) {
+        // A horizontal trackpad stream: carry buffered lead-in X once, then
+        // let every packet scroll natively (no cancelable listener on the hot
+        // path); the days re-centre when it settles (onScroll).
         const currentDeltaX = e.deltaX * unitX;
         const carry = deltaX - currentDeltaX;
         if (carry !== 0) {
           el.scrollLeft += carry;
           pan.acc += carry;
-          const want = Math.trunc(pan.acc / base);
-          if (want !== pan.pending) {
-            onPan(want - pan.pending);
-            pan.pending = want;
-          }
           observedScrollLeftRef.current = el.scrollLeft;
           programmaticScrollLeftRef.current = el.scrollLeft;
+          scheduleSettle();
         }
         nativePanRef.current = true;
         resetNativePanTimer();
@@ -600,15 +710,18 @@ export function WeekView(props: {
       pan.acc += deltaX;
       const want = Math.trunc(pan.acc / colPxRef.current);
       if (want !== pan.pending) {
-        onPan(want - pan.pending);
+        const steps = want - pan.pending;
         pan.pending = want;
+        onPan(steps);
       }
-      el.scrollLeft = PAN_OVERSCAN_DAYS * base + Math.max(-base, Math.min(base, pan.acc));
+      // the position on the days still shown until the re-centre renders
+      const room = PAN_OVERSCAN_DAYS * base;
+      el.scrollLeft = room + Math.max(-room, Math.min(room, pan.acc));
       observedScrollLeftRef.current = el.scrollLeft;
       programmaticScrollLeftRef.current = el.scrollLeft;
     };
     setWheelPassiveMode = (passive) => {
-      if (wheelListenerPassive === passive) return;
+      if (MAC_WEBKIT || wheelListenerPassive === passive) return;
       el.removeEventListener("wheel", onWheel);
       el.addEventListener("wheel", onWheel, { passive });
       wheelListenerPassive = passive;
@@ -621,6 +734,39 @@ export function WeekView(props: {
         setWheelPassiveMode(false);
       }, 180);
     };
+    // re-centre the days once the strip has been still for a moment
+    let settleTimer: number | null = null;
+    const commitPan = () => {
+      const pan = panRef.current;
+      const want = Math.round(pan.acc / colPxRef.current);
+      if (want === pan.pending) return;
+      const steps = want - pan.pending;
+      pan.pending = want;
+      onPan(steps);
+    };
+    // While a re-centre is pending the swiped-in runway days are on screen:
+    // they take presses then (the press re-centres first, below, and the
+    // handlers look their day up at press time), not only after the timer.
+    const scheduleSettle = () => {
+      if (settleTimer != null) window.clearTimeout(settleTimer);
+      el.classList.add("pan-settling");
+      settleTimer = window.setTimeout(() => {
+        settleTimer = null;
+        el.classList.remove("pan-settling");
+        commitPan();
+      }, PAN_SETTLE_MS);
+    };
+    // Anything the user does next acts on the days as drawn: a press or key
+    // re-centres right away (window capture runs first; React renders the
+    // update in the microtask before the calendar's own handlers), so a drag,
+    // marquee or "t" never straddles a re-centre or works from stale days.
+    const flushSettle = () => {
+      if (settleTimer == null) return;
+      window.clearTimeout(settleTimer);
+      settleTimer = null;
+      el.classList.remove("pan-settling");
+      commitPan();
+    };
     const onScroll = () => {
       const actual = el.scrollLeft;
       const expected = programmaticScrollLeftRef.current;
@@ -632,20 +778,25 @@ export function WeekView(props: {
       programmaticScrollLeftRef.current = null;
       const pan = panRef.current;
       const observed = observedScrollLeftRef.current ?? actual;
+      if (actual === observed) return; // a vertical scroll
       // Add only user-driven scroll deltas. Rebuilding acc from scrollLeft
       // loses the fractional remainder whenever the browser quantizes a
       // programmatic rebase to an integer offset.
       pan.acc += actual - observed;
       observedScrollLeftRef.current = actual;
-      const want = Math.trunc(pan.acc / colPxRef.current);
-      if (want === pan.pending) return;
-      onPan(want - pan.pending);
-      pan.pending = want;
+      // A native scroll keeps going: re-centre only once it rests.
+      scheduleSettle();
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     el.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("pointerdown", flushSettle, true);
+    window.addEventListener("keydown", flushSettle, true);
     return () => {
+      window.removeEventListener("pointerdown", flushSettle, true);
+      window.removeEventListener("keydown", flushSettle, true);
       if (nativePanTimer != null) window.clearTimeout(nativePanTimer);
+      if (settleTimer != null) window.clearTimeout(settleTimer);
+      el.classList.remove("pan-settling");
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("scroll", onScroll);
     };
@@ -655,15 +806,27 @@ export function WeekView(props: {
   const todayIdx = days.findIndex((d) => isSameDay(d, nowDate));
 
   // Auto-scroll: center-ish on now when today is visible, else 7am — but only
-  // when ENTERING the view (mount / day-count change). Week-to-week navigation
-  // preserves the scroll position, like Notion.
+  // when ENTERING the view (mount: month, list and Insights unmount this).
+  // Navigation, a pinch, a day-count change and weekends off keep the scroll
+  // position, like Notion (keyed on the day count, every pinch step jumped
+  // the hours under your fingers to 6:30 AM).
   useEffect(() => {
     const el = gridRef.current;
     if (!el) return;
     const targetMin = todayIdx >= 0 ? Math.max(0, minutesOfDay(nowDate) - 150) : 7 * 60 - 40;
     el.scrollTop = targetMin * pxPerMin;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [days.length]);
+  }, []);
+
+  // zooming hours (⇧⌘. / ⇧⌘,) keeps the time at the top in view
+  const prevPxRef = useRef(pxPerMin);
+  useLayoutEffect(() => {
+    const el = gridRef.current;
+    const prev = prevPxRef.current;
+    prevPxRef.current = pxPerMin;
+    if (!el || prev === pxPerMin) return;
+    el.scrollTop = (el.scrollTop / prev) * pxPerMin;
+  }, [pxPerMin]);
 
   const timed = useMemo(
     () => events.filter((e) => !e.all_day && e.start && e.end),
@@ -739,7 +902,9 @@ export function WeekView(props: {
       // Focus score is time-sensitive; event layout and row DOM are not.
       c.score.clear();
     }
-    const deps = [pxPerMin, calendars, reconTick, props.seamStyle, colPx, starTick];
+    // (prefsVersion: the deep-work calendars score the day; the header kept
+    // the old score until the next minute after a Settings change)
+    const deps = [pxPerMin, calendars, reconTick, props.seamStyle, colPx, starTick, prefsVersion()];
     if (deps.some((d, i) => d !== c.deps[i])) {
       c.deps = deps;
       c.dayItems.clear();
@@ -819,11 +984,19 @@ export function WeekView(props: {
 
   const commitDrag = useCallback(
     (d: DragState) => {
+      // ⌥-drag copies wherever it drops (the all-day lane too), else moves
+      const writeDrag = (ev: CalendarEvent, input: EventInput, label: string) =>
+        // (a copy leaves the red-pen note on the original, as ⌘D does)
+        d.duplicate
+          ? props.actions.create({ ...input, description: splitDrill(input.description ?? null).body || null })
+          : props.actions.update(ev, input, label);
       if (d.kind === "create") {
-        const a = snap(Math.min(d.anchorMin, d.curMin));
+        // (a click in the day's last minutes snaps to midnight: keep it in
+        // this day, or it drafted on the next)
+        const a = Math.min(snap(Math.min(d.anchorMin, d.curMin)), DAY_MIN - SNAP_MIN);
         const b = snap(Math.max(d.anchorMin, d.curMin));
         const startMin = a;
-        const endMin = b - a < SNAP_MIN ? a + 30 : b;
+        const endMin = Math.min(b - a < SNAP_MIN ? a + 30 : b, DAY_MIN);
         const day = days[d.dayIndex];
         const start = atWallClock(day, startMin);
         const end = atWallClock(day, endMin);
@@ -834,13 +1007,20 @@ export function WeekView(props: {
         const fmt = (x: Date) =>
           `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
         if (d.allDayDropDay != null) {
-          // moved along the lane: shift the whole span to start on that day
+          // moved along the lane: shift the whole span by the days the
+          // grabbed chip moved (a multi-day event can be grabbed on any of
+          // its days; starting the span on the pointer's day jumped it)
           const spanDays = Math.max(1, Math.round((end.getTime() - start.getTime()) / 86400000));
-          const day = startOfDay(days[d.allDayDropDay]);
+          // (in calendar days between the two columns' dates: with weekends
+          // hidden, neighbouring columns can be three days apart)
+          const shift = Math.round(
+            (startOfDay(days[d.allDayDropDay]).getTime() - startOfDay(days[d.dayIndex]).getTime()) / 86400000);
+          const day = startOfDay(start);
+          day.setDate(day.getDate() + shift);
           const newEnd = new Date(day);
           newEnd.setDate(newEnd.getDate() + spanDays);
           if (!isSameDay(day, start)) {
-            props.actions.update(
+            writeDrag(
               ev,
               {
                 calendar_id: ev.calendar_id,
@@ -857,9 +1037,11 @@ export function WeekView(props: {
         } else {
           // dropped into the time grid: becomes a 1h timed event at the cursor
           const day = days[d.curDayIndex];
-          const startMin = snap(d.curMin);
+          // (clamped to the day's last slot, as the ghost is: a drop at the
+          // very bottom stored it at midnight on the next day)
+          const startMin = Math.min(snap(d.curMin), DAY_MIN - SNAP_MIN);
           const newStart = atWallClock(day, startMin);
-          props.actions.update(
+          writeDrag(
             ev,
             {
               calendar_id: ev.calendar_id,
@@ -893,7 +1075,7 @@ export function WeekView(props: {
         next.setDate(next.getDate() + 1);
         const fmt = (x: Date) =>
           `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
-        props.actions.update(
+        writeDrag(
           d.event,
           {
             calendar_id: d.event.calendar_id,
@@ -908,7 +1090,9 @@ export function WeekView(props: {
         );
       } else if (d.kind === "move" && d.event && d.moved) {
         const { start } = eventDates(d.event);
-        const newStartMin = snap(d.curMin - (d.grabOffsetMin ?? 0));
+        // (no later than the day's last slot: grabbed near its top and pulled
+        // to the bottom, a late event moved into tomorrow, off a 1-day view)
+        const newStartMin = Math.min(snap(d.curMin - (d.grabOffsetMin ?? 0)), DAY_MIN - SNAP_MIN);
         const day = days[d.curDayIndex];
         const newStart = atWallClock(day, newStartMin);
         if (d.duplicate) {
@@ -917,7 +1101,7 @@ export function WeekView(props: {
           props.actions.create({
             calendar_id: d.event.calendar_id,
             summary: d.event.summary,
-            description: d.event.description,
+            description: splitDrill(d.event.description).body || null, // (the note stays on the original)
             location: d.event.location,
             start: toLocalISO(newStart),
             end: toLocalISO(newEnd),
@@ -949,7 +1133,7 @@ export function WeekView(props: {
         // resizing a continuation segment: floor is just after this day's
         // midnight, not start+15 in this day's coordinates (that'd add 24h)
         const minEnd = sameDay ? minutesOfDay(start) + SNAP_MIN : SNAP_MIN;
-        const endMin = Math.max(snap(d.curMin), minEnd);
+        const endMin = Math.max(resizedEndMin(d, day), minEnd);
         const newEnd = atWallClock(day, endMin);
         props.actions.update(
           d.event,
@@ -1004,7 +1188,9 @@ export function WeekView(props: {
           const lane = gridRef.current?.querySelector(".allday-row");
           if (lane) {
             const r = lane.getBoundingClientRect();
-            if (ev.clientY >= r.top && ev.clientY <= r.bottom) allDayDropDay = dayIndex;
+            // (an all-day chip stays in the lane above it too: drifting onto
+            // the date header made it a timed event under the sticky header)
+            if ((d.event?.all_day || ev.clientY >= r.top) && ev.clientY <= r.bottom) allDayDropDay = dayIndex;
           }
         }
         const next: DragState = {
@@ -1015,7 +1201,19 @@ export function WeekView(props: {
           clientX: ev.clientX,
           clientY: ev.clientY,
           allDayDropDay,
-          moved: d.moved || Math.abs(loc.min - d.anchorMin) > 3 || dayIndex !== d.dayIndex || allDayDropDay != null,
+          // (in the lane, an all-day chip moves only when its day changes: a
+          // click with a little jitter is still a click)
+          // a chip moves once the pointer has travelled 4px (a click's
+          // wobble of 3 minutes, 2.4px, snapped 9:05 to 9:15); creating a
+          // new event still goes by minutes
+          moved: d.moved || dayIndex !== d.dayIndex || (allDayDropDay != null && !d.event?.all_day) ||
+            (d.kind === "move" && d.event?.all_day
+              // an all-day chip in its lane moves only by changing day (a
+              // 5px wobble was a "move" that wrote nothing and opened nothing)
+              ? allDayDropDay == null
+              : d.grabY != null
+                ? Math.hypot(ev.clientX - (d.grabX ?? ev.clientX), ev.clientY - d.grabY) >= 4
+                : Math.abs(loc.min - d.anchorMin) > 3),
         };
         dragRef.current = next;
         setDrag(next);
@@ -1065,15 +1263,21 @@ export function WeekView(props: {
     const update = (d1: number, m1: number) => {
       const box = { d0: Math.min(anchor.d, d1), d1: Math.max(anchor.d, d1), m0: Math.min(anchor.m, m1), m1: Math.max(anchor.m, m1) };
       setMarquee(box);
+      // every column an event covers counts (the after-midnight part of
+      // an overnight event was out of reach)
       const hits = timed.filter((ev) => {
         const { start, end } = eventDates(ev);
-        const di = days.findIndex((dd) => isSameDay(start, dd) || (end > startOfDay(dd) && start < dd));
-        const dayIdx = days.findIndex((dd) => isSameDay(start, dd));
-        const idx = dayIdx !== -1 ? dayIdx : di;
-        if (idx < box.d0 || idx > box.d1) return false;
-        const sMin = dayIdx !== -1 ? minutesOfDay(start) : 0;
-        const eMin = isSameDay(end, days[idx] ?? start) ? minutesOfDay(end) : DAY_MIN;
-        return eMin > box.m0 && sMin < box.m1;
+        for (let idx = box.d0; idx <= box.d1; idx++) {
+          const dd = days[idx];
+          if (!dd) continue;
+          const d0 = startOfDay(dd).getTime();
+          const d1 = d0 + DAY_MIN * 60000;
+          if (end.getTime() <= d0 || start.getTime() >= d1) continue;
+          const sMin = start.getTime() <= d0 ? 0 : minutesOfDay(start);
+          const eMin = end.getTime() >= d1 ? DAY_MIN : minutesOfDay(end);
+          if (eMin > box.m0 && sMin < box.m1) return true;
+        }
+        return false;
       });
       props.onSelectMany(hits);
     };
@@ -1126,7 +1330,8 @@ export function WeekView(props: {
     calendarEditable(calendars.find((c) => c.id === calendarId));
 
   const startChipDrag = (e: React.PointerEvent, ev: CalendarEvent, dayIndex: number) => {
-    if (e.button !== 0) return;
+    // a runway day (off the visible days): not a drag origin
+    if (e.button !== 0 || dayIndex < 0) return;
     e.stopPropagation();
     e.preventDefault();
     setCtx(null);
@@ -1175,8 +1380,9 @@ export function WeekView(props: {
     // start expressed in minutes relative to the grabbed day's midnight; for a
     // cross-midnight continuation segment this is negative, which keeps moves
     // of either segment anchored to the event's true start.
-    const startMinInGrabDay =
-      (start.getTime() - startOfDay(days[dayIndex]).getTime()) / 60000;
+    // (wall-clock minutes, as the pointer's and the drop's are: elapsed
+    // minutes put every move on a DST Sunday an hour off)
+    const startMinInGrabDay = wallMinutes(startOfDay(days[dayIndex]), start);
     beginDrag({
       kind: isResize ? "resize" : "move",
       duplicate: !isResize && e.altKey,
@@ -1184,12 +1390,15 @@ export function WeekView(props: {
       dayIndex,
       anchorMin: loc.min,
       grabOffsetMin: ev.all_day ? 0 : loc.min - startMinInGrabDay,
-      durationMin: ev.all_day ? 60 : Math.max(15, (end.getTime() - start.getTime()) / 60000),
+      // (as it is: a zero-length event stays one, as Google keeps it; the
+      // ghost has its own minimum height)
+      durationMin: ev.all_day ? 60 : (end.getTime() - start.getTime()) / 60000,
       curDayIndex: dayIndex,
       curMin: loc.min,
       clientX: e.clientX,
       clientY: e.clientY,
       grabX: e.clientX,
+      grabY: e.clientY,
       dayShift: 0,
       moved: false,
     });
@@ -1209,7 +1418,22 @@ export function WeekView(props: {
     if (!d || d.kind !== "move" || !d.event || !d.moved || d.duplicate || d.allDayDropDay != null) return null;
     if (d.event.all_day || props.selected.length < 2 || !selectedKeys.has(keyOf(d.event))) return null;
     const { start } = eventDates(d.event);
-    return wallShiftBetween(start, atWallClock(days[d.curDayIndex], snap(d.curMin - (d.grabOffsetMin ?? 0))));
+    const landing = atWallClock(days[d.curDayIndex], Math.min(snap(d.curMin - (d.grabOffsetMin ?? 0)), DAY_MIN - SNAP_MIN));
+    const shift = wallShiftBetween(start, landing);
+    // weekends hidden: the days moved are weekdays (Fri + 1 is Mon), counted
+    // from the start's day to the landing's (not columns: an overnight
+    // event's after-midnight piece is a column past its start)
+    if (props.hideWeekends) {
+      const x = startOfDay(start), y = startOfDay(landing);
+      const dir = y > x ? 1 : -1;
+      let n = 0;
+      while (!isSameDay(x, y)) {
+        x.setDate(x.getDate() + dir);
+        if (x.getDay() % 6 !== 0) n += dir;
+      }
+      return { ...shift, days: n, business: true };
+    }
+    return shift;
   }
   /** while a group is dragged: the others' landing spots (ghosts, by day
    *  column) and which events are on the move (dimmed in place) */
@@ -1260,25 +1484,23 @@ export function WeekView(props: {
     let endMin: number;
     if (drag.kind === "create") {
       day = drag.dayIndex;
-      startMin = snap(Math.min(drag.anchorMin, drag.curMin));
-      endMin = Math.max(snap(Math.max(drag.anchorMin, drag.curMin)), startMin + 30);
+      // the commit's rule (commitDrag): a 15-minute drag makes 15 minutes
+      startMin = Math.min(snap(Math.min(drag.anchorMin, drag.curMin)), DAY_MIN - SNAP_MIN);
+      const b = snap(Math.max(drag.anchorMin, drag.curMin));
+      endMin = Math.min(b - startMin < SNAP_MIN ? startMin + 30 : b, DAY_MIN);
     } else if (drag.kind === "move") {
-      startMin = snap(drag.curMin - (drag.grabOffsetMin ?? 0));
-      endMin = startMin + (drag.durationMin ?? 60);
+      startMin = Math.min(snap(drag.curMin - (drag.grabOffsetMin ?? 0)), DAY_MIN - SNAP_MIN);
+      endMin = startMin + Math.max(SNAP_MIN, drag.durationMin ?? 60);
     } else {
       // resize keeps the start and moves the end on the day it was grabbed
       // (endDrag); the start may be on the day before
       day = drag.dayIndex;
-      const dayStart = days[day] ? startOfDay(days[day]).getTime() : 0;
-      startMin = drag.event ? (eventDates(drag.event).start.getTime() - dayStart) / 60000 : 0;
-      endMin = Math.max(snap(drag.curMin), Math.max(startMin, 0) + SNAP_MIN);
+      startMin = drag.event && days[day] ? wallMinutes(startOfDay(days[day]), eventDates(drag.event).start) : 0;
+      endMin = days[day] ? Math.max(resizedEndMin(drag, days[day]), Math.max(startMin, 0) + SNAP_MIN) : snap(drag.curMin);
     }
     const pieces = new Map<number, { startMin: number; endMin: number }>();
     for (const p of ghostPieces(day, startMin, endMin, days.length)) pieces.set(p.di, p);
-    const color = colorOf(
-      calendars,
-      drag.event?.calendar_id ?? (calendars.find((c) => c.is_primary) ?? calendars[0])?.id ?? "",
-    );
+    const color = colorOf(calendars, drag.event?.calendar_id ?? newEventCalendarId);
     return { pieces, full: { startMin, endMin }, title: drag.event?.summary ?? "New event", color };
   })();
 
@@ -1302,10 +1524,11 @@ export function WeekView(props: {
 
   return (
     <div className="weekview" ref={gridRef} data-testid="week-grid">
-      <div className="day-headers" style={{ gridTemplateColumns: `${gutterW}px 1fr` }}>
+      <div className="day-headers" style={{ gridTemplateColumns: rowCols, width: rowW }}>
         <div className="gutter-tz" title={Intl.DateTimeFormat().resolvedOptions().timeZone}>
+          {/* (of the week shown: a December week is EST, whatever today is) */}
           {new Intl.DateTimeFormat("en-US", { timeZoneName: "short" })
-            .formatToParts(nowDate)
+            .formatToParts(atWallClock(labelDay, 12 * 60))
             .find((p) => p.type === "timeZoneName")?.value ?? ""}
         </div>
         <div className="pan-clip">
@@ -1343,7 +1566,7 @@ export function WeekView(props: {
                 now: nowDate,
                 events: timed,
                 calendars,
-                recon: (e) => reconOf(reconKey(e)),
+                recon: (e) => markOf(e),
                 reconSince: reconSince(),
               });
               layoutCacheRef.current.score.set(sKey, info);
@@ -1354,6 +1577,7 @@ export function WeekView(props: {
             <div
               key={d.toISOString()}
               className={"day-head" + (isSameDay(d, nowDate) ? " today" : "")}
+              data-day={format(d, "yyyy-MM-dd")}
               style={{ gridColumn: gridCol, gridRow: 1 }}
             >
               <span className="dow">{format(d, "EEE")}</span>
@@ -1388,7 +1612,7 @@ export function WeekView(props: {
         <div
           className="allday-row"
           data-testid="allday-row"
-          style={{ gridTemplateColumns: `${gutterW}px 1fr` }}
+          style={{ gridTemplateColumns: rowCols, width: rowW }}
         >
           <div className="allday-label">all-day</div>
           <div className="pan-clip">
@@ -1416,8 +1640,18 @@ export function WeekView(props: {
               if (spanning.length === 0) return indexed;
               return [...indexed, ...spanning].sort((a, b) => allDayByDay.order.get(a)! - allDayByDay.order.get(b)!);
             });
-            const dropTarget =
-              drag?.kind === "move" && drag.allDayDropDay === days.indexOf(d);
+            // every day the dropped event will cover (a 3-day event lit one)
+            // (the event's own days moved by the drag's day shift, as the drop
+            // computes it: grabbed on its last day, it lit the days after it)
+            const dropTarget = (() => {
+              if (drag?.kind !== "move" || drag.allDayDropDay == null || !drag.event) return false;
+              if (!drag.event.all_day) return days.indexOf(d) === drag.allDayDropDay;
+              const { start, end } = eventDates(drag.event);
+              const shift = Math.round((startOfDay(days[drag.allDayDropDay]).getTime() - startOfDay(days[drag.dayIndex]).getTime()) / 86400000);
+              const span = Math.max(1, Math.round((startOfDay(end).getTime() - startOfDay(start).getTime()) / 86400000));
+              const from = addDays(startOfDay(start), shift);
+              return d >= from && d < addDays(from, span);
+            })();
             return (
             <div
               key={d.toISOString()}
@@ -1425,7 +1659,14 @@ export function WeekView(props: {
               onPointerDown={(pe) => {
                 // Notion: click drafts an all-day event; dragging across the
                 // lane spans it over the covered days
-                if (pe.button !== 0 || (pe.target as HTMLElement).closest(".chip")) return;
+                if (pe.button !== 0 || (pe.target as HTMLElement).closest(".chip, .allday-more")) return;
+                // the click that dismisses an open editor doesn't also create
+                // (as on the time grid: startCreate)
+                if (props.panelOpen) return;
+                if (document.body.dataset.panelDismiss === String(pe.nativeEvent.timeStamp)) {
+                  delete document.body.dataset.panelDismiss;
+                  return;
+                }
                 const strip = pe.currentTarget.closest(".pan-strip")!;
                 const cells = [...strip.querySelectorAll(".allday-cell")].slice(0, days.length);
                 const dayAt = (x: number) => {
@@ -1452,24 +1693,42 @@ export function WeekView(props: {
               }}
             >
               {dayAll
-                .slice(0, 3)
+                .slice(0, allDayOpen ? undefined : 3)
                 .map((e) => (
                   <button
                     key={keyOf(e)}
-                    className={"chip chip-allday" + (ended(e, nowDate) ? " past" : "")}
+                    className={
+                      "chip chip-allday" +
+                      (ended(e, nowDate) ? " past" : "") +
+                      rsvpClass(e) +
+                      (isCanceled(e) ? " canceled" : "") +
+                      (selectedKeys.has(keyOf(e)) ? " selected" : "") +
+                      ((st0) => (st0 ? (st0.kind === "manual" ? " starred" : " starred-auto") : ""))(starState(starKey(e)))
+                    }
                     style={chipStyle(colorOf(calendars, e.calendar_id))}
                     title={e.summary}
                     onPointerDown={(pe) => startChipDrag(pe, e, days.indexOf(d))}
+                    onPointerEnter={() => propsRef.current.onHover?.(e)}
+                    onPointerLeave={() => propsRef.current.onHover?.(null)}
                     onContextMenu={(ce) => {
                       ce.preventDefault();
+                      propsRef.current.onSelect(e);
                       setCtx({ x: ce.clientX, y: ce.clientY, event: e });
                     }}
                   >
                     {e.summary}
                   </button>
                 ))}
+              {/* the row opens to show every day's all-day events (it was a
+                  label: a click drafted a new event, the 4th unreachable) */}
               {dayAll.length > 3 && (
-                <span className="allday-more">+{dayAll.length - 3} more</span>
+                <button
+                  className="allday-more"
+                  onClick={() => setAllDayOpen((o) => !o)}
+                  title={allDayOpen ? "Show fewer" : "Show all all-day events"}
+                >
+                  {allDayOpen ? "Show less" : `+${dayAll.length - 3} more`}
+                </button>
               )}
             </div>
             );
@@ -1488,7 +1747,7 @@ export function WeekView(props: {
             </div>
           </div>
         </div>
-      <div className="grid-body" style={{ height: DAY_MIN * pxPerMin }}>
+      <div className="grid-body" style={{ height: DAY_MIN * pxPerMin, width: rowW }}>
         <div className="gutter" style={{ width: gutterW }}>
           {Array.from({ length: 23 }, (_, i) => i + 1).map((h) => (
             <div
@@ -1516,7 +1775,8 @@ export function WeekView(props: {
             ))}
           {todayIdx >= 0 && (
             <div className="now-pill" style={{ top: nowMin * pxPerMin }} data-testid="now-pill">
-              {format(nowDate, "h:mma").replace("AM", "AM").replace("PM", "PM")}
+              {/* (the gutter's hour labels carry AM/PM: "12:59PM" didn't fit it) */}
+              {format(nowDate, "h:mm")}
             </div>
           )}
         </div>
@@ -1528,7 +1788,7 @@ export function WeekView(props: {
             <div className="now-line-global" style={{ top: nowMin * pxPerMin }} />
           )}
         </div>
-        <div className="day-clip" ref={dayClipRef}>
+        <div className="day-clip" ref={dayClipRef} style={clipW ? { flex: "none", width: clipW } : undefined}>
           {marquee && (
             <div
               className="marquee"
@@ -1627,7 +1887,21 @@ export function WeekView(props: {
               };
               layoutCacheRef.current.clusterTimes.set(cacheKey, cachedClusterTime);
             }
-            const clusterDeps = [clusters, calendars, cachedClusterTime.signature, selectedKeys, reconTick, starTick, rowWindow];
+            // Per-day signatures, not the global values: selecting, dragging,
+            // a group drag or the 30-second clock rebuilt all 35 rendered
+            // days' chips (every pointermove of a drag, ~450 chips), where
+            // only the days holding the affected events change.
+            const clusterSelSig = selectedKeys.size
+              ? clusters.flatMap((cl) => cl.items.map(({ item }) => keyOf(item))).filter((k) => selectedKeys.has(k)).join(",")
+              : "";
+            // rows lifted by a drag (one moved row, or a group's): dimmed like chips
+            const movingRow = (k: string) =>
+              !!groupDrag?.moving.has(k) ||
+              (drag?.kind !== "create" && !!drag?.event && keyOf(drag.event) === k && !!drag.moved && !drag.duplicate);
+            const clusterMoveSig = drag
+              ? clusters.flatMap((cl) => cl.items.map(({ item }) => keyOf(item))).filter(movingRow).join(",")
+              : "";
+            const clusterDeps = [clusters, calendars, cachedClusterTime.signature, clusterSelSig, clusterMoveSig, reconTick, starTick, rowWindow];
             let cachedClusters = layoutCacheRef.current.clusters.get(cacheKey);
             if (!cachedClusters || clusterDeps.some((dep, index) => !Object.is(dep, cachedClusters!.deps[index]))) {
               const nodes = profileRenderStage("clusters", () => clusters.map((cl) => {
@@ -1667,9 +1941,13 @@ export function WeekView(props: {
                           (rowState.past ? " past" : "") +
                           ((st0) => (st0 ? (st0.kind === "manual" ? " starred" : " starred-auto") : ""))(starState(starKey(e))) +
                           (selectedKeys.has(keyOf(e)) ? " selected" : "") +
+                          (movingRow(keyOf(e)) ? " dragging" : "") +
+                          rsvpClass(e) +
                           (rowState.recon ? ` ${rowState.recon}` : "")
                         }
                         onPointerDown={(pe) => startChipDragRef.current(pe, e, dayIndexByDateRef.current.get(cacheKey) ?? -1)}
+                        onPointerEnter={() => propsRef.current.onHover?.(e)}
+                        onPointerLeave={() => propsRef.current.onHover?.(null)}
                         onContextMenu={(ce) => {
                           ce.preventDefault();
                           ce.stopPropagation();
@@ -1684,7 +1962,7 @@ export function WeekView(props: {
                               role="button"
                               tabIndex={-1}
                               className="rr-yes"
-                              title="Happened"
+                              title="It happened"
                               data-testid="row-recon-yes"
                               onPointerDown={(pe) => pe.stopPropagation()}
                               onClick={(ce) => {
@@ -1696,7 +1974,7 @@ export function WeekView(props: {
                               role="button"
                               tabIndex={-1}
                               className="rr-no"
-                              title="Didn't happen: deletes the event (⌘Z to undo)"
+                              title="Didn't happen: removes it (⌘Z undoes)"
                               data-testid="row-recon-no"
                               onPointerDown={(pe) => pe.stopPropagation()}
                               onClick={(ce) => {
@@ -1719,7 +1997,19 @@ export function WeekView(props: {
             // Chip elements and their event handlers depend on the layout and
             // visible state, not on the parent App's day-window render. Reuse
             // the unchanged day's subtree during a horizontal pan.
-            const chipDeps = [containers, regular, placedText, calendars, nowTick, selectedKeys, reconTick, starTick, drag, groupDrag, seamMode];
+            const dayKeys = [...containers.map((c) => keyOf(c.item)), ...regular.map((r) => keyOf(r.item))];
+            const selSig = selectedKeys.size ? dayKeys.filter((k) => selectedKeys.has(k)).join(",") : "";
+            const dragSig = drag?.event && dayKeys.includes(keyOf(drag.event))
+              ? `${drag.kind}|${drag.moved}|${drag.duplicate}`
+              : "";
+            const groupSig = groupDrag ? dayKeys.filter((k) => groupDrag.moving.has(k)).join(",") : "";
+            // the time state the chips show (past, awaiting review): an
+            // overnight event's earlier segment goes past when the event
+            // ends, on another day's column
+            const clockSig = [...containers, ...regular]
+              .map(({ item }) => `${ended(item, nowDate) ? 1 : 0}${reconState(item, calendars, nowDate) ?? "-"}`)
+              .join("");
+            const chipDeps = [containers, regular, placedText, calendars, clockSig, selSig, reconTick, starTick, dragSig, groupSig, seamMode];
             let cachedChips = layoutCacheRef.current.chips.get(cacheKey);
             if (!cachedChips || chipDeps.some((dep, index) => !Object.is(dep, cachedChips!.deps[index]))) {
               const containerNodes = profileRenderStage("containers", () => containers.map(({ item: e, lane, top, height, seamTopPx, seamBottomPx, seamTopStepPx, seamBottomStepPx, z }) => {
@@ -1733,6 +2023,7 @@ export function WeekView(props: {
                   (isPast ? " past" : "") +
                   (recon === "unsettled" ? " unsettled" : "") +
                   (recon === "canceled" ? " canceled" : "") +
+                  rsvpClass(e) +
                   (editableCal(e.calendar_id) ? "" : " readonly") +
                   (selectedKeys.has(keyOf(e)) ? " selected" : "");
                 const rangeTitle = `${e.summary} (${fmtChipRange(start, end)})`;
@@ -1760,6 +2051,8 @@ export function WeekView(props: {
                     data-testid="cshape-seg"
                     data-ek={keyOf(e)}
                     onPointerDown={(pe) => startChipDragRef.current(pe, e, dayIndexByDateRef.current.get(cacheKey) ?? -1)}
+                    onPointerEnter={() => propsRef.current.onHover?.(e)}
+                    onPointerLeave={() => propsRef.current.onHover?.(null)}
                     onContextMenu={(ce) => {
                       ce.preventDefault();
                       ce.stopPropagation();
@@ -1799,6 +2092,7 @@ export function WeekView(props: {
                       (isPast ? " past" : "") +
                       (recon === "unsettled" ? " unsettled" : "") +
                       (recon === "canceled" ? " canceled" : "") +
+                      rsvpClass(e) +
                       (editableCal(e.calendar_id) ? "" : " readonly") +
                       (selectedKeys.has(keyOf(e)) ? " selected" : "")
                     }
@@ -1832,7 +2126,8 @@ export function WeekView(props: {
                       <span className="recon-actions">
                         <button
                           className="ra-yes"
-                          title="Happened"
+                          title="It happened"
+                          aria-label="It happened"
                           data-testid="recon-yes"
                           onPointerDown={(pe) => pe.stopPropagation()}
                           onClick={(ce) => {
@@ -1844,7 +2139,8 @@ export function WeekView(props: {
                         </button>
                         <button
                           className="ra-no"
-                          title="Didn't happen: deletes the event (⌘Z to undo)"
+                          title="Didn't happen: removes it (⌘Z undoes)"
+                          aria-label="Didn't happen"
                           data-testid="recon-no"
                           onPointerDown={(pe) => pe.stopPropagation()}
                           onClick={(ce) => {
@@ -1915,26 +2211,17 @@ export function WeekView(props: {
                     className="chip chip-ghost chip-draft"
                     data-testid="draft-chip"
                     style={{
-                      ...chipStyle(
-                        colorOf(
-                          calendars,
-                          (calendars.find((c) => c.is_primary) ?? calendars[0])?.id ?? "",
-                        ),
-                      ),
+                      ...chipStyle(colorOf(calendars, newEventCalendarId)),
                       top: minutesOfDay(props.draft.start) * pxPerMin,
-                      height: Math.max(
-                        ((props.draft.end.getTime() - props.draft.start.getTime()) / 60000) *
-                          pxPerMin,
-                        17,
-                      ),
+                      // wall-clock minutes, as the grid draws them (on the
+                      // fall-back day 1–3 AM is three elapsed hours)
+                      height: Math.max(wallMinutes(props.draft.start, props.draft.end) * pxPerMin, 17),
                       left: 0,
                       width: "calc(100% - 2px)",
                     }}
                   >
                     <span className="chip-title">(New event)</span>
-                    {((props.draft.end.getTime() - props.draft.start.getTime()) / 60000) *
-                      pxPerMin >=
-                      28 && (
+                    {wallMinutes(props.draft.start, props.draft.end) * pxPerMin >= 28 && (
                       <span className="chip-time">
                         {fmtChipRange(props.draft.start, props.draft.end)}
                       </span>
@@ -1961,6 +2248,7 @@ export function WeekView(props: {
             pxPerMin={pxPerMin}
             keyOf={keyOf}
             onSelect={(e) => props.onSelect(e)}
+            onHover={lightNoteEvent}
             onDelete={(e) => {
               // Clicking the note selected its event. Once the note is gone,
               // that selection must go too, or the next Delete/Backspace
@@ -1998,6 +2286,13 @@ export function WeekView(props: {
           <div
             className="ctx-menu"
             data-testid="ctx-menu"
+            // kept on screen by its measured height (a fixed reserve let
+            // a 9-item menu run off the bottom)
+            ref={(el) => {
+              if (!el) return;
+              const r = el.getBoundingClientRect();
+              if (r.bottom > window.innerHeight - 8) el.style.top = `${Math.max(8, window.innerHeight - r.height - 8)}px`;
+            }}
             style={{
               left: Math.min(ctx.x, window.innerWidth - 200),
               top: Math.max(8, Math.min(ctx.y, window.innerHeight - (ctx.copying ? 340 : 140))),
@@ -2037,6 +2332,18 @@ export function WeekView(props: {
                 Copy to my calendar… <kbd>›</kbd>
               </button>
             )}
+            {/* upcoming (or a calendar not reviewed): cancel, kept struck through */}
+            {!(eventDates(ctx.event).end.getTime() < nowDate.getTime() && !reconExempt(ctx.event, calendars)) && (
+              <button
+                data-testid="ctx-cancel"
+                onClick={() => {
+                  toggleCanceled(ctx.event);
+                  setCtx(null);
+                }}
+              >
+                {isCanceled(ctx.event) ? "Restore event" : "Cancel event"} <kbd>⊘</kbd>
+              </button>
+            )}
             {eventDates(ctx.event).end.getTime() < nowDate.getTime() && !reconExempt(ctx.event, calendars) && (
               <>
                 <button
@@ -2049,7 +2356,7 @@ export function WeekView(props: {
                 </button>
                 <button
                   onClick={() => {
-                    setRecon(reconKey(ctx.event), reconState(ctx.event, calendars, nowDate) === "canceled" ? null : "canceled");
+                    setRecon(reconKey(ctx.event), reconState(ctx.event, calendars, nowDate) === "canceled" ? null : "canceled", ctx.event);
                     setCtx(null);
                   }}
                 >
@@ -2202,7 +2509,7 @@ function ScorePop({ info: f, today, x, y }: { info: FocusScore; today: boolean; 
       ))}
       {notCounted.length > 0 && <div className="score-pop-row sp-meta">Not counted: {notCounted.join(" · ")}</div>}
       <div className="score-how">
-        100 × deep<sup>0.5</sup> × restraint<sup>0.3</sup> × sleep<sup>0.3</sup>. Deep = {DEEP_CALENDARS.join(", ")}:
+        100 × deep<sup>0.5</sup> × restraint<sup>0.3</sup> × sleep<sup>0.3</sup>. Deep = {deepCalendars().join(", ")}:
         confirmed, uninterrupted, ≥25m stretches, 90m full credit, 4h/day cap.
       </div>
     </div>

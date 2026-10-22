@@ -52,10 +52,12 @@ pub enum SyncKick {
 /// builds because every `tauri dev` rebuild is a differently-signed binary,
 /// so the keychain re-prompts on each rebuild ("Always Allow" cannot stick).
 /// Release builds use the keychain.
+#[cfg(debug_assertions)]
 pub struct FileTokens {
     path: PathBuf,
 }
 
+#[cfg(debug_assertions)]
 impl TokenStore for FileTokens {
     fn get_refresh_token(&self) -> Option<String> {
         let s = std::fs::read_to_string(&self.path).ok()?;
@@ -237,8 +239,12 @@ fn spawn_sync_thread(
                             if !first.is_empty() {
                                 match engine.sync_calendars(&first) {
                                     Ok(report) => {
-                                        if report.pushed + report.pulled + report.conflicts > 0 {
+                                        if ui_needs_refresh(&report, &None, &None) {
                                             let _ = app.emit("db-changed", ());
+                                        }
+                                        // (a refused change reverted in this pass: say so)
+                                        if !report.reverted.is_empty() {
+                                            let _ = app.emit("sync-status", &report);
                                         }
                                     }
                                     Err(e) => warn!("priority sync failed: {e}"),
@@ -246,7 +252,27 @@ fn spawn_sync_thread(
                                 first.clear();
                             }
                             let before = calendar_list(&db);
-                            match engine.sync_once() {
+                            // a calendar edited while the pass runs is pulled
+                            // next, and the UI refreshes as each calendar
+                            // lands (a series change showed 15 s later)
+                            let last_pulled = std::cell::Cell::new(0usize);
+                            match engine.sync_once_with(
+                                || {
+                                    let mut ids = Vec::new();
+                                    while let Ok(kick) = kick_rx.try_recv() {
+                                        if let SyncKick::Calendars(v) = kick {
+                                            ids.extend(v);
+                                        }
+                                    }
+                                    ids
+                                },
+                                |_, report| {
+                                    if report.pulled > last_pulled.get() {
+                                        last_pulled.set(report.pulled);
+                                        let _ = app.emit("db-changed", ());
+                                    }
+                                },
+                            ) {
                                 Ok(report) => {
                                     let after = calendar_list(&db);
                                     if before != after {
@@ -264,10 +290,36 @@ fn spawn_sync_thread(
                                     }
                                     let _ = app.emit("sync-status", &report);
                                 }
-                                Err(e) => warn!("sync failed: {e}"),
+                                // (a pass that couldn't run, or a sign-in
+                                // that can't be refreshed, reports too: the
+                                // UI said "Synced" and "Connected" regardless)
+                                Err(e) => {
+                                    warn!("sync failed: {e}");
+                                    let _ = app.emit("sync-status", &failed_pass(format!("sync: {e}")));
+                                }
                             }
                         }
-                        Err(e) => warn!("token refresh failed: {e}"),
+                        Err(e) => {
+                            warn!("token refresh failed: {e}");
+                            if e.to_string().contains("invalid_grant") {
+                                // Google's refresh token is dead (expired after 7
+                                // days while the OAuth app is in Testing, or
+                                // revoked): the app said "Connected" and queued a
+                                // day of changes without a word. The token goes,
+                                // the UI asks to connect again, the queue waits.
+                                warn!("Google refresh token expired or revoked: sign-in needed");
+                                if let Err(e) = tokens.clear() {
+                                    warn!("could not clear the dead refresh token: {e}");
+                                }
+                                *access.lock().unwrap() = None;
+                                let _ = app.emit("auth-changed", false);
+                                let _ = app.emit("sync-status", &failed_pass(
+                                    "Google sign-in expired or revoked: connect Google again in Settings › Calendar accounts (your changes are kept and sync then)".into(),
+                                ));
+                            } else {
+                                let _ = app.emit("sync-status", &failed_pass(format!("Google sign-in: {e}")));
+                            }
+                        }
                     }
                 }
                 // Wait for the next interval or an explicit kick.
@@ -306,7 +358,12 @@ fn calendar_list(db: &Db) -> Option<String> {
 /// way, or a calendar changed in Google (its color or name) with no event
 /// changing at all.
 fn ui_needs_refresh(report: &sync_core::SyncReport, before: &Option<String>, after: &Option<String>) -> bool {
-    report.pushed + report.pulled + report.conflicts > 0 || before != after
+    report.pushed + report.pulled + report.conflicts + report.reverted.len() > 0 || before != after
+}
+
+/// the report of a pass that didn't run
+fn failed_pass(error: String) -> sync_core::models::SyncReport {
+    sync_core::models::SyncReport { errors: vec![error], ..Default::default() }
 }
 
 fn current_access_token(

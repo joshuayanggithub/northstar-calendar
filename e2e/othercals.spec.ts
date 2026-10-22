@@ -30,13 +30,14 @@ function ev(id: string, calendar_id: string, summary: string, d: number, h0: num
   };
 }
 
-async function open(page: Page) {
+async function open(page: Page, lecture: Partial<CalendarEvent> = {}) {
   const fixture = {
     calendars: CALS,
     events: [
       ev("lec_1", "school", "Lecture", 13, 10, 11, {
         recurring_event_id: "lec",
-        raw: { masterRecurrence: ["RRULE:FREQ=WEEKLY;BYDAY=TU,TH"] },
+        ...lecture,
+        raw: { masterRecurrence: ["RRULE:FREQ=WEEKLY;BYDAY=TU,TH"], ...(lecture.raw ?? {}) },
       }),
       ev("gym", "p", "Gym", 13, 7, 8),
     ],
@@ -61,7 +62,7 @@ const lecture = (page: Page) => page.locator('.chip-timed[data-ek="school/lec_1"
 test("other calendars: never asked to be reconciled", async ({ page }) => {
   await open(page);
   // yesterday's sweep counts only your own event
-  await expect(page.getByTestId("sweep-banner")).toContainText("1 unconfirmed event");
+  await expect(page.getByTestId("sweep-banner")).toContainText("1 event to review");
   await expect(chips(page, "Gym")).toHaveClass(/unsettled/);
   await expect(lecture(page)).not.toHaveClass(/unsettled/);
   await expect(lecture(page)).toHaveClass(/readonly/);
@@ -110,7 +111,9 @@ test("other calendars: Copy to my calendar files the copy in the calendar you pi
   await expect(page.getByTestId("toast")).toContainText("Copied “Lecture” to Learning and Research");
   // ... and the copy is yours: it asks to be reconciled
   await expect(copy).toHaveClass(/unsettled/);
-  await expect(page.getByTestId("sweep-banner")).toContainText("2 unconfirmed events");
+  // (the morning banner waits until the editor closes)
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("sweep-banner")).toContainText("2 events to review");
 
   // the copy stands for the original, which steps aside (no C-shape of an
   // event around its own copy); it is still there, untouched
@@ -166,4 +169,78 @@ test("other calendars: score nothing (a deep block on someone else's calendar is
   expect(score([block(theirs)], [theirs]).score).toBe(none.score);
   // the same block in your own Homework calendar does count
   expect(score([block(mine)], [mine]).score).toBeGreaterThan(none.score);
+});
+
+// ---- found by the 2026-10-18 bug-finder pass (run 2)
+
+async function copyToPersonal(page: Page) {
+  await lecture(page).click({ button: "right" });
+  await page.getByTestId("ctx-copy-to").click();
+  await page.getByTestId("ctx-menu").getByTestId("copy-target").filter({ hasText: "Personal" }).click();
+  await expect(page.locator('.chip-timed[data-ek^="p/"]', { hasText: "Lecture" })).toHaveCount(1);
+}
+const copyChip = (page: Page) => page.locator('.chip-timed[data-ek^="p/"]', { hasText: "Lecture" });
+
+test("other calendars: an original moved by its owner after copying comes back", async ({ page }) => {
+  await open(page);
+  await copyToPersonal(page);
+  await page.keyboard.press("Escape");
+  await expect(lecture(page)).toHaveCount(0);
+  await page.evaluate(async () => {
+    const be = (window as any).__mockBackend;
+    const [o] = (await be.listEvents("2026-01-01T00:00:00Z", "2027-01-01T00:00:00Z")).filter((e: any) => e.id === "lec_1");
+    await be.updateEvent("lec_1", { ...o, start: new Date(2026, 9, 13, 14).toISOString(), end: new Date(2026, 9, 13, 15).toISOString() }, "school");
+  });
+  await expect(copyChip(page)).toHaveCount(1);
+  await expect(lecture(page)).toHaveCount(1);
+});
+
+test("other calendars: undoing a copy works after the copy was deleted and restored", async ({ page }) => {
+  await open(page);
+  await copyToPersonal(page);
+  await page.getByTestId("event-panel").locator(".panel-kind").click();
+  await page.keyboard.press("Delete");
+  await expect(lecture(page)).toHaveCount(1);
+  await page.keyboard.press("ControlOrMeta+z");
+  await expect(copyChip(page)).toHaveCount(1);
+  await page.keyboard.press("ControlOrMeta+z");
+  await expect(copyChip(page)).toHaveCount(0);
+  await expect(lecture(page)).toHaveCount(1);
+});
+
+test("other calendars: hiding the calendar holding a copy brings the original back", async ({ page }) => {
+  await open(page);
+  await copyToPersonal(page);
+  await page.keyboard.press("Escape");
+  await page.evaluate(async () => (window as any).__mockBackend.setCalendarHidden("p", true));
+  await expect(copyChip(page)).toHaveCount(0);
+  await expect(lecture(page)).toHaveCount(1);
+});
+
+test("other calendars: a copy keeps the Meet link (Join)", async ({ page }) => {
+  const conf = { conferenceId: "abc-defg-hij", entryPoints: [{ entryPointType: "video", uri: "https://meet.google.com/abc-defg-hij" }] };
+  await open(page, { conference_url: conf.entryPoints[0].uri, raw: { conferenceData: conf } });
+  await copyToPersonal(page);
+  await expect.poll(async () => (await lectures(page)).find((e) => e.calendar_id === "p")?.conference_url)
+    .toBe("https://meet.google.com/abc-defg-hij");
+});
+
+test("other calendars: copying every occurrence repeats in the series' timezone", async ({ page }) => {
+  await open(page);
+  await page.evaluate(() => {
+    const be = (window as any).__mockBackend;
+    be.getSeriesMaster = async () => ({
+      id: "lec", summary: "Lecture", recurrence: ["RRULE:FREQ=WEEKLY"],
+      start: { dateTime: "2026-09-03T10:00:00+01:00", timeZone: "Europe/London" },
+      end: { dateTime: "2026-09-03T11:00:00+01:00", timeZone: "Europe/London" },
+    });
+    const create = be.createEvent.bind(be);
+    be.createEvent = async (i: any) => { (window as any).__copyInput = i; return create(i); };
+  });
+  await lecture(page).click();
+  const panel = page.getByTestId("event-panel");
+  await panel.getByTestId("panel-copy").click();
+  await panel.getByTestId("copy-series").check();
+  await panel.getByTestId("copy-target").filter({ hasText: "Personal" }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__copyInput?.time_zone)).toBe("Europe/London");
 });

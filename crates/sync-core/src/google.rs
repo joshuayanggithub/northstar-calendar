@@ -8,6 +8,25 @@ use serde_json::Value;
 
 const BASE: &str = "https://www.googleapis.com/calendar/v3";
 
+/// Longest wait for a connection, and for each read or write on it.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The HTTP agent for every Google call. ureq's default has no timeouts: a
+/// request caught by sleep or a network change waited forever, and with it
+/// the sync thread (no pushes, pulls or calendar colors until a relaunch).
+pub fn http_agent() -> ureq::Agent {
+    agent_with(CONNECT_TIMEOUT, IO_TIMEOUT)
+}
+
+pub(crate) fn agent_with(connect: std::time::Duration, io: std::time::Duration) -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(connect)
+        .timeout_read(io)
+        .timeout_write(io)
+        .build()
+}
+
 /// One page of an events.list response, normalized.
 #[derive(Debug, Default)]
 pub struct EventsPage {
@@ -44,7 +63,7 @@ pub struct GoogleClient {
 
 impl GoogleClient {
     pub fn new(access_token: String) -> Self {
-        GoogleClient { access_token, agent: ureq::agent() }
+        GoogleClient { access_token, agent: http_agent() }
     }
 
     fn auth(&self, req: ureq::Request) -> ureq::Request {
@@ -73,6 +92,9 @@ impl CalendarApi for GoogleClient {
         let mut out = Vec::new();
         let mut page_token: Option<String> = None;
         loop {
+            // No showHidden: a calendar hidden from Google's list (an old
+            // subscription, a former class) stays out of the app too. Asking
+            // for them brought years-old calendars into the sidebar.
             let mut req = self.auth(self.agent.get(&format!("{BASE}/users/me/calendarList")));
             if let Some(t) = &page_token {
                 req = req.query("pageToken", t);
@@ -301,4 +323,28 @@ pub fn event_from_google(calendar_id: &str, v: &Value) -> Option<Event> {
 
 fn urlencode(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_server_that_never_answers_times_out_instead_of_hanging() {
+        // accepts the connection, then says nothing
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _hold = std::thread::spawn(move || {
+            let conns: Vec<_> = listener.incoming().take(1).collect();
+            std::thread::sleep(Duration::from_secs(5));
+            drop(conns);
+        });
+        let t0 = Instant::now();
+        let r = agent_with(Duration::from_secs(1), Duration::from_millis(300))
+            .get(&format!("http://{addr}/calendar/v3/users/me/calendarList"))
+            .call();
+        assert!(r.is_err(), "a silent server answered?");
+        assert!(t0.elapsed() < Duration::from_secs(3), "waited {:?}", t0.elapsed());
+    }
 }

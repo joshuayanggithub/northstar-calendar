@@ -38,3 +38,9 @@ test("nudge: never sleep, someone else's calendar, all-day or canceled events", 
   const h = thisHour(at(8, 37));
   expect([h.start.getHours(), h.start.getMinutes(), h.end.getHours()]).toEqual([8, 0, 9]);
 });
+
+test("nudge: an event on a hidden calendar is not the one in progress", () => {
+  const cals = [cal("p", "Personal"), { ...cal("work", "Work"), hidden: true }];
+  const e = ev("w1", "work", "Standup", 9, 10);
+  expect(currentEvent([e], cals, new Date(2026, 9, 17, 9, 30))).toBeNull();
+});

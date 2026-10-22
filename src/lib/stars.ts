@@ -7,6 +7,9 @@ export interface StarEntry {
   goal?: string; // the goal task's text from the goals .md, when linked
   /** user said "not goal work": keeps the auto-classifier from re-starring */
   suppressed?: boolean;
+  /** its event was deleted: kept for undo (carried to the re-created one),
+   *  not counted (a goal's ★ badge counted a deleted event) */
+  deleted?: boolean;
 }
 
 type Listener = () => void;
@@ -22,6 +25,21 @@ function load(): Record<string, StarEntry> {
   } catch {
     cache = {};
   }
+  // (a corrupt value blanked the whole window, with no way to clear
+  // storage in the app: as recon, anything but an object of objects is
+  // dropped)
+  if (!cache || typeof cache !== "object" || Array.isArray(cache)) cache = {};
+  for (const k of Object.keys(cache!)) {
+    const v = cache![k];
+    if (!v || typeof v !== "object") delete cache![k];
+  }
+  // stars were keyed calendar/id: a calendar move (same id) lost them
+  for (const k of Object.keys(cache!)) {
+    if (!k.includes("/")) continue;
+    const id = k.slice(k.lastIndexOf("/") + 1);
+    if (!cache![id]) cache![id] = cache![k];
+    delete cache![k];
+  }
   return cache!;
 }
 
@@ -34,7 +52,48 @@ function save() {
   listeners.forEach((l) => l());
 }
 
-export const starKey = (e: { calendar_id: string; id: string }) => `${e.calendar_id}/${e.id}`;
+/** by event id: Google keeps it across a calendar move */
+export const starKey = (e: { calendar_id: string; id: string }) => e.id;
+
+/** an event re-created under a new id (an undone delete) keeps its star */
+export function carryStar(fromId: string, toId: string) {
+  const m = load();
+  if (!m[fromId] || m[toId]) return;
+  const { deleted: _gone, ...rest } = m[fromId];
+  m[toId] = { ...rest };
+  save();
+}
+
+/** the event was deleted (undo may bring it back under a new id, or the
+ *  same one for a recurring occurrence) */
+export function markStarDeleted(key: string, deleted = true) {
+  const m = load();
+  if (!m[key]) return;
+  if (deleted) m[key] = { ...m[key], deleted: true };
+  else delete m[key].deleted;
+  save();
+}
+
+/** a series was deleted (whole, or from the occurrence `fromId` on): its
+ *  occurrences' stars (`<master>_<slot>`, the slot sorting by date) no
+ *  longer count (a goal's ★ badge counted a deleted series' occurrence) */
+export function markSeriesStarsDeleted(masterId: string, fromId?: string) {
+  const m = load();
+  const prefix = `${masterId}_`;
+  let changed = false;
+  for (const key of Object.keys(m)) {
+    if (m[key].deleted) continue;
+    const whole = key === masterId && !fromId;
+    // (a slot suffix only: Google names a series it split off
+    // `<master>_R<datetime>`, and that one still exists)
+    const suffix = key.startsWith(prefix) ? key.slice(prefix.length) : "";
+    const occurrence = /^\d{8}(T\d{6}Z)?$/.test(suffix) && (!fromId || suffix >= fromId.slice(prefix.length));
+    if (!whole && !occurrence) continue;
+    m[key] = { ...m[key], deleted: true };
+    changed = true;
+  }
+  if (changed) save();
+}
 
 export function getStar(key: string): StarEntry | null {
   return load()[key] ?? null;
@@ -50,7 +109,8 @@ export function isStarred(key: string): boolean {
 let autoGoals: Record<string, string> = {};
 
 export function setAutoGoals(map: Record<string, string>) {
-  autoGoals = map;
+  // (the classifier reports calendar/id keys)
+  autoGoals = Object.fromEntries(Object.entries(map).map(([k, v]) => [k.slice(k.lastIndexOf("/") + 1), v]));
   listeners.forEach((l) => l());
 }
 
@@ -75,7 +135,9 @@ export function confirmAuto(key: string) {
 
 export function toggleStar(key: string): boolean {
   const m = load();
-  const now = !(key in m);
+  // a declined suggestion ({suppressed}) isn't a star: starring it stars it
+  // (deleting the entry brought the declined suggestion back)
+  const now = !(key in m) || !!m[key].suppressed;
   if (now) m[key] = {};
   else delete m[key];
   save();
@@ -94,9 +156,23 @@ export function setStarGoal(key: string, goal: string | null) {
   save();
 }
 
+/** a goal renamed: its starred events follow it (stars link by goal text) */
+export function renameStarGoal(from: string, to: string) {
+  if (from === to) return;
+  const m = load();
+  let changed = false;
+  for (const v of Object.values(m)) {
+    if (v.goal === from) {
+      v.goal = to;
+      changed = true;
+    }
+  }
+  if (changed) save();
+}
+
 export function starsForGoal(goal: string): { manual: string[]; auto: string[] } {
   const manual = Object.entries(load())
-    .filter(([, v]) => !v.suppressed && v.goal === goal)
+    .filter(([, v]) => !v.suppressed && !v.deleted && v.goal === goal)
     .map(([k]) => k);
   const manualSet = new Set(Object.keys(load()));
   const auto = Object.entries(autoGoals)

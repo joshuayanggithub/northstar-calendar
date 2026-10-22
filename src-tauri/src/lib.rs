@@ -1,6 +1,8 @@
 mod classify;
+mod appmenu;
 mod goals;
 mod notify;
+mod winstate;
 pub(crate) mod state;
 #[cfg(debug_assertions)]
 mod testhook;
@@ -10,7 +12,6 @@ use state::{AppState, SyncKick};
 use sync_core::models::*;
 use sync_core::sync::generate_event_id;
 use sync_core::google::CalendarApi;
-use sync_core::TokenStore;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tracing::info;
 
@@ -113,6 +114,14 @@ pub struct EventInput {
     /// popup reminder minutes before start; null = calendar default, absent = unchanged
     #[serde(default, deserialize_with = "deserialize_reminder_minutes")]
     pub reminder_minutes: ReminderMinutes,
+    /// IANA zone a recurring series repeats in (a split's new half keeps its
+    /// series' zone); absent = this computer's
+    #[serde(default)]
+    pub time_zone: Option<String>,
+    /// an existing conference (Meet/Zoom link) to keep, e.g. on the new half
+    /// of a split series; with_meet asks for a fresh Meet instead
+    #[serde(default)]
+    pub conference_data: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -196,7 +205,10 @@ fn google_body(id: &str, input: &EventInput) -> serde_json::Value {
             // Google REQUIRES an explicit IANA timeZone on recurring events;
             // RFC3339 offsets alone are rejected with 400.
             if !input.all_day {
-                let tz = iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".into());
+                let tz = input
+                    .time_zone
+                    .clone()
+                    .unwrap_or_else(|| iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".into()));
                 body["start"]["timeZone"] = serde_json::json!(tz);
                 body["end"]["timeZone"] = serde_json::json!(tz);
             }
@@ -234,6 +246,12 @@ fn google_body(id: &str, input: &EventInput) -> serde_json::Value {
             }
         }
     }
+    if let Some(conference) = input.conference_data.as_ref().filter(|c| c.is_object()) {
+        let mut conference = conference.clone();
+        // a pending create request belongs to the original event
+        conference.as_object_mut().unwrap().remove("createRequest");
+        body["conferenceData"] = conference;
+    }
     if input.with_meet == Some(true) {
         body["conferenceData"] = serde_json::json!({
             "createRequest": {
@@ -252,15 +270,25 @@ struct CountSeriesSplit {
     selected_original_start: serde_json::Value,
 }
 
-pub(crate) fn do_create_event(
-    app: &AppHandle,
-    app_state: &AppState,
-    input: EventInput,
-) -> CmdResult<String> {
-    let id = generate_event_id();
-    let body = google_body(&id, &input);
-    let event = Event {
-        id: id.clone(),
+/// The keys the editor reads back from the Google resource (busy/free,
+/// visibility, reminders, guests), copied from a body we're about to send.
+fn editor_raw(body: &serde_json::Value) -> Option<serde_json::Value> {
+    let sent = body.as_object()?;
+    Some(serde_json::Value::Object(
+        ["transparency", "visibility", "reminders", "attendees"]
+            .iter()
+            .filter_map(|k| sent.get(*k).map(|v| (k.to_string(), v.clone())))
+            .collect(),
+    ))
+}
+
+/// The optimistic local row for an event we're about to insert. It carries
+/// the editor's keys too: with raw empty, reopening the event before its
+/// insert landed showed Busy / default reminder / no guests, and the next
+/// Save sent those back over what the insert carried (uninviting guests).
+fn created_row(id: &str, input: &EventInput, body: &serde_json::Value) -> Event {
+    Event {
+        id: id.to_string(),
         calendar_id: input.calendar_id.clone(),
         etag: None,
         summary: input.summary.clone(),
@@ -275,8 +303,18 @@ pub(crate) fn do_create_event(
         recurring_event_id: None,
         conference_url: None,
         updated: None,
-        raw: None,
-    };
+        raw: editor_raw(body),
+    }
+}
+
+pub(crate) fn do_create_event(
+    app: &AppHandle,
+    app_state: &AppState,
+    input: EventInput,
+) -> CmdResult<String> {
+    let id = generate_event_id();
+    let body = google_body(&id, &input);
+    let event = created_row(&id, &input, &body);
     app_state
         .db(|db| {
             db.upsert_event(&event)?;
@@ -355,6 +393,18 @@ pub(crate) fn do_update_event(
             ev.start = input.start.clone();
             ev.end = input.end.clone();
             ev.all_day = input.all_day;
+            // and the fields the editor reads back from the Google resource
+            // (busy/free, visibility, reminders, guests): until the push's
+            // response lands (offline: until reconnect) the reopened editor
+            // showed the old values, and a second Save sent them back
+            let raw = ev.raw.get_or_insert_with(|| serde_json::json!({}));
+            if let (Some(raw), Some(sent)) = (raw.as_object_mut(), body.as_object()) {
+                for key in ["transparency", "visibility", "reminders", "attendees"] {
+                    if let Some(v) = sent.get(key) {
+                        raw.insert(key.to_string(), v.clone());
+                    }
+                }
+            }
             db.upsert_event(&ev)?;
             db.enqueue_op(
                 &input.calendar_id,
@@ -447,6 +497,69 @@ fn set_event_note(
     do_set_event_note(&app, &app_state, calendar_id, event_id, note)
 }
 
+/// Your answer to an invitation: the attendee list with only your own
+/// responseStatus changed, as the PATCH body Google takes from a guest (the
+/// event's other fields are the organizer's), the list to store locally and
+/// your previous answer. None when you aren't on the guest list.
+fn rsvp_patch(raw: Option<&serde_json::Value>, status: &str) -> Option<(serde_json::Value, serde_json::Value, String)> {
+    let list = raw?.get("attendees")?.as_array()?;
+    let mine = list.iter().position(|a| a["self"].as_bool() == Some(true))?;
+    let previous = list[mine]["responseStatus"].as_str().unwrap_or("needsAction").to_string();
+    let mut stored = list.clone();
+    stored[mine]["responseStatus"] = serde_json::json!(status);
+    let body = serde_json::json!({ "attendees": stored.iter().map(writable_attendee).collect::<Vec<_>>() });
+    Some((body, serde_json::Value::Array(stored), previous))
+}
+
+/// Reply to an invitation (accepted / declined / tentative / needsAction).
+/// Read-modify-write on the stored guest list inside the db lock; only
+/// `attendees` is patched. Resolves to the answer it replaced, for undo.
+pub(crate) fn do_respond_event(
+    app: &AppHandle,
+    app_state: &AppState,
+    calendar_id: String,
+    event_id: String,
+    status: String,
+) -> CmdResult<String> {
+    if !["accepted", "declined", "tentative", "needsAction"].contains(&status.as_str()) {
+        return Err(format!("not an answer: {status}"));
+    }
+    let previous = app_state
+        .db(|db| {
+            let Some(mut ev) = db.get_event(&calendar_id, &event_id)? else {
+                return Err(sync_core::CoreError::Other("event not found".into()));
+            };
+            let Some((body, stored, previous)) = rsvp_patch(ev.raw.as_ref(), &status) else {
+                return Err(sync_core::CoreError::Other("you aren't a guest of this event".into()));
+            };
+            if previous == status {
+                return Ok(previous);
+            }
+            let base_etag = ev.etag.clone();
+            if let Some(raw) = ev.raw.as_mut().and_then(|r| r.as_object_mut()) {
+                raw.insert("attendees".into(), stored);
+            }
+            db.upsert_event(&ev)?;
+            db.enqueue_op(&calendar_id, &event_id, OpKind::Patch, Some(&body), base_etag.as_deref())?;
+            Ok(previous)
+        })
+        .map_err(err_str)?;
+    let _ = app.emit("db-changed", ());
+    app_state.kick_sync(SyncKick::Now);
+    Ok(previous)
+}
+
+#[tauri::command]
+fn respond_event(
+    app: AppHandle,
+    app_state: State<AppState>,
+    calendar_id: String,
+    event_id: String,
+    status: String,
+) -> CmdResult<String> {
+    do_respond_event(&app, &app_state, calendar_id, event_id, status)
+}
+
 pub(crate) fn do_delete_event(
     app: &AppHandle,
     app_state: &AppState,
@@ -503,13 +616,36 @@ pub(crate) fn do_restore_recurring_occurrence(
     app_state
         .db(|db| {
             db.upsert_event(&event)?;
-            db.enqueue_op(
-                &calendar_id,
-                &event_id,
-                OpKind::Patch,
-                Some(&serde_json::json!({ "status": status })),
-                None,
-            )?;
+            // the occurrence as it was, not just un-cancelled: Google keeps
+            // only the id and original start of a cancelled exception, so an
+            // occurrence edited on its own (title, time, note) came back with
+            // the series' values once the push's response landed
+            let when = |t: &str| {
+                if event.all_day {
+                    serde_json::json!({ "date": t })
+                } else {
+                    serde_json::json!({ "dateTime": t })
+                }
+            };
+            // (only for occurrences you organize: on someone else's
+            // invitation Google refuses edits, and would refuse the restore)
+            let yours = event
+                .raw
+                .as_ref()
+                .map_or(true, |r| r["organizer"].is_null() || r["organizer"]["self"].as_bool() == Some(true));
+            let body = if yours {
+                serde_json::json!({
+                    "status": status,
+                    "summary": event.summary,
+                    "description": event.description,
+                    "location": event.location,
+                    "start": when(&event.start),
+                    "end": when(&event.end),
+                })
+            } else {
+                serde_json::json!({ "status": status })
+            };
+            db.enqueue_op(&calendar_id, &event_id, OpKind::Patch, Some(&body), None)?;
             Ok(())
         })
         .map_err(err_str)?;
@@ -737,7 +873,32 @@ async fn split_series(
     recurrence: Vec<String>,
     input: EventInput,
     count_split: Option<CountSeriesSplit>,
+    first_note: Option<String>,
 ) -> CmdResult<String> {
+    // the edited occurrence's red-pen note stays on the new series' first
+    // occurrence (the series itself is sent without it: notes belong to one
+    // occurrence)
+    let first_note = first_note
+        .map(|n| n.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|n| !n.is_empty());
+    let with_note = |body: Option<&str>| -> Option<String> {
+        let body = body.unwrap_or("").trim_end();
+        match &first_note {
+            Some(n) if body.is_empty() => Some(format!("{} {n}", classify::DRILL_MARK)),
+            Some(n) => Some(format!("{body}\n\n{} {n}", classify::DRILL_MARK)),
+            None => (!body.is_empty()).then(|| body.to_string()),
+        }
+    };
+    let first_description = with_note(input.description.as_deref());
+    // Google's id for that occurrence: series id + its start (UTC basic
+    // format; the date for an all-day series)
+    let instance_suffix = if input.all_day {
+        Some(input.start.get(..10).unwrap_or(&input.start).replace('-', ""))
+    } else {
+        chrono::DateTime::parse_from_rfc3339(&input.start)
+            .ok()
+            .map(|t| t.with_timezone(&chrono::Utc).format("%Y%m%dT%H%M%SZ").to_string())
+    };
     off_main(app, move |app, st| {
         let patch = serde_json::json!({ "recurrence": recurrence });
         let _gate = st.sync_gate.lock().unwrap_or_else(|p| p.into_inner());
@@ -751,7 +912,7 @@ async fn split_series(
             calendar_id: target.clone(),
             etag: None,
             summary: input.summary.clone(),
-            description: input.description.clone(),
+            description: if first_note.is_some() { first_description.clone() } else { input.description.clone() },
             location: input.location.clone(),
             start: input.start.clone(),
             end: input.end.clone(),
@@ -762,7 +923,7 @@ async fn split_series(
             recurring_event_id: None,
             conference_url: None,
             updated: None,
-            raw: None,
+            raw: editor_raw(&google_body(&id, &input)),
         };
         st.db(|db| {
             db.in_transaction(|| {
@@ -789,10 +950,32 @@ async fn split_series(
                     &instances,
                 )
                 .map_err(err_str)?;
-                input.recurrence = Some(vec![rule]);
+                // keep the new half's EXDATE/RDATE lines; only the RRULE is recounted
+                let extras = input
+                    .recurrence
+                    .iter()
+                    .flatten()
+                    .filter(|line| !line.starts_with("RRULE"))
+                    .cloned();
+                input.recurrence = Some(std::iter::once(rule).chain(extras).collect());
             }
             let body = google_body(&id, &input);
-            client.patch_event(&calendar_id, &master_id, &patch, None).map_err(err_str)?;
+            if let Err(e) = client.patch_event(&calendar_id, &master_id, &patch, None) {
+                // a refusal is final; a timeout or 5xx may have landed
+                // (rolling back then left the old series truncated on
+                // Google and the new one never queued: the occurrences after
+                // the split were gone). Google's copy says which.
+                let refused = matches!(e, sync_core::CoreError::Api { status: 400..=499, .. });
+                let landed = !refused
+                    && client
+                        .get_event(&calendar_id, &master_id)
+                        .is_ok_and(|m| m["recurrence"] == patch["recurrence"]);
+                if landed {
+                    tracing::warn!("series truncate of {master_id} landed despite: {e}");
+                } else {
+                    return Err(err_str(e));
+                }
+            }
             Ok(body)
         });
         let body = match body {
@@ -818,8 +1001,22 @@ async fn split_series(
                 return Err(error);
             }
         };
-        st.db(|db| db.enqueue_op(&target, &id, OpKind::Insert, Some(&body), None))
-            .map_err(err_str)?;
+        st.db(|db| {
+            db.enqueue_op(&target, &id, OpKind::Insert, Some(&body), None)?;
+            // after the insert (the queue is FIFO): the note onto the first
+            // occurrence, which the pull then brings in with it
+            if let (Some(_), Some(suffix)) = (&first_note, &instance_suffix) {
+                db.enqueue_op(
+                    &target,
+                    &format!("{id}_{suffix}"),
+                    OpKind::Patch,
+                    Some(&serde_json::json!({ "description": first_description })),
+                    None,
+                )?;
+            }
+            Ok(())
+        })
+        .map_err(err_str)?;
         let _ = app.emit("db-changed", ());
         st.kick_sync(SyncKick::Calendars(if target == calendar_id { vec![target] } else { vec![calendar_id, target] }));
         Ok(id)
@@ -858,6 +1055,46 @@ fn log_frontend(level: String, message: String) {
     }
 }
 
+/// Settings > Appearance: "light", "dark", or anything else to follow the
+/// system. Sets the window's appearance, which the webview's
+/// prefers-color-scheme (every color token) follows.
+#[tauri::command]
+fn set_app_theme(app: AppHandle, theme: Option<String>) {
+    let t = match theme.as_deref() {
+        Some("light") => Some(tauri::Theme::Light),
+        Some("dark") => Some(tauri::Theme::Dark),
+        _ => None,
+    };
+    for w in app.webview_windows().values() {
+        let _ = w.set_theme(t);
+    }
+}
+
+/// Events canceled in the window: no alert, not in the menu bar.
+#[tauri::command]
+fn set_canceled_events(pairs: Vec<(String, String)>) {
+    notify::set_canceled(pairs);
+}
+
+/// Settings > Notifications.
+#[tauri::command]
+fn get_notify_prefs() -> notify::NotifyPrefs {
+    notify::prefs()
+}
+
+#[tauri::command]
+fn set_notify_prefs(prefs: notify::NotifyPrefs) -> CmdResult<()> {
+    notify::save_prefs(prefs)
+}
+
+/// Settings > About: show the app's data folder in Finder.
+#[tauri::command]
+fn reveal_data_dir(app: AppHandle, app_state: State<AppState>) -> CmdResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+    let dir = app_state.db_path.parent().map(|p| p.to_path_buf()).ok_or("no data folder")?;
+    app.opener().reveal_item_in_dir(&dir).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     {
@@ -875,12 +1112,47 @@ pub fn run() {
             if let tauri::WindowEvent::Focused(true) = event {
                 notify::answer_nudge(window.app_handle());
             }
+            // every move and resize is noted; closing the window saves (⌘Q
+            // saves on exit)
+            match event {
+                tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => winstate::note(window),
+                tauri::WindowEvent::CloseRequested { .. } => winstate::save(window.app_handle()),
+                _ => {}
+            }
         })
         .setup(|app| {
+            // the window is built where it was quit (monitor, position,
+            // size), or 800×600 centred the first time: built at the
+            // default spot and moved after, it flashed on the main screen
+            // (built invisible and shown from a main-thread task queued after
+            // the position: tao moves a window asynchronously but shows it
+            // synchronously, so even a window built with a position showed
+            // at the default spot for a frame, then jumped)
+            let mut window = tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
+                .title("North Star")
+                .visible(false);
+            window = match winstate::saved_frame(app.handle()) {
+                Some(s) => window.inner_size(s.w, s.h).position(s.x, s.y),
+                None => window.inner_size(800.0, 600.0).center(),
+            };
+            let window = window.build()?;
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                let _ = handle.run_on_main_thread(move || {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                });
+            });
             let state = AppState::init(app.handle().clone())?;
             let db_path = state.db_path.clone();
             app.manage(state);
             notify::setup_tray(app.handle())?;
+            app.set_menu(appmenu::build(app.handle())?)?;
+            app.on_menu_event(|app, event| appmenu::on_event(app, event.id().as_ref()));
+            if let Some(dir) = db_path.parent() {
+                notify::load_prefs(dir);
+            }
             notify::spawn_scheduler(app.handle().clone(), db_path);
             notify::register_global_shortcut(app.handle());
             #[cfg(debug_assertions)]
@@ -899,6 +1171,7 @@ pub fn run() {
             create_event,
             update_event,
             set_event_note,
+            respond_event,
             delete_event,
             restore_recurring_occurrence,
             add_calendar,
@@ -911,13 +1184,24 @@ pub fn run() {
             goals_write,
             classify::get_goal_classifications,
             log_frontend,
+            set_app_theme,
+            get_notify_prefs,
+            set_canceled_events,
+            set_notify_prefs,
+            reveal_data_dir,
             test_report,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            // (⌘Q on macOS terminates natively: that's Exit, with no
+            // ExitRequested before it; app.exit() sends both)
+            if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
+                winstate::save(app);
+            }
             // macOS: clicking the nudge (or the Dock icon) reopens the app;
             // bring the window back even if it was closed or minimized
+            #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.unminimize();
@@ -926,6 +1210,8 @@ pub fn run() {
                 }
                 notify::answer_nudge(app);
             }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, event);
         });
 }
 
@@ -990,6 +1276,44 @@ mod series_tests {
     }
 
     #[test]
+    fn a_created_event_reads_back_its_own_settings_before_the_insert_lands() {
+        let mut input = event_input(Some(json!(30)));
+        input.transparency = Some("transparent".into());
+        input.visibility = Some("private".into());
+        input.attendees = Some(vec!["a@example.invalid".into(), "b@example.invalid".into()]);
+        let body = google_body("id1", &input);
+        let raw = created_row("id1", &input, &body).raw.expect("the editor reads these from raw");
+        assert_eq!(raw["transparency"], "transparent");
+        assert_eq!(raw["visibility"], "private");
+        assert_eq!(raw["reminders"]["overrides"][0]["minutes"], 30);
+        assert_eq!(raw["attendees"].as_array().unwrap().len(), 2);
+        assert!(raw.get("summary").is_none(), "only the editor's keys");
+    }
+
+    #[test]
+    fn an_existing_conference_is_carried_into_the_body() {
+        let mut input = event_input(None);
+        input.conference_data = Some(json!({
+            "conferenceId": "abc-defg-hij",
+            "conferenceSolution": { "key": { "type": "hangoutsMeet" } },
+            "entryPoints": [{ "entryPointType": "video", "uri": "https://meet.google.com/abc-defg-hij" }],
+        }));
+        let body = google_body("id1", &input);
+        assert_eq!(body["conferenceData"]["conferenceId"], "abc-defg-hij");
+        assert_eq!(body["conferenceData"]["entryPoints"][0]["uri"], "https://meet.google.com/abc-defg-hij");
+    }
+
+    #[test]
+    fn a_recurring_insert_repeats_in_the_series_zone_when_given() {
+        let mut input = event_input(None);
+        input.recurrence = Some(vec!["RRULE:FREQ=WEEKLY".into()]);
+        input.time_zone = Some("Europe/London".into());
+        let body = google_body("id1", &input);
+        assert_eq!(body["start"]["timeZone"], "Europe/London");
+        assert_eq!(body["end"]["timeZone"], "Europe/London");
+    }
+
+    #[test]
     fn omitted_reminders_are_unchanged_but_null_resets_to_calendar_default() {
         let omitted = event_input(None);
         assert_eq!(omitted.reminder_minutes, ReminderMinutes::Unchanged);
@@ -1000,6 +1324,21 @@ mod series_tests {
         assert_eq!(reset.reminder_minutes, ReminderMinutes::CalendarDefault);
         assert_eq!(body["reminders"], json!({ "useDefault": true }));
         assert_eq!(body["visibility"], "default");
+
+        let raw = json!({ "attendees": [
+            { "email": "organizer@example.invalid", "organizer": true, "responseStatus": "accepted" },
+            { "email": "me@example.invalid", "self": true, "responseStatus": "needsAction", "displayName": "Me" },
+            { "email": "room@example.invalid", "resource": true, "responseStatus": "accepted" },
+        ] });
+        let (body, stored, previous) = rsvp_patch(Some(&raw), "declined").unwrap();
+        assert_eq!(previous, "needsAction");
+        assert_eq!(stored[1]["responseStatus"], "declined");
+        assert_eq!(stored[1]["self"], true, "the stored copy keeps Google's read-only fields");
+        assert_eq!(body.as_object().unwrap().keys().collect::<Vec<_>>(), vec!["attendees"], "a guest patches only the guest list");
+        assert_eq!(body["attendees"][0]["responseStatus"], "accepted", "others' answers untouched");
+        assert_eq!(body["attendees"][1]["responseStatus"], "declined");
+        assert!(body["attendees"][1].get("self").is_none());
+        assert!(rsvp_patch(Some(&json!({ "attendees": [{ "email": "a@example.invalid" }] })), "accepted").is_none());
 
         let mut clear_attendees = event_input(None);
         clear_attendees.attendee_details = Some(vec![]);

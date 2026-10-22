@@ -19,6 +19,77 @@ use tracing::{info, warn};
 const POLL: Duration = Duration::from_secs(20);
 const NOTIFY_LEAD_SECS: i64 = 60;
 
+/// Settings > Notifications, kept in the data folder (notify-settings.json)
+/// so this thread reads them without the window.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct NotifyPrefs {
+    /// a banner before each event starts
+    pub event_alerts: bool,
+    /// how long before (minutes; 0 = when it starts)
+    pub alert_lead_min: i64,
+    /// the hourly "what are you doing?" nudge in waking hours
+    pub hourly_nudge: bool,
+    /// the next event's title and countdown beside the menu bar icon
+    pub menubar_title: bool,
+}
+
+impl Default for NotifyPrefs {
+    fn default() -> Self {
+        NotifyPrefs { event_alerts: true, alert_lead_min: 1, hourly_nudge: true, menubar_title: true }
+    }
+}
+
+/// Events canceled in the app (kept on the calendar, struck through): id ->
+/// the "startMs|endMs" they were canceled at. No alert, not in the menu bar,
+/// while the event keeps those times. The window sends them (they live in
+/// its storage with the other review marks).
+pub static CANCELED: std::sync::Mutex<Option<std::collections::HashMap<String, String>>> = std::sync::Mutex::new(None);
+
+fn is_canceled(e: &Event) -> bool {
+    CANCELED
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|m| m.get(&e.id))
+        .is_some_and(|sig| match (parse_start(e), parse_end(e)) {
+            (Some(s), Some(en)) => *sig == format!("{}|{}", s.timestamp_millis(), en.timestamp_millis()),
+            _ => false,
+        })
+}
+
+pub fn set_canceled(pairs: Vec<(String, String)>) {
+    *CANCELED.lock().unwrap() = Some(pairs.into_iter().collect());
+}
+
+pub static NOTIFY_PREFS: std::sync::Mutex<Option<(PathBuf, NotifyPrefs)>> = std::sync::Mutex::new(None);
+
+fn prefs_file(dir: &std::path::Path) -> PathBuf {
+    dir.join("notify-settings.json")
+}
+
+pub fn load_prefs(dir: &std::path::Path) {
+    let p = std::fs::read_to_string(prefs_file(dir))
+        .ok()
+        .and_then(|s| serde_json::from_str::<NotifyPrefs>(&s).ok())
+        .unwrap_or_default();
+    *NOTIFY_PREFS.lock().unwrap() = Some((dir.to_path_buf(), p));
+}
+
+pub fn prefs() -> NotifyPrefs {
+    NOTIFY_PREFS.lock().unwrap().as_ref().map(|(_, p)| *p).unwrap_or_default()
+}
+
+pub fn save_prefs(p: NotifyPrefs) -> Result<(), String> {
+    let mut g = NOTIFY_PREFS.lock().unwrap();
+    let dir = g.as_ref().map(|(d, _)| d.clone()).ok_or("settings not loaded")?;
+    let p = NotifyPrefs { alert_lead_min: p.alert_lead_min.clamp(0, 60), ..p };
+    std::fs::write(prefs_file(&dir), serde_json::to_string_pretty(&p).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    *g = Some((dir, p));
+    Ok(())
+}
+
 // ---- the hourly nudge: "what are you actually doing?" ----
 // Once an hour, from 8:00 through 23:59, the app asks you to bring the
 // calendar up to date with what you're really doing. It replaces the
@@ -48,7 +119,19 @@ pub fn nudge_due(now: DateTime<Local>, last_hour: &str) -> bool {
 pub fn send_nudge(app: &AppHandle, now: DateTime<Local>) {
     info!("nudging");
     let _ = app.notification().builder().title("North Star").body(nudge_text(now)).show();
-    *NUDGED_AT.lock().unwrap() = Some(std::time::Instant::now());
+    // Already in the app: its next focus (back from another app) isn't an
+    // answer, and yanking the view to now then would be in the way.
+    let in_app = app
+        .get_webview_window("main")
+        .and_then(|w| w.is_focused().ok())
+        .unwrap_or(false);
+    *NUDGED_AT.lock().unwrap() = if in_app { None } else { Some(std::time::Instant::now()) };
+}
+
+/// The app is being brought forward for something else (an event picked
+/// in the menu bar, ⌥C quick create): not the nudge's answer.
+pub fn forget_nudge() {
+    *NUDGED_AT.lock().unwrap() = None;
 }
 
 /// The app came to the front (a window took focus, or it was reopened). If
@@ -171,23 +254,66 @@ fn without_copied_originals(db: &Db, events: Vec<Event>) -> Vec<Event> {
     if read_only.is_empty() {
         return events;
     }
+    // (a copy on a hidden calendar doesn't count: the grid shows the original
+    // then, so it must be reminded of)
+    let hidden = hidden_calendars(db);
     let sig = |e: &Event| (parse_start(e), parse_end(e), e.summary.trim().to_string());
-    let yours: HashSet<_> = events.iter().filter(|e| !read_only.contains(&e.calendar_id)).map(sig).collect();
+    let yours: HashSet<_> = events
+        .iter()
+        .filter(|e| !read_only.contains(&e.calendar_id) && !hidden.contains(&e.calendar_id))
+        .map(sig)
+        .collect();
     events
         .into_iter()
         .filter(|e| !read_only.contains(&e.calendar_id) || !yours.contains(&sig(e)))
         .collect()
 }
 
+/** calendars hidden in the app */
+fn hidden_calendars(db: &Db) -> HashSet<String> {
+    db.list_calendars().unwrap_or_default().into_iter().filter(|c| c.hidden).map(|c| c.id).collect()
+}
+
+/// a calendar named Sleep is sleep tracking, as Insights reads it: nothing
+/// on it is reminded of or listed
+fn sleep_calendars(db: &Db) -> HashSet<String> {
+    db.list_calendars()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|c| c.summary.trim().eq_ignore_ascii_case("sleep"))
+        .map(|c| c.id)
+        .collect()
+}
+
+/** an invitation you declined */
+fn declined(e: &Event) -> bool {
+    e.raw
+        .as_ref()
+        .and_then(|r| r["attendees"].as_array())
+        .is_some_and(|a| a.iter().any(|x| x["self"].as_bool() == Some(true) && x["responseStatus"] == "declined"))
+}
+
+/** stored events overlapping [from, to]. The store compares the RFC 3339
+ *  strings as text, and an event stored in a zone west of this one (a
+ *  Pacific calendar seen from New York) sorts outside an exact window: pad
+ *  it, and let the callers filter on the parsed instants. */
+fn events_near(db: &Db, from: DateTime<Local>, to: DateTime<Local>) -> Vec<Event> {
+    let pad = chrono::Duration::days(1);
+    db.list_events_between(&(from - pad).to_rfc3339(), &(to + pad).to_rfc3339()).unwrap_or_default()
+}
+
 fn upcoming(db: &Db, horizon_hours: i64) -> Vec<Event> {
     let now = Local::now();
     let end = now + chrono::Duration::hours(horizon_hours);
-    let found = db.list_events_between(&now.to_rfc3339(), &end.to_rfc3339()).unwrap_or_default();
+    let hidden = hidden_calendars(db);
+    let sleep = sleep_calendars(db);
+    let found = events_near(db, now, end);
+    // not reminded of: hidden calendars, sleep, invitations you declined
     let mut events = without_copied_originals(db, found)
         .into_iter()
-        .filter(|e| !e.all_day)
+        .filter(|e| !e.all_day && !hidden.contains(&e.calendar_id) && !sleep.contains(&e.calendar_id) && !is_sleep(e) && !declined(e) && !is_canceled(e))
         .filter_map(|e| parse_start(&e).map(|s| (s, e)))
-        .filter(|(s, _)| *s > now - chrono::Duration::minutes(1))
+        .filter(|(s, _)| *s > now - chrono::Duration::minutes(1) && *s < end)
         .collect::<Vec<_>>();
     events.sort_by_key(|(s, _)| *s);
     events.into_iter().map(|(_, e)| e).collect()
@@ -198,23 +324,31 @@ fn upcoming(db: &Db, horizon_hours: i64) -> Vec<Event> {
 fn tray_events(db: &Db) -> Vec<(DateTime<Local>, DateTime<Local>, String, String, Option<String>)> {
     let now = Local::now();
     let end = now + chrono::Duration::hours(LIST_HOURS);
-    let hidden: HashSet<String> = db
-        .list_calendars()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|c| c.hidden)
-        .map(|c| c.id)
-        .collect();
-    let found = db.list_events_between(&now.to_rfc3339(), &end.to_rfc3339()).unwrap_or_default();
+    let hidden = hidden_calendars(db);
+    let sleep = sleep_calendars(db);
+    let found = events_near(db, now, end);
     without_copied_originals(db, found)
         .into_iter()
-        .filter(|e| !e.all_day && !hidden.contains(&e.calendar_id) && !is_sleep(e))
+        .filter(|e| !e.all_day && !hidden.contains(&e.calendar_id) && !sleep.contains(&e.calendar_id) && !is_sleep(e) && !declined(e) && !is_canceled(e))
         .filter_map(|e| {
             let (s, en) = (parse_start(&e)?, parse_end(&e)?);
             Some((s, en, e.summary.clone(), format!("{}/{}", e.calendar_id, e.id), e.conference_url.clone()))
         })
-        .filter(|(_, en, _, _, _)| *en > now)
-        .collect()
+        .filter(|(s, en, _, _, _)| *en > now && *s < end)
+        // by the instant: the store's order is by text, and an event stored
+        // in a western zone sorts early ("Join next meeting" took it)
+        .sorted_by_start()
+}
+
+trait SortedByStart {
+    fn sorted_by_start(self) -> Vec<(DateTime<Local>, DateTime<Local>, String, String, Option<String>)>;
+}
+impl<I: Iterator<Item = (DateTime<Local>, DateTime<Local>, String, String, Option<String>)>> SortedByStart for I {
+    fn sorted_by_start(self) -> Vec<(DateTime<Local>, DateTime<Local>, String, String, Option<String>)> {
+        let mut v: Vec<_> = self.collect();
+        v.sort_by_key(|t| t.0);
+        v
+    }
 }
 
 pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
@@ -249,6 +383,7 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             }
             id if id.starts_with("ev:") => {
                 // open the app on that event
+                forget_nudge();
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.show();
                     let _ = w.set_focus();
@@ -272,25 +407,28 @@ pub fn spawn_scheduler(app: AppHandle, db_path: PathBuf) {
                     return;
                 }
             };
-            let mut notified: HashSet<String> = HashSet::new();
+            // reminded: key -> its start (pruned once past; a clear() past
+            // 256 entries re-sent the reminders still within their minute)
+            let mut notified: std::collections::HashMap<String, DateTime<Local>> = Default::default();
             let mut last_tray_label = String::new();
             // the hour the last nudge went out in; launch counts as one
             let mut nudged_hour = Local::now().format("%Y-%m-%d %H").to_string();
             loop {
                 let now = Local::now();
-                if nudge_due(now, &nudged_hour) {
+                let np = prefs();
+                if np.hourly_nudge && nudge_due(now, &nudged_hour) {
                     send_nudge(&app, now);
                 }
                 nudged_hour = now.format("%Y-%m-%d %H").to_string();
                 let soon = upcoming(&db, 24);
 
-                // notifications at T-1min
-                for e in &soon {
+                // notifications at the chosen lead (a minute's window, as polled)
+                for e in soon.iter().filter(|_| np.event_alerts) {
                     let Some(start) = parse_start(e) else { continue };
                     let secs = (start - now).num_seconds();
                     let key = format!("{}/{}/{}", e.calendar_id, e.id, e.start);
-                    if (0..=NOTIFY_LEAD_SECS).contains(&secs) && !notified.contains(&key) {
-                        notified.insert(key);
+                    if alert_due(np.alert_lead_min, secs) && !notified.contains_key(&key) {
+                        notified.insert(key, start);
                         let when = start.format("%-I:%M %p");
                         let body = match &e.conference_url {
                             Some(u) => format!("{when} · click tray to join\n{u}"),
@@ -305,14 +443,12 @@ pub fn spawn_scheduler(app: AppHandle, db_path: PathBuf) {
                             .show();
                     }
                 }
-                if notified.len() > 256 {
-                    notified.clear();
-                }
+                notified.retain(|_, start| *start > now - chrono::Duration::minutes(2));
 
                 // menu bar: next event + how soon; dropdown: the next 12 hours
                 let evs = tray_events(&db);
                 let spans: Vec<_> = evs.iter().map(|(s, e, t, _, _)| (*s, *e, t.clone())).collect();
-                let title = bar_title(now, &spans);
+                let title = if np.menubar_title { bar_title(now, &spans) } else { None };
                 let rows = list_rows(
                     now,
                     &evs.iter().map(|(s, e, t, k, _)| (*s, *e, t.clone(), k.clone())).collect::<Vec<_>>(),
@@ -374,6 +510,7 @@ pub fn register_global_shortcut(app: &AppHandle) {
     let handle = app.clone();
     let result = app.global_shortcut().on_shortcut(shortcut, move |_app, _sc, event| {
         if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+            forget_nudge();
             if let Some(w) = handle.get_webview_window("main") {
                 let _ = w.show();
                 let _ = w.set_focus();
@@ -394,13 +531,113 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
+/// An event `secs` away is due its alert at a lead of `lead_min` minutes:
+/// on the first poll at or after the lead (a minute's window). "When it
+/// starts" used to share 1 minute's window and so went off up to a minute
+/// early; `upcoming` keeps a just-started event for that minute.
+fn alert_due(lead_min: i64, secs: i64) -> bool {
+    let lead = lead_min * 60;
+    lead - NOTIFY_LEAD_SECS < secs && secs <= lead
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
 
+    fn sleep_cal_event(id: &str, cal: &str, title: &str, start: DateTime<Local>, mins: i64) -> Event {
+        Event {
+            id: id.into(), calendar_id: cal.into(), etag: None, summary: title.into(), description: None, location: None,
+            start: start.to_rfc3339(), end: (start + chrono::Duration::minutes(mins)).to_rfc3339(),
+            all_day: false, timezone: None, status: "confirmed".into(), recurrence: None, recurring_event_id: None,
+            conference_url: None, updated: None, raw: None,
+        }
+    }
+
+    /// Settings > Insights: "Sleep is a calendar named Sleep, or events
+    /// titled Sleep, Asleep or In bed" (insights.ts classify). The reminders
+    /// and the menu bar only look at the title.
+    #[test]
+    fn sleep_cal_events_on_the_sleep_calendar_are_not_reminded() {
+        let db = Db::open_in_memory().unwrap();
+        let cal = |id: &str, name: &str| sync_core::models::Calendar {
+            id: id.into(), summary: name.into(), color: None, is_primary: id == "me", hidden: false, access_role: "owner".into(),
+        };
+        db.upsert_calendar(&cal("me", "Personal")).unwrap();
+        db.upsert_calendar(&cal("zz", "Sleep")).unwrap();
+        let soon = Local::now() + chrono::Duration::minutes(30);
+        db.upsert_event(&sleep_cal_event("ok", "me", "Standup", soon, 30)).unwrap();
+        db.upsert_event(&sleep_cal_event("night", "zz", "Lights out", soon, 480)).unwrap();
+        let ids: Vec<String> = upcoming(&db, 24).into_iter().map(|e| e.id).collect();
+        let tray: Vec<String> = tray_events(&db).into_iter().map(|(_, _, _, k, _)| k).collect();
+        assert_eq!(ids, vec!["ok".to_string()], "reminded of an event on the Sleep calendar");
+        assert_eq!(tray, vec!["me/ok".to_string()], "the menu bar lists an event on the Sleep calendar");
+    }
+
+
+    /// a copy on a hidden calendar must not silence its original: the grid
+    /// still shows the original (src/lib/copies.ts brings it back)
+    #[test]
+    fn a_copy_on_a_hidden_calendar_leaves_the_original_reminded() {
+        let db = Db::open_in_memory().unwrap();
+        let cal = |id: &str, role: &str| sync_core::models::Calendar {
+            id: id.into(), summary: id.into(), color: None, is_primary: id == "me", hidden: false, access_role: role.into(),
+        };
+        db.upsert_calendar(&cal("me", "owner")).unwrap();
+        db.upsert_calendar(&cal("h", "owner")).unwrap();
+        db.set_calendar_hidden("h", true).unwrap();
+        db.upsert_calendar(&cal("school", "reader")).unwrap();
+        let soon = Local::now() + chrono::Duration::minutes(30);
+        let mk = |id: &str, cal: &str| Event {
+            id: id.into(), calendar_id: cal.into(), etag: None, summary: "Lecture".into(), description: None, location: None,
+            start: soon.to_rfc3339(), end: (soon + chrono::Duration::hours(1)).to_rfc3339(),
+            all_day: false, timezone: None, status: "confirmed".into(), recurrence: None, recurring_event_id: None,
+            conference_url: None, updated: None, raw: None,
+        };
+        db.upsert_event(&mk("lec", "school")).unwrap();
+        db.upsert_event(&mk("copy", "h")).unwrap();
+        let ids: Vec<String> = upcoming(&db, 24).into_iter().map(|e| e.id).collect();
+        let tray: Vec<String> = tray_events(&db).into_iter().map(|(_, _, _, k, _)| k).collect();
+        assert_eq!(ids, vec!["lec".to_string()]);
+        assert_eq!(tray, vec!["school/lec".to_string()]);
+    }
+
+    #[test]
+    fn when_it_starts_alerts_at_the_start_not_a_minute_early() {
+        assert!(!alert_due(0, 50), "'When it starts' fired 50s early");
+        assert!(alert_due(0, 0));
+        assert!(alert_due(1, 50));
+        // every lead fires once whatever the 20s poll's phase
+        for lead in [0, 1, 5, 15] {
+            for phase in 0..20 {
+                assert!(
+                    (-120..=1000).any(|s: i64| (s - phase).rem_euclid(20) == 0 && alert_due(lead, s)),
+                    "lead {lead} missed at phase {phase}"
+                );
+            }
+        }
+    }
+
     fn at(h: u32, m: u32) -> DateTime<Local> {
         Local.with_ymd_and_hms(2026, 10, 16, h, m, 0).unwrap()
+    }
+
+    #[test]
+    fn a_canceled_event_is_skipped_until_its_times_change() {
+        let mut e = Event {
+            id: "x".into(), calendar_id: "c".into(), etag: None, summary: "Standup".into(),
+            description: None, location: None, start: "2026-10-16T10:00:00-04:00".into(),
+            end: "2026-10-16T10:30:00-04:00".into(), all_day: false, timezone: None,
+            status: "confirmed".into(), recurrence: None, recurring_event_id: None,
+            conference_url: None, updated: None, raw: None,
+        };
+        let ms = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis();
+        set_canceled(vec![("x".into(), format!("{}|{}", ms(&e.start), ms(&e.end)))]);
+        assert!(is_canceled(&e));
+        // rescheduled: on again (alerted as usual)
+        e.start = "2026-10-16T11:00:00-04:00".into();
+        assert!(!is_canceled(&e));
+        set_canceled(vec![]);
     }
 
     #[test]
@@ -476,6 +713,50 @@ mod tests {
         );
         let ids: Vec<&str> = got.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids, vec!["copy", "talk"]);
+    }
+
+    /// who gets a T-1 minute reminder: not hidden calendars, sleep, or
+    /// declined invitations; and an event stored in a zone west of this one
+    /// is found (the store compares times as text)
+    #[test]
+    fn reminders_skip_hidden_sleep_declined_and_find_western_zones() {
+        use chrono::FixedOffset;
+        let db = Db::open_in_memory().unwrap();
+        let cal = |id: &str, hidden: bool| sync_core::models::Calendar {
+            id: id.into(), summary: id.into(), color: None, is_primary: id == "me", hidden, access_role: "owner".into(),
+        };
+        db.upsert_calendar(&cal("me", false)).unwrap();
+        db.upsert_calendar(&cal("h", true)).unwrap();
+        db.set_calendar_hidden("h", true).unwrap();
+        let soon = Local::now() + chrono::Duration::minutes(30);
+        let mk = |id: &str, cal: &str, title: &str, start: String, raw: Option<serde_json::Value>| Event {
+            id: id.into(), calendar_id: cal.into(), etag: None, summary: title.into(), description: None, location: None,
+            start: start.clone(), end: (chrono::DateTime::parse_from_rfc3339(&start).unwrap() + chrono::Duration::hours(1)).to_rfc3339(),
+            all_day: false, timezone: None, status: "confirmed".into(), recurrence: None, recurring_event_id: None,
+            conference_url: None, updated: None, raw,
+        };
+        let west = FixedOffset::east_opt(soon.offset().local_minus_utc() - 3 * 3600).unwrap();
+        for e in [
+            mk("ok", "me", "Standup", soon.to_rfc3339(), None),
+            mk("west", "me", "Pacific sync", soon.with_timezone(&west).to_rfc3339(), None),
+            mk("hid", "h", "Coworker thing", soon.to_rfc3339(), None),
+            mk("sleep", "me", "Sleep", soon.to_rfc3339(), None),
+            mk("no", "me", "Invite", soon.to_rfc3339(),
+                Some(serde_json::json!({"attendees": [{"email": "me@x.com", "self": true, "responseStatus": "declined"}]}))),
+        ] {
+            db.upsert_event(&e).unwrap();
+        }
+        let mut ids: Vec<String> = upcoming(&db, 24).into_iter().map(|e| e.id).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["ok".to_string(), "west".to_string()]);
+        let mut tray: Vec<String> = tray_events(&db).into_iter().map(|(_, _, _, k, _)| k).collect();
+        tray.sort();
+        assert_eq!(tray, vec!["me/ok".to_string(), "me/west".to_string()]);
+        // in start order whatever zone they're stored in (the west one an
+        // hour later, though its text sorts first)
+        db.upsert_event(&mk("west", "me", "Pacific sync", (soon + chrono::Duration::hours(1)).with_timezone(&west).to_rfc3339(), None)).unwrap();
+        let order: Vec<String> = tray_events(&db).into_iter().map(|(_, _, _, k, _)| k).collect();
+        assert_eq!(order, vec!["me/ok".to_string(), "me/west".to_string()]);
     }
 
     #[test]

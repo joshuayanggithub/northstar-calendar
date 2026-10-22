@@ -13,22 +13,26 @@ import {
   type Rect,
 } from "../src/lib/marginNotes";
 
-test("drill text: stage directions and the repeated title are dropped, the note kept", () => {
+// The notes are your own now (the drill-sergeant model and its notes are
+// gone): they read exactly as written, whitespace collapsed. The model-era
+// cleanup cut a note that began with the title ("Gymnastics…" under "Gym").
+test("drill text: your note reads as you wrote it", () => {
   const cases: [string, string, string | null][] = [
-    ["Read Chapter 4", "**[Red Marker Scribble in Margin Next to  Read Chapter 4 ]**  You *will* understand it. Now *earn* that knowledge. 0500 sharp.", "You *will* understand it. Now *earn* that knowledge. 0500 sharp."],
-    ["Read the style guide", "**Calendar Entry: Read the style guide**  *You. Read. Absorb. Now. No excuses. 0500 lights out. Execute.*", "You. Read. Absorb. Now. No excuses. 0500 lights out. Execute."],
-    ["listen to a podcast on habits", "**(Red marker scrawls in the margin next to  listen to podcast on habits )**  You *own* that knowledge, soldier. Now *earn* it.", "You *own* that knowledge, soldier. Now *earn* it."],
-    ["Finish Chapter Notes", "Finish Chapter Notes: *Finally! Now push harder, you’ve got a mountain to climb.*", "Finally! Now push harder, you’ve got a mountain to climb."],
-    ["Stats Notes — Lecture 12", "**[Red Marker Scribble in Margin]**  You. Regression. *Dominate* it. Then *move*. 7 hours sleep. No less.", "You. Regression. *Dominate* it. Then *move*. 7 hours sleep. No less."],
-    ["In bed – after waking", "In bed – after waking   You are *weak* allowing that. Discipline your time, you'll conquer.", "You are *weak* allowing that. Discipline your time, you'll conquer."],
-    ["Thesis defense: a friend", "**Calendar Event:  Thesis defense: a friend **  *You WILL OWN that defense. Now, 7 hours sleep. No less.*", "You WILL OWN that defense. Now, 7 hours sleep. No less."],
-    ["Review — Lecture 12: Markov chains and stationary distributions", "**Calendar Entry:  Review — Lecture 12: Markov chains and stationary distributions", null],
-    // the person's own words are left alone
-    ["Asleep (8.0h)", "slept late again", "slept late again"],
-    ["Read an essay", "good work", "good work"],
-    ["Distraction: Streams", "Streams? You're chasing dreams, not dopamine. 0230 lights out. Now *earn* it.", "Streams? You're chasing dreams, not dopamine. 0230 lights out. Now *earn* it."],
+    ["Gym", "Gymnastics class next door was loud", "Gymnastics class next door was loud"],
+    ["Asleep (8.0h)", "slept   late\n again", "slept late again"],
+    ["Read an essay", "*good* work", "*good* work"],
+    ["Read", "...", "..."],
+    ["Read", "   ", null],
+    // (the old model's stage directions still come off)
+    ["Read Chapter 4", "**[Red Marker Scribble in Margin Next to  Read Chapter 4 ]**  You *will* understand it.", "You *will* understand it."],
   ];
   for (const [title, raw, want] of cases) expect(cleanDrill(raw, title), title).toBe(want);
+});
+
+test("drill text: a lone * is text, not the start of an underline", () => {
+  const w = noteWords("5 * 3 sets felt heavy");
+  expect(w.map((x) => x.t).join(" ")).toBe("5 * 3 sets felt heavy");
+  expect(w.filter((x) => x.em)).toHaveLength(0);
 });
 
 // ---------------------------------------------------------------- placement

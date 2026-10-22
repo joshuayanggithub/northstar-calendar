@@ -46,7 +46,8 @@ BADTEXT=$(js 'let bad=0;for(const ch of document.querySelectorAll(".chip-timed")
 echo "text anatomy OK"
 
 # 3. open a chip's editor with a real PointerEvent sequence
-js 'const el=document.querySelector(".chip-timed, .cluster-row");if(!el)return false;const r=el.getBoundingClientRect();const o={bubbles:true,clientX:r.x+r.width/2,clientY:r.y+8,pointerId:1,isPrimary:true,button:0};el.dispatchEvent(new PointerEvent("pointerdown",o));window.dispatchEvent(new PointerEvent("pointerup",o));return true' > /dev/null
+# (a chip on a day shown: the runway days rendered beyond the edges are off screen)
+js 'const el=document.querySelector("[data-testid^=day-col-] :is(.chip-timed, .cluster-row)");if(!el)return false;const r=el.getBoundingClientRect();const o={bubbles:true,clientX:r.x+r.width/2,clientY:r.y+8,pointerId:1,isPrimary:true,button:0};el.dispatchEvent(new PointerEvent("pointerdown",o));window.dispatchEvent(new PointerEvent("pointerup",o));return true' > /dev/null
 sleep 0.3
 js 'return !!document.querySelector("[data-testid=event-panel]")' | grep -q true || fail "panel did not open from pointer sequence"
 echo "panel opens from real-webview pointer events OK"

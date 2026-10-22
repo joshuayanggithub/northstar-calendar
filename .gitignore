@@ -44,3 +44,7 @@ docs/media/.shots-done
 # personal: real-calendar screenshots and real-data calibration stay local
 design/references/*.jpg
 design/*.local.md
+
+# agents' throwaway specs and probes
+e2e/tmp-*/
+scripts/.tmp/

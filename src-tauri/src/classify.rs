@@ -262,17 +262,78 @@ fn data_file(app: &AppHandle, name: &str) -> Option<std::path::PathBuf> {
 }
 
 /// the note text on an event, if any (its [DRILL] line)
+/// a description's lines, Google web's HTML line breaks as line breaks
+/// (split there only when that's where the note is: a description without
+/// a note keeps its HTML as it was)
+fn desc_lines(desc: &str) -> Vec<String> {
+    let has_note = |ls: &[String]| ls.iter().any(|l| is_note_line(l));
+    let plain: Vec<String> = desc.lines().map(String::from).collect();
+    // (as written: a one-line HTML description starting with the note read
+    // whole as the note)
+    if plain.iter().any(|l| l.trim_start().starts_with(DRILL_MARK)) {
+        return plain;
+    }
+    // (the note in its own <p>/<span>, as Google web re-saves it, too)
+    let mut s = String::new();
+    let mut rest = desc;
+    while let Some(i) = rest.find('<') {
+        s.push_str(&rest[..i]);
+        let Some(j) = rest[i..].find('>') else { s.push_str(&rest[i..]); rest = ""; break };
+        let tag = rest[i..i + j + 1].to_ascii_lowercase();
+        let name: String = tag.trim_start_matches('<').trim_start_matches('/').chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+        if name == "br" || name == "p" || name == "div" {
+            s.push('\n');
+        } else {
+            s.push_str(&rest[i..i + j + 1]);
+        }
+        rest = &rest[i + j + 1..];
+    }
+    s.push_str(rest);
+    let html: Vec<String> = s.lines().map(String::from).collect();
+    if has_note(&html) { html } else { plain }
+}
+
+/// a line without its tags
+/// (real tags, `<b>` or `</p>`: a plain note's "< 30 min, > 10 pages" lost
+/// the words between)
+fn bare(l: &str) -> String {
+    let mut out = String::new();
+    let mut rest = l;
+    while let Some(i) = rest.find('<') {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        let name_start = after.strip_prefix('/').unwrap_or(after);
+        let is_tag = name_start.chars().next().is_some_and(|c| c.is_ascii_alphabetic());
+        match after.find('>') {
+            Some(j) if is_tag => rest = &after[j + 1..],
+            _ => {
+                out.push('<');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out.trim().to_string()
+}
+fn is_note_line(l: &str) -> bool {
+    bare(l).starts_with(DRILL_MARK)
+}
+fn decode_entities(s: &str) -> String {
+    s.replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'").replace("&amp;", "&")
+}
+
 pub(crate) fn drill_line(desc: Option<&str>) -> Option<String> {
-    desc?
-        .lines()
-        .find(|l| l.trim_start().starts_with(DRILL_MARK))
-        .map(|l| l.trim_start()[DRILL_MARK.len()..].trim().to_string())
+    desc_lines(desc?)
+        .iter()
+        .find(|l| is_note_line(l))
+        .map(|l| decode_entities(bare(l)[DRILL_MARK.len()..].trim()))
 }
 
 /// a description without its note lines, the rest as written
 pub(crate) fn strip_drill(desc: &str) -> String {
-    desc.lines()
-        .filter(|l| !l.trim_start().starts_with(DRILL_MARK))
+    desc_lines(desc)
+        .into_iter()
+        .filter(|l| !is_note_line(l))
         .collect::<Vec<_>>()
         .join("\n")
         .trim_end()
@@ -393,7 +454,13 @@ mod tests {
     #[test]
     fn drill_line_reads_the_note() {
         assert_eq!(drill_line(Some("body\n\n[DRILL] Ship it.")).as_deref(), Some("Ship it."));
+        // after an edit in Google web the description is HTML
+        assert_eq!(drill_line(Some("Agenda<br><br>[DRILL] Ship it.")).as_deref(), Some("Ship it."));
+        assert_eq!(strip_drill("Agenda<br><br>[DRILL] Ship it."), "Agenda");
         assert_eq!(drill_line(Some("no note")), None);
+        // a plain note's < and > are words, not tags
+        assert_eq!(drill_line(Some("[DRILL] keep it < 30 min, > 10 pages")).as_deref(), Some("keep it < 30 min, > 10 pages"));
+        assert_eq!(drill_line(Some("<p>[DRILL] a <b>bold</b> note</p>")).as_deref(), Some("a bold note"));
     }
 
     #[test]

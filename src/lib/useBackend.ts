@@ -1,10 +1,11 @@
 // Data layer: backend access + reactive calendars/events for a date range.
 
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { backendPromise } from "./backend";
 import type { Backend, Calendar, CalendarEvent, EventInput } from "./types";
 import { addDays, toLocalISO } from "./dates";
-import { normalizeCalendarColor } from "./color";
+import { calendarPalette, isDarkTheme, normalizeCalendarColor } from "./color";
+import { getPrefs, subscribePrefs } from "./settings";
 
 export const BackendContext = createContext<Backend | null>(null);
 
@@ -37,13 +38,51 @@ export function useCalendars(backend: Backend | null): {
   const [calendars, setCalendars] = useState<Calendar[]>([]);
   useEffect(() => {
     if (!backend) return;
-    const load = () => backend.listCalendars().then(setCalendars);
+    const load = () => backend.listCalendars().then(keepIfSame);
     load();
     return backend.onDbChanged(load);
   }, [backend]);
+  // the palette follows Settings (balanced / Google's exact) and colors
+  // picked in the sidebar: a new list, so every view repaints
+  const paletteSig = useRef(JSON.stringify([getPrefs().colorMode, getPrefs().calColors]));
+  // each theme has its own palette: a theme flip is a new list too (the
+  // grid's caches key on it, and kept the other theme's colors)
+  useEffect(() => {
+    try {
+      const mq = window.matchMedia("(prefers-color-scheme: dark)");
+      const flip = () => setCalendars((cs) => cs.map((c) => ({ ...c })));
+      mq.addEventListener("change", flip);
+      return () => mq.removeEventListener("change", flip);
+    } catch {
+      return undefined;
+    }
+  }, []);
+  useEffect(
+    () =>
+      subscribePrefs(() => {
+        const p = getPrefs();
+        const sig = JSON.stringify([p.colorMode, p.calColors]);
+        if (sig === paletteSig.current) return;
+        paletteSig.current = sig;
+        setCalendars((cs) => withPalette(cs.map(({ display: _d, ...c }) => c)));
+      }),
+    [],
+  );
+  // The same list as before keeps its identity: every db change (a drop, a
+  // save, each sync pass) re-read it as a new array, and the week grid's
+  // layout caches key on it, so all 35 rendered days were laid out again.
+  // (compared with what was last shown, not the old array's objects: a
+  // backend may hand back the same objects, changed in place)
+  const shownRef = useRef("");
+  const keepIfSame = (next: Calendar[]) => {
+    const json = JSON.stringify(next);
+    if (json === shownRef.current) return;
+    shownRef.current = json;
+    setCalendars(withPalette(next.map((c) => ({ ...c }))));
+  };
   return {
     calendars,
-    refresh: () => backend?.listCalendars().then(setCalendars),
+    refresh: () => backend?.listCalendars().then(keepIfSame),
   };
 }
 
@@ -129,8 +168,20 @@ export function useVisibleEvents(events: CalendarEvent[], calendars: Calendar[])
   }, [events, calendars]);
 }
 
-export function colorOf(calendars: Calendar[], calendarId: string): string {
-  return normalizeCalendarColor(calendars.find((c) => c.id === calendarId)?.color);
+/** each calendar's chip color for both themes (see calendarPalette) */
+function withPalette(cals: Calendar[]): Calendar[] {
+  const p = getPrefs();
+  const input = cals.map((c) => ({ id: c.id, color: c.color, owned: c.access_role === "owner", hidden: c.hidden }));
+  const opts = { mode: p.colorMode, picked: p.calColors };
+  const light = calendarPalette(input, opts, false);
+  const dark = calendarPalette(input, opts, true);
+  return cals.map((c) => ({ ...c, display: { light: light.get(c.id)!, dark: dark.get(c.id)! } }));
+}
+
+export function colorOf(calendars: Calendar[], calendarId: string, dark = isDarkTheme()): string {
+  const c = calendars.find((c) => c.id === calendarId);
+  if (c?.display) return dark ? c.display.dark : c.display.light;
+  return normalizeCalendarColor(c?.color, dark);
 }
 
 export type { Backend, Calendar, CalendarEvent, EventInput };

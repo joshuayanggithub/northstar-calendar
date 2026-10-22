@@ -9,16 +9,42 @@ export function splitDrill(description: string | null | undefined): {
   drill: string | null;
 } {
   if (!description) return { body: "", drill: null };
-  const lines = description.split("\n");
-  const drillLine = lines.find((l) => l.trim().startsWith(DRILL_MARK));
+  let lines = description.split("\n");
+  // Google web saves descriptions as HTML: the note's line can follow a <br>
+  // or sit in its own <p>/<span> (split there only when that's where the
+  // note is: an untouched HTML description must round-trip as it was)
+  // (the plain pass reads lines as written: a one-line HTML description
+  // starting with the note read whole as the note, body and all)
+  if (!lines.some((l) => l.trim().startsWith(DRILL_MARK))) {
+    const html = description.replace(/<br\s*\/?>|<\/?(?:p|div)\b[^>]*>/gi, "\n").split("\n");
+    if (html.some(isNoteLine)) lines = html;
+  }
+  const drillLine = lines.find(isNoteLine);
   const body = lines
-    .filter((l) => !l.trim().startsWith(DRILL_MARK))
+    .filter((l) => !isNoteLine(l))
     .join("\n")
+    // (the HTML path's opening <p> left an empty first line)
+    .replace(/^\n+/, "")
     .replace(/\n+$/, "");
   return {
     body,
-    drill: drillLine ? drillLine.trim().slice(DRILL_MARK.length).trim() : null,
+    // (as text: Google escapes & and quotes, and wraps formatted runs in tags)
+    drill: drillLine ? decodeEntities(bare(drillLine).slice(DRILL_MARK.length).trim()) : null,
   };
+}
+
+/** a line without its tags (real ones: "keep it < 30 min, > 10 pages" in a
+ *  plain note lost the words between) */
+const bare = (l: string) => l.replace(/<\/?[a-z][a-z0-9]*\b[^>]*>/gi, "").trim();
+const isNoteLine = (l: string) => bare(l).startsWith(DRILL_MARK);
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&");
 }
 
 export function joinDrill(body: string, drill: string | null): string {
@@ -27,46 +53,22 @@ export function joinDrill(body: string, drill: string | null): string {
   return b ? `${b}\n\n${DRILL_MARK} ${drill}` : `${DRILL_MARK} ${drill}`;
 }
 
-const norm = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
-
-/** The note as it should read. The model sometimes wraps its line in stage
- *  directions ("**[Red marker scribble in margin next to X]**",
- *  "**Calendar Entry: X**") or repeats the event's title first; those go.
- *  *Emphasis* marks stay (they render as the pen's underline). Returns null
- *  when nothing but the stage direction was there. */
-export function cleanDrill(raw: string | null | undefined, title = ""): string | null {
+/** The note as it reads: whitespace collapsed, and a stage direction the
+ *  old drill-sergeant model wrapped its lines in ("**[Red marker scribble
+ *  in margin…]**", "**Calendar Entry: …**") taken off. Nothing else: the
+ *  title strip it also did cut your own notes ("Gymnastics…" under "Gym"
+ *  became "nastics…", and Save stored that). */
+export function cleanDrill(raw: string | null | undefined, _title = ""): string | null {
   if (!raw) return null;
   let s = raw.replace(/\s+/g, " ").trim();
   const scene = /(red\s+(marker|pen|ink)|margin|scrawl|scribbl|calendar\s+(entry|event))/i;
   for (let i = 0; i < 3; i++) {
     const before = s;
-    // **[…]** / **(…)** / **Calendar Entry: …** headers
     s = s.replace(/^\*\*\s*([[(][^\])]*[\])]|[^*]*)\s*\*\*\s*/, (m, inner: string) => (scene.test(inner) ? "" : m));
-    // unbolded [ … ] / ( … ) stage directions
     s = s.replace(/^[[(]([^\])]*)[\])]\s*/, (m, inner: string) => (scene.test(inner) ? "" : m));
     s = s.replace(/^(\*\*\s*)?calendar\s+(entry|event)\s*:\s*/i, "");
-    // the event's title said again
-    const t = norm(title);
-    if (t && norm(s).startsWith(t)) {
-      let i2 = 0;
-      let matched = 0;
-      while (i2 < s.length && matched < t.length) {
-        if (/\s/.test(s[i2]) && (matched === 0 || t[matched] !== " ")) {
-          i2++;
-          continue;
-        }
-        if (s[i2].toLowerCase() === t[matched]) matched++;
-        i2++;
-      }
-      s = s.slice(i2).replace(/^\s*(\*\*)?\s*[:\-–—]?\s*/, "");
-    }
     s = s.trim();
     if (s === before) break;
   }
-  // a note entirely in *italics* reads as plain
-  const whole = s.match(/^\*([^*]+)\*$/);
-  if (whole) s = whole[1].trim();
-  s = s.replace(/^\*\*\s*\*\*\s*/, "").trim();
-  if (!s || /^[*.…\s]*$/.test(s)) return null;
-  return s;
+  return s || null;
 }

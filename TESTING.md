@@ -111,3 +111,12 @@ Lessons from the 2026-10-16 pass:
   probe sampled between wheel events and missed the jitter every time.
 - Visual snapshot baselines exist for macOS only; a Linux run writes new
   `-linux.png` files. Don't commit those without reviewing them.
+
+## Window restore (real window, every monitor)
+
+`./e2e/sandbox_app.sh start && python3 e2e/winstate_check.py` places the
+sandbox window on each monitor, quits it through its own Quit menu item
+(System Events, by pid: the native ⌘Q path, which fires Tauri's `Exit`
+without `ExitRequested`), relaunches, and compares `window.json` and the
+window's place (hook `window_get`/`window_set`/`quit`). Needs Accessibility
+for the terminal. 2026-10-22: 3 monitors × native quit + app.exit, all ok.

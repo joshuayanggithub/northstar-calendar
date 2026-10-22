@@ -6,6 +6,9 @@ export interface Calendar {
   hidden: boolean;
   /** Google accessRole: owner | writer | reader | freeBusyReader */
   access_role: string;
+  /** the chip color shown per theme (useCalendars: balanced and kept apart
+   *  from the other calendars, or a color picked in the app) */
+  display?: { light: string; dark: string };
 }
 
 export function calendarEditable(c: Calendar | undefined): boolean {
@@ -63,6 +66,10 @@ export interface EventInput {
   visibility?: string | null;
   /** popup reminder minutes before start; null = calendar default */
   reminder_minutes?: number | null;
+  /** IANA zone a recurring series repeats in (default: this computer's) */
+  time_zone?: string;
+  /** an existing conference to keep (Google's conferenceData resource) */
+  conference_data?: unknown;
 }
 
 /** Metadata needed to preserve an RRULE COUNT when splitting a series. */
@@ -104,6 +111,9 @@ export interface Backend {
     recurrence: string[],
     input: EventInput,
     countSplit?: CountSeriesSplit,
+    /** the edited occurrence's red-pen note: it stays on the new series'
+     *  first occurrence, not on every occurrence */
+    firstNote?: string | null,
   ): Promise<string>;
   /** Move a recurring master and its instances to another calendar. */
   moveSeriesMaster(calendarId: string, masterId: string, destinationId: string): Promise<void>;
@@ -124,6 +134,9 @@ export interface Backend {
    *  stored description; only the description changes. Resolves to the
    *  note it replaced. */
   setEventNote(calendarId: string, eventId: string, note: string | null): Promise<string | null>;
+  /** Reply to an invitation: only your own responseStatus on the guest
+   *  list changes. Resolves to the answer it replaced. */
+  respondEvent(calendarId: string, eventId: string, status: string): Promise<string>;
   /** Subscribe to data-changed notifications; returns unsubscribe. */
   onDbChanged(cb: () => void): () => void;
   onAuthChanged(cb: (authed: boolean) => void): () => void;

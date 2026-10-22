@@ -80,7 +80,9 @@ fn exchange(config: &OAuthConfig, extra: &[(&str, &str)]) -> Result<OAuthTokens>
         ("client_secret", config.client_secret.as_str()),
     ];
     form.extend_from_slice(extra);
-    let resp = ureq::post(TOKEN_URL).send_form(&form)?;
+    // (with timeouts: the sync thread refreshes the token, and a hung refresh
+    // stalled it as surely as a hung sync)
+    let resp = crate::google::http_agent().post(TOKEN_URL).send_form(&form)?;
     let tokens: OAuthTokens = resp.into_json().map_err(|e| CoreError::OAuth(e.to_string()))?;
     Ok(tokens)
 }
@@ -114,8 +116,15 @@ fn accept_redirect(listener: &TcpListener) -> Result<String> {
             continue;
         }
 
-        let body = "<html><body style=\"font-family:sans-serif;padding:2rem\">\
-                    <h2>calendar-app is connected.</h2>You can close this window.</body></html>";
+        // (a denied consent came back with ?error=…: said "connected" too)
+        let body = if code.is_some() {
+            "<html><body style=\"font-family:sans-serif;padding:2rem\">\
+             <h2>calendar-app is connected.</h2>You can close this window.</body></html>"
+        } else {
+            "<html><body style=\"font-family:sans-serif;padding:2rem\">\
+             <h2>calendar-app was not connected.</h2>The sign-in was cancelled or refused. \
+             You can close this window and try again from the app.</body></html>"
+        };
         let _ = stream.write_all(
             format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
@@ -156,5 +165,30 @@ mod tests {
         assert!(flow.auth_url.contains(&format!("code_challenge={expected}")));
         assert!(flow.auth_url.contains("code_challenge_method=S256"));
         assert!(flow.auth_url.contains("access_type=offline"));
+    }
+
+    /// Cancelling Google's consent screen redirects back with
+    /// ?error=access_denied: the loopback page must not say "connected".
+    #[test]
+    fn a_denied_consent_does_not_say_connected() {
+        use std::io::{Read, Write};
+        let cfg = OAuthConfig { client_id: "id".into(), client_secret: "sec".into() };
+        let flow = PkceFlow::start(cfg).unwrap();
+        let port: u16 = flow
+            .auth_url
+            .split("redirect_uri=http%3A%2F%2F127.0.0.1%3A")
+            .nth(1)
+            .and_then(|s| s.split('&').next())
+            .and_then(|p| p.parse().ok())
+            .expect("redirect port in auth_url");
+        let waiter = std::thread::spawn(move || flow.wait_for_code());
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.write_all(b"GET /?error=access_denied HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
+        let mut body = String::new();
+        s.read_to_string(&mut body).unwrap();
+        let result = waiter.join().unwrap();
+        assert!(result.is_err(), "a denial is not a code");
+        assert!(!body.contains("is connected"), "the browser was told 'connected' after a denial: {body}");
+        assert!(body.contains("not connected"));
     }
 }

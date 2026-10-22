@@ -5,8 +5,12 @@ import process from "node:process";
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
+import pkg from "./package.json";
+
 export default defineConfig(() => ({
   plugins: [react()],
+  // Settings > About shows it
+  define: { __APP_VERSION__: JSON.stringify(pkg.version) },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

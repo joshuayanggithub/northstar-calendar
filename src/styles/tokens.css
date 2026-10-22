@@ -55,8 +55,13 @@
     --gridline: rgba(255, 255, 255, 0.07);
     --gridline-half: rgba(255, 255, 255, 0.035);
     --shadow-popover: 0 8px 30px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.08);
-    --chip-tint: 60%;
-    --slab-tint-drop: 10%;
+    /* Quieter than light: a fill reads stronger on near-black than on white
+       (and saturated color glows there), so the same contrast takes less of
+       it. 44% puts a chip ~1.9:1 off the background, just under light's
+       ~2:1; the 60% it was came to 2.5:1. (Lower, the past fade can no
+       longer tell a past brown event from an upcoming one: pastfade.spec.) */
+    --chip-tint: 44%;
+    --slab-tint-drop: 3%;
     --chip-text-mix: 55%; /* toward white in dark mode */
     --scrim: rgba(0, 0, 0, 0.4);
   }

@@ -1,9 +1,11 @@
 // The app icon: design/icon/north-star.svg ("Polaris is today": a month
 // page where the Little Dipper runs across the days to the red today square,
 // crowned by the north star) and the menu bar's template glyph, tray.svg.
-// Concepts and variations: design/icon-ideas/. Since 2026-10-17 the icon is
-// the starry-sky, violet-head palette: north-star.svg is a copy of
-// design/icon-ideas/palettes/b-violet.svg (palettes/make.mjs makes it).
+// Concepts and variations: design/icon-ideas/. Since 2026-10-21 the icon is
+// the matte pick "S1-H1": a flat gold star with no halo or gloss, 12 small
+// stars kept inside the frame, and a flat indigo head; north-star.svg is a
+// copy of design/icon-ideas/matte2/S1-H1.svg (matte2.mjs makes the sheet of
+// star-field × head-colour variants; matte.mjs made the first star round).
 //   PLAYWRIGHT_BROWSERS_PATH=0 node design/icon/export.mjs
 //   npm run tauri icon -- design/icon/north-star-1024.png   (every app icon size)
 // Writes design/icon/north-star-1024.png and src-tauri/icons/tray-template.png.

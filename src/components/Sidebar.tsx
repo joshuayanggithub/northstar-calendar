@@ -10,17 +10,21 @@ import {
 import { calendarEditable } from "../lib/types";
 import type { Backend, Calendar } from "../lib/types";
 import { runningInTauri } from "../lib/backend";
-import { normalizeCalendarColor } from "../lib/color";
+import { PICKS } from "../lib/color";
+import { colorOf } from "../lib/useBackend";
+import { getPrefs, setPrefs } from "../lib/settings";
 import { HORIZONS, useGoals, type Horizon } from "../lib/goals";
-import { starsForGoal, subscribeStars } from "../lib/stars";
+import { starKey, starsForGoal, subscribeStars } from "../lib/stars";
+import { GrowingTextarea } from "./EventPanel";
 import type { CalendarEvent } from "../lib/types";
 
 function MiniMonth(props: { anchor: Date; onPick: (d: Date) => void }) {
   const [shown, setShown] = useState(() => props.anchor);
-  // follow the main view when it navigates (Notion behavior)
+  // follow the main view when it navigates (Notion behavior), also when it
+  // stays in the same month (Today after paging the mini-month away)
   useEffect(() => {
     setShown(props.anchor);
-  }, [props.anchor.getFullYear(), props.anchor.getMonth()]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [props.anchor]);
   const weeks = useMemo(() => monthGrid(shown), [shown]);
   const today = now();
   return (
@@ -77,7 +81,7 @@ function GoalsSection(props: {
     const { manual, auto } = starsForGoal(goalText);
     if (manual.length === 0 && auto.length === 0) return null;
     const nameOf = (k: string) =>
-      props.events?.find((e) => `${e.calendar_id}/${e.id}` === k)?.summary;
+      props.events?.find((e) => starKey(e) === k)?.summary;
     const names = [
       ...manual.map((k) => nameOf(k)).filter(Boolean).map((n) => `★ ${n}`),
       ...auto.map((k) => nameOf(k)).filter(Boolean).map((n) => `☆ ${n} (suggested)`),
@@ -94,7 +98,9 @@ function GoalsSection(props: {
   };
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => {
     try {
-      return JSON.parse(localStorage.getItem("goals-collapsed") ?? "{}");
+      // (a corrupt value blanked the window)
+      const v = JSON.parse(localStorage.getItem("goals-collapsed") ?? "{}");
+      return v && typeof v === "object" ? v : {};
     } catch {
       return {};
     }
@@ -169,7 +175,7 @@ function GoalsSection(props: {
             onChange={(e) => setAddText(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") submitAdd();
-              if (e.key === "Escape") setAdding(false);
+              if (e.key === "Escape") { e.stopPropagation(); setAdding(false); }
             }}
           />
           <div className="goal-horizons" role="radiogroup" aria-label="Kind of goal">
@@ -239,7 +245,7 @@ function GoalsSection(props: {
                             onBlur={commitEdit}
                             onKeyDown={(e) => {
                               if (e.key === "Enter") commitEdit();
-                              if (e.key === "Escape") setEditing(null);
+                              if (e.key === "Escape") { e.stopPropagation(); setEditing(null); }
                             }}
                           />
                         ) : (
@@ -324,10 +330,12 @@ function ThoughtsSection(props: { backend: Backend | null }) {
               <li key={t.id} className="thought-row" data-testid="thought-row">
                 <span className="thought-dot" aria-hidden="true">•</span>
                 {editing?.id === t.id ? (
-                  <textarea
+                  <GrowingTextarea
                     className="thought-edit"
                     autoFocus
                     rows={1}
+                    // (the caret at the end, as the goal rename puts it)
+                    onFocus={(e) => e.currentTarget.setSelectionRange(e.currentTarget.value.length, e.currentTarget.value.length)}
                     value={editing.text}
                     onChange={(e) => setEditing({ id: t.id, text: e.target.value })}
                     onBlur={commitEdit}
@@ -336,7 +344,7 @@ function ThoughtsSection(props: { backend: Backend | null }) {
                         e.preventDefault();
                         commitEdit();
                       }
-                      if (e.key === "Escape") setEditing(null);
+                      if (e.key === "Escape") { e.stopPropagation(); setEditing(null); }
                     }}
                   />
                 ) : (
@@ -370,7 +378,7 @@ function ThoughtsSection(props: { backend: Backend | null }) {
                 goals.addThought(draft);
                 setDraft("");
               }
-              if (e.key === "Escape") (e.target as HTMLInputElement).blur();
+              if (e.key === "Escape") { e.stopPropagation(); (e.target as HTMLInputElement).blur(); }
             }}
           />
         </>
@@ -381,7 +389,13 @@ function ThoughtsSection(props: { backend: Backend | null }) {
 
 // Memoized: App re-renders on every swipe step, but nothing the sidebar
 // shows depends on the week view's pan offset.
+/** one collator (a localeCompare with options builds one per call: ~5ms a
+ *  render at 4x CPU on every navigation step) */
+const NAME_ORDER = new Intl.Collator(undefined, { sensitivity: "base" });
+
 export const Sidebar = memo(function Sidebar(props: {
+  /** today's date: a new day re-renders the (memoized) sidebar */
+  today?: string;
   backend: Backend | null;
   calendars: Calendar[];
   anchor: Date;
@@ -389,12 +403,29 @@ export const Sidebar = memo(function Sidebar(props: {
   accountEmail?: string;
   onPickDate: (d: Date) => void;
   events?: CalendarEvent[];
+  /** the calendar shown on its own for now (right-click: Isolate) */
+  isolated?: string | null;
+  onIsolate?: (id: string | null) => void;
 }) {
   const { calendars } = props;
+  // right-click menu on a calendar
+  const [calMenu, setCalMenu] = useState<{ x: number; y: number; cal: Calendar } | null>(null);
+  useEffect(() => {
+    if (!calMenu) return;
+    const close = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        setCalMenu(null);
+      }
+    };
+    window.addEventListener("keydown", close, true);
+    return () => window.removeEventListener("keydown", close, true);
+  }, [calMenu]);
   const [adding, setAdding] = useState(false);
   const [calCollapsed, setCalCollapsed] = useState<{ my: boolean; other: boolean }>(() => {
     try {
-      return JSON.parse(localStorage.getItem("cal-collapsed") ?? '{"my":false,"other":false}');
+      const v = JSON.parse(localStorage.getItem("cal-collapsed") ?? "null");
+      return v && typeof v === "object" ? { my: !!v.my, other: !!v.other } : { my: false, other: false };
     } catch {
       return { my: false, other: false };
     }
@@ -414,16 +445,22 @@ export const Sidebar = memo(function Sidebar(props: {
   // Heuristic: calendar ids are email-ish; plain names create a new calendar.
   const looksLikeId = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(addText.trim());
 
+  // (one request at a time: a second Enter while Google answered made two
+  // calendars)
+  const [submitting, setSubmitting] = useState(false);
   const submitAdd = async () => {
     const v = addText.trim();
-    if (!v || !props.backend) return;
+    if (!v || !props.backend || submitting) return;
     setAddErr(null);
+    setSubmitting(true);
     try {
       await props.backend.addCalendar(v, looksLikeId);
       setAddText("");
       setAdding(false);
     } catch (e) {
       setAddErr(String(e));
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -454,15 +491,18 @@ export const Sidebar = memo(function Sidebar(props: {
             <input
               autoFocus
               placeholder="Name, or calendar ID to subscribe"
+              disabled={submitting}
               value={addText}
               onChange={(e) => setAddText(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") submitAdd();
-                if (e.key === "Escape") setAdding(false);
+                if (e.key === "Escape") { e.stopPropagation(); setAdding(false); }
               }}
             />
             <div className="cal-add-hint">
-              {addText
+              {submitting
+                ? "Creating…"
+                : addText
                 ? looksLikeId
                   ? "↵ subscribe to this calendar ID"
                   : "↵ create new calendar"
@@ -475,7 +515,7 @@ export const Sidebar = memo(function Sidebar(props: {
           // Google Calendar's split: calendars you own/write vs subscriptions
           const byName = (a: Calendar, b: Calendar) =>
             Number(b.is_primary) - Number(a.is_primary) ||
-            a.summary.localeCompare(b.summary, undefined, { sensitivity: "base" });
+            NAME_ORDER.compare(a.summary, b.summary);
           const mine = calendars.filter((c) => calendarEditable(c)).sort(byName);
           const other = calendars.filter((c) => !calendarEditable(c)).sort(byName);
           const renderGroup = (key: "my" | "other", label: string, list: Calendar[]) =>
@@ -491,17 +531,40 @@ export const Sidebar = memo(function Sidebar(props: {
                     {list.map((c) => (
                       <li key={c.id}>
                         <button
-                          className={`cal-row${c.hidden ? " hidden-cal" : ""}`}
-                          onClick={() => props.backend?.setCalendarHidden(c.id, !c.hidden)}
-                          title={c.hidden ? "Show calendar" : "Hide calendar"}
+                          className={
+                            "cal-row" +
+                            (props.isolated
+                              ? c.id === props.isolated ? " isolated-cal" : " hidden-cal isolating"
+                              : c.hidden ? " hidden-cal" : "")
+                          }
+                          data-testid="cal-row"
+                          // while one is isolated, a click isolates this one instead
+                          onClick={() =>
+                            props.isolated
+                              ? props.onIsolate?.(c.id === props.isolated ? null : c.id)
+                              : props.backend?.setCalendarHidden(c.id, !c.hidden)
+                          }
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            setCalMenu({ x: e.clientX, y: e.clientY, cal: c });
+                          }}
+                          title={
+                            props.isolated
+                              ? c.id === props.isolated ? "Show all calendars" : "Show only this calendar"
+                              : c.hidden ? "Show calendar" : "Hide calendar"
+                          }
                         >
                           <span
                             className="cal-dot"
-                            style={{ background: normalizeCalendarColor(c.color) }}
+                            style={{ background: colorOf(calendars, c.id) }}
                           />
                           <span className="cal-name">{c.summary}</span>
                           {c.is_primary && <span className="cal-default">Default</span>}
-                          <span className="cal-eye">{c.hidden ? "Show" : "Hide"}</span>
+                          <span className="cal-eye">
+                            {props.isolated
+                              ? c.id === props.isolated ? "Show all" : "Only"
+                              : c.hidden ? "Show" : "Hide"}
+                          </span>
                         </button>
                       </li>
                     ))}
@@ -518,6 +581,68 @@ export const Sidebar = memo(function Sidebar(props: {
           );
         })()}
       </div>
+      {calMenu && (
+        <div className="ctx-scrim" onPointerDown={() => setCalMenu(null)} onContextMenu={(e) => { e.preventDefault(); setCalMenu(null); }}>
+          <div
+            className="ctx-menu"
+            data-testid="cal-menu"
+            style={{ left: Math.min(calMenu.x, window.innerWidth - 220), top: Math.min(calMenu.y, window.innerHeight - 190) }}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            {props.isolated === calMenu.cal.id ? (
+              <button onClick={() => { props.onIsolate?.(null); setCalMenu(null); }}>
+                Show all calendars <kbd>Esc</kbd>
+              </button>
+            ) : (
+              <button onClick={() => { props.onIsolate?.(calMenu.cal.id); setCalMenu(null); }}>
+                Isolate calendar
+              </button>
+            )}
+            {!props.isolated && (
+              <button
+                onClick={() => {
+                  void props.backend?.setCalendarHidden(calMenu.cal.id, !calMenu.cal.hidden);
+                  setCalMenu(null);
+                }}
+              >
+                {calMenu.cal.hidden ? "Show calendar" : "Hide calendar"}
+              </button>
+            )}
+            {/* this app's color for the calendar (Google's stays as it is) */}
+            <div className="cal-menu-colors" data-testid="cal-colors" role="group" aria-label="Calendar color">
+              {PICKS.map((p) => {
+                const on = getPrefs().calColors[calMenu.cal.id] === p.hex;
+                return (
+                  <button
+                    key={p.hex}
+                    className={"cal-swatch" + (on ? " on" : "")}
+                    title={p.name}
+                    aria-label={p.name}
+                    aria-pressed={on}
+                    style={{ background: p.hex }}
+                    onClick={() => {
+                      setPrefs({ calColors: { ...getPrefs().calColors, [calMenu.cal.id]: p.hex } });
+                      setCalMenu(null);
+                    }}
+                  />
+                );
+              })}
+            </div>
+            {getPrefs().calColors[calMenu.cal.id] && (
+              <button
+                data-testid="cal-color-reset"
+                onClick={() => {
+                  const { [calMenu.cal.id]: _gone, ...rest } = getPrefs().calColors;
+                  setPrefs({ calColors: rest });
+                  setCalMenu(null);
+                }}
+              >
+                Use Google's color
+              </button>
+            )}
+          </div>
+        </div>
+      )}
       <GoalsSection backend={props.backend} events={props.events} />
       <ThoughtsSection backend={props.backend} />
       {!runningInTauri && <div className="mock-badge">browser mock mode</div>}

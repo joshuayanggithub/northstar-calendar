@@ -31,8 +31,11 @@ export function TopBar(props: {
   const { anchor, view } = props;
   const end = props.rangeEnd;
   let title: string;
-  if (view === "day" && end && end.getMonth() === anchor.getMonth()) {
-    title = format(anchor, "MMMM d, yyyy");
+  if (view === "insights") {
+    title = "Insights";
+  } else if (view === "day" && end && end.getMonth() === anchor.getMonth()) {
+    // an N-day view names its days
+    title = end.getDate() === anchor.getDate() ? format(anchor, "MMMM d, yyyy") : `${format(anchor, "MMM d")} – ${format(end, "d, yyyy")}`;
   } else if (end && end.getMonth() !== anchor.getMonth() && (view === "day" || view === "week" || view === "list")) {
     title =
       end.getFullYear() === anchor.getFullYear()
@@ -109,15 +112,27 @@ function ViewMenu(props: {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
-    if (!open) return;
+    // every way of closing folds the submenus (View settings stayed open)
+    if (!open) {
+      setDaysOpen(false);
+      setSettingsOpen(false);
+      return;
+    }
     const close = (e: PointerEvent) => {
-      if (!ref.current?.contains(e.target as Node)) {
-        setOpen(false);
-        setDaysOpen(false);
-      }
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
     };
-    window.addEventListener("pointerdown", close);
-    return () => window.removeEventListener("pointerdown", close);
+    const esc = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      setOpen(false);
+    };
+    // capture: the grid stops its pointerdown from bubbling to the window
+    window.addEventListener("pointerdown", close, true);
+    window.addEventListener("keydown", esc, true);
+    return () => {
+      window.removeEventListener("pointerdown", close, true);
+      window.removeEventListener("keydown", esc, true);
+    };
   }, [open]);
   const isDays = props.view === "day" && props.dayCount > 1;
   const current = isDays
@@ -145,7 +160,6 @@ function ViewMenu(props: {
                 if (r.days) props.onDayCount(r.days);
                 props.onViewChange(r.v);
                 setOpen(false);
-                setDaysOpen(false);
               }}
             >
               <span className="view-menu-check">
@@ -165,6 +179,23 @@ function ViewMenu(props: {
             Number of days
             <span className="view-menu-sub">›</span>
           </button>
+          {daysOpen &&
+            [2, 3, 4, 5, 6, 7, 8, 9].map((n) => (
+              <button
+                key={n}
+                role="menuitem"
+                className="view-menu-row view-menu-day"
+                onClick={() => {
+                  props.onDayCount(n);
+                  props.onViewChange("day");
+                  setOpen(false);
+                }}
+              >
+                <span className="view-menu-check">{isDays && props.dayCount === n ? "✓" : ""}</span>
+                {n} days
+                <kbd>{n}</kbd>
+              </button>
+            ))}
           {props.onSeamStyle && (
             <button
               role="menuitem"
@@ -189,24 +220,6 @@ function ViewMenu(props: {
                 <span className="view-menu-check">{props.seamStyle === s ? "✓" : ""}</span>
                 {s === "scarf" ? "Scarf joint" : s === "rabbet" ? "Rabbet joint" : "Overlay"}
                 <span className="view-menu-sub">overlaps</span>
-              </button>
-            ))}
-          {daysOpen &&
-            [2, 3, 4, 5, 6, 7, 8, 9].map((n) => (
-              <button
-                key={n}
-                role="menuitem"
-                className="view-menu-row view-menu-day"
-                onClick={() => {
-                  props.onDayCount(n);
-                  props.onViewChange("day");
-                  setOpen(false);
-                  setDaysOpen(false);
-                }}
-              >
-                <span className="view-menu-check">{isDays && props.dayCount === n ? "✓" : ""}</span>
-                {n} days
-                <kbd>{n}</kbd>
               </button>
             ))}
         </div>

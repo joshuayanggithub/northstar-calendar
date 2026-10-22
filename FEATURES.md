@@ -30,6 +30,7 @@ Calendar account, manual = user confirms in the running app.
 | Agenda/schedule list (List view, kept per user preference) | tested (e2e) | e2e |
 | Jump to today / date navigation (t, arrows) | tested (e2e) | e2e |
 | Continuous horizontal pan in week and custom day-count views | data-scan and cache costs fixed; physical macOS lag still under investigation | mixed-axis/lead-in wheel deltas are preserved; the undecided X lead-in is limited to its first 100ms so sustained diagonal vertical input cannot accumulate a later jump; note placement waits for the full stream; cluster/chip subtrees reuse nodes; per-day layouts survive overlapping range refreshes; all-day rows use a date index instead of scanning the history per column. In 4,000-event Chromium profiles, timed and all-day normal-speed p95/max are 16.7–16.8ms with no >25ms frame; range-boundary App commit fell from 24ms to 13.2ms. At synthetic 4x CPU, timed pan still has 8 >25ms intervals and a 35.2ms App commit. This is not physical macOS trackpad/WKWebView evidence; do not claim the reported lag is fixed |
+| Horizontal day-boundary rebase and sticky header coverage (`d0c3282`) | browser/native tested; physical Mac trackpad check pending | Pending day steps are recorded before a synchronous commit, so a boundary cannot reset the offset as navigation. Trusted native and mixed-axis 35-day browser pans had <1px backward correction; Linux native swipe and 341 browser tests passed. The extended header strip covers event chips at its right-edge rule. |
 | Mini-month navigator in sidebar | tested (e2e) | e2e |
 | Calendar visibility toggles (hover Hide/Show affordance, Google selected-flag seeding) | tested (e2e) | e2e |
 | Notion chip anatomy: inline times, wrapped titles, capsule accent, ghosted past, weekend wash, tz gutter label | tested | e2e both themes |
@@ -49,7 +50,7 @@ Calendar account, manual = user confirms in the running app.
 | Overnight time edits preserve duration when shifting start | tested in working tree (2026-10-17; commit pending) | regression fails before and passes after; same-day clamp + cross-midnight + overnight focused tests pass 3/3; production build and 13:02 full browser suite (297 passed / 64 skipped) pass after final guard alignment |
 | Multi-day timed event edits preserve end date and duration | verified in working tree (2026-10-17; commit pending) | test reproduced ordinary title-save truncating 49h event to 25h; editor now stores calendar-day offset, displays +Nd and preserves duration on start-time change; DST fall-back badge reports actual elapsed 27h; focused checks pass 6/6, build passes, 13:02 full browser suite passes 297/64 |
 | Multi-day all-day event date edits preserve the covered span | verified in working tree (2026-10-17; commit pending) | test reproduced moving a three-day event's start without its inclusive end, saving it as one day; date edit now shifts the end by the same calendar-day offset. Forward/backward edits and fall-back DST crossing test pass; the DST case passed focused Playwright 1/1 at 14:54 and full suites 301/365 at 15:02, 15:17, and 15:32. Four related date/conversion/drag checks pass |
-| Guests/attendees (add emails, see RSVP status) | todo | live |
+| Guests/attendees (add emails, see RSVP status) | tested (mock 2026-10-18) `dc891ebc` | the panel lists guests Google-style: count + tally ("2 yes, 1 no, 2 awaiting"), organizer first then you, avatar badge ✓/✕/? per answer, declined struck through, rooms left out; someone else's invitation's guest list isn't editable; e2e/rsvp.spec.ts. Live Google pending |
 | Recurring events: display instances | tested (live: singleEvents sync, 29k instances) | unit + live |
 | Recurring events: create (NL: daily/weekly/weekday/per-day) | tested (live: series create/edit/delete) | live |
 | Recurring events: edit single instance | tested (live isolation) | live |
@@ -78,7 +79,7 @@ Calendar account, manual = user confirms in the running app.
 | Feature | Status | Verified by |
 |---|---|---|
 | Command bar (cmdk): jump date, switch view, create, search | tested (e2e) | e2e |
-| Natural-language quick create ("lunch tue 12:30") | tested (e2e) | e2e |
+| Natural-language quick create ("lunch tue 12:30"; "call at 5" = 5 PM, "lunch tomorrow 12-1", "gym mon wed fri 7am" repeats on those days — `4b4f0b38`) | tested (e2e) | e2e (create.spec) |
 | Keyboard: t/d/w/m/l, 0-9 N-day, j/k, n/b/N, x, e, c, ⌘K, ./, /, ⌘Z/X/C/V/D/J, ⇧⌘E, ⇧⌘./,/0, ` | tested (e2e) | e2e |
 | Event search (via ⌘K, client-side ±90d) | tested (e2e) | e2e |
 | Secondary timezone column (⌘K → time zone; persisted) | tested (e2e) | e2e |
@@ -129,7 +130,7 @@ keyboard-opened panels anchor top-right.
 
 | Feature | Status | Verified by |
 |---|---|---|
-| Respond to invitations (RSVP yes/no/maybe from the app) | todo | live |
+| Respond to invitations (RSVP yes/no/maybe from the app) | tested (mock + native unit 2026-10-18) `dc891ebc` | Going? Yes/No/Maybe in the panel; native `respond_event` patches only the attendee list with your own responseStatus changed (a guest can't edit the organizer's fields); undoable; a recurring one asks This event / All events (`95bd4d57`; all = the series master's guest list with only your answer changed). Invitations look different on the grid/month: not answered = outlined, maybe = hatched, declined = struck through. Live Google pending |
 | Invite guests + track responses on own events | todo | live |
 | Holiday / birthday / subscribed calendars display (read-only cals); "Other calendars" read-only by default: no reconciliation, score, stars or goal suggestions; "Copy to my calendar…" picks the calendar (one occurrence or the series); a copied original steps aside for its copy (grid, menu bar, reminders); ⌘V pastes into yours | tested (2026-10-16, `a0ea5055`) | e2e/othercals.spec.ts, smoke readonly tests, cargo notify test; live data: 12 reader calendars |
 | Per-event color override | todo | e2e + live |
@@ -142,6 +143,8 @@ keyboard-opened panels anchor top-right.
 | Multiple time zones (primary + secondary gutter) | tested (e2e) | e2e |
 | Search events | tested (e2e) | e2e |
 | Keyboard shortcuts parity (Notion catalog) | tested (e2e) | e2e |
+| Window reopens where it was quit (monitor, position, size; logical points, `0ddf794b`) | in testing (user verify) | manual |
+| Guessable shortcut aliases + mnemonic help sheet (N/P, Y/N in review, ⌘+ ⌘− ⌘0, ?, ⇧⌘D; `1315c472`) | tested (e2e) | e2e |
 | Appointment schedules (= our booking links, Phase 5) | todo | live |
 
 ## Deliberately out of scope (personal desktop tool)
@@ -156,3 +159,8 @@ room/resource booking, family calendars, payments for appointments.
 Push-based instant sync (watch-channel relay), Tauri mobile builds, Zoom OAuth,
 multiple Google accounts, tasks & reminders, calendar sharing management
 (ACL editing), transfer/labels, add-ons.
+| Isolate a calendar (sidebar right-click > Isolate calendar): only its events, temporarily; pill + Esc to show all | tested (mock 2026-10-19) `e9f8da6e` | a view, not a setting (hidden flags, Google, reminders untouched; reload ends it); clicking another calendar while isolated switches; e2e/isolate.spec.ts |
+| Cancel an event without deleting it (right-click / ⋯ › Cancel event): kept, lightened, struck through in week/month/list/all-day; no native alert or menu-bar entry; restore or ⌘Z; moving it un-cancels | tested (mock + native unit 2026-10-19) `9089e664` | local mark (with the review marks), not synced to Google; e2e/cancel.spec.ts |
+| Event shading per theme (Settings › General › Event shading): upcoming fill strength and how much a past event keeps, light and dark separately, live previews, reset | tested (mock 2026-10-19) `e913075b` | e2e/settings.spec.ts |
+| Review card (R / morning banner › Review): "Did this happen?" with the event's color, day and time, progress, three distinct answers (It happened / Canceled / Didn't happen) and quiet Skip / Open / Done; panel section with full labels, status and "Adjust the times" | tested (mock 2026-10-19) `876e39bb` `f17abe07` `f398156a` | e2e/recon.spec.ts, e2e/reconpill.spec.ts |
+| Calendar colors: balanced per theme, calendars sharing a color nudged apart; Settings › Calendar colors (Balanced / Google's exact); right-click a calendar › color picks (this app only) | tested (mock 2026-10-19) `6cab3658` `09dd3e5f` | picks are local (not written to Google); e2e/calendar-colors.spec.ts |

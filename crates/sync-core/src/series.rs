@@ -106,6 +106,27 @@ fn wall_datetime(value: &str) -> Option<NaiveDateTime> {
     DateTime::parse_from_rfc3339(value).ok().map(|value| value.naive_local())
 }
 
+/// The wall-clock time of an instant in the series' own zone. A series edit
+/// made on a computer in another zone writes that computer's offset (1 PM
+/// -04:00 for a Los Angeles series edited from New York): its own offset's
+/// wall time, read again as Los Angeles time, put every occurrence 3 hours
+/// late until the next pull.
+fn wall_in(value: &str, timezone: Option<&str>) -> Option<NaiveDateTime> {
+    let Some(tz) = timezone.and_then(|name| IanaTimeZone::get(name).ok()) else {
+        return wall_datetime(value);
+    };
+    let instant = DateTime::parse_from_rfc3339(value).ok()?;
+    let ts = jiff::Timestamp::from_second(instant.timestamp()).ok()?;
+    let civil = ts.to_zoned(tz).datetime();
+    NaiveDate::from_ymd_opt(civil.year() as i32, civil.month() as u32, civil.day() as u32)?
+        .and_hms_nano_opt(
+            civil.hour() as u32,
+            civil.minute() as u32,
+            civil.second() as u32,
+            instant.timestamp_subsec_nanos(),
+        )
+}
+
 fn localize(
     naive: NaiveDateTime,
     timezone: Option<&str>,
@@ -134,12 +155,8 @@ fn localize(
 /// A series body edit applies to every inherited instance body, but the
 /// `[DRILL]` note belongs to its individual occurrence and must survive it.
 fn series_description(existing: Option<&str>, new_body: Option<&str>) -> Option<String> {
-    let existing = existing.unwrap_or_default();
-    let drill = existing
-        .lines()
-        .find(|line| line.trim().starts_with("[DRILL]"))
-        .map(|line| line.trim().trim_start_matches("[DRILL]").trim())
-        .filter(|note| !note.is_empty());
+    let drill = note_in(existing.unwrap_or_default());
+    let drill = drill.as_deref().filter(|note| !note.is_empty());
     let body = new_body.unwrap_or_default().trim_end_matches('\n');
     let merged = match (body.is_empty(), drill) {
         (true, Some(note)) => format!("[DRILL] {note}"),
@@ -150,16 +167,81 @@ fn series_description(existing: Option<&str>, new_body: Option<&str>) -> Option<
     (!merged.is_empty()).then_some(merged)
 }
 
+/// The `[DRILL]` note's text in a description, on its own line or, as
+/// Google web re-saves descriptions, after a `<br>` or in its own `<p>`
+/// (the shape the UI's splitDrill reads; a note in HTML was erased by a
+/// series body edit).
+fn note_in(desc: &str) -> Option<String> {
+    // (real tags only: a plain note's "< 30 min" keeps its words)
+    let bare = |l: &str| -> String {
+        let mut out = String::new();
+        let mut rest = l;
+        while let Some(i) = rest.find('<') {
+            out.push_str(&rest[..i]);
+            let after = &rest[i + 1..];
+            let name_start = after.strip_prefix('/').unwrap_or(after);
+            let is_tag = name_start.chars().next().is_some_and(|c| c.is_ascii_alphabetic());
+            match after.find('>') {
+                Some(j) if is_tag => rest = &after[j + 1..],
+                _ => {
+                    out.push('<');
+                    rest = after;
+                }
+            }
+        }
+        out.push_str(rest);
+        out.trim().to_string()
+    };
+    let find = |lines: &[String]| {
+        lines.iter().map(|l| bare(l)).find(|l| l.starts_with("[DRILL]")).map(|l| {
+            l["[DRILL]".len()..]
+                .trim()
+                .replace("&nbsp;", " ")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&quot;", "\"")
+                .replace("&#39;", "'")
+                .replace("&amp;", "&")
+        })
+    };
+    let plain: Vec<String> = desc.lines().map(String::from).collect();
+    if plain.iter().any(|l| l.trim_start().starts_with("[DRILL]")) {
+        return find(&plain);
+    }
+    // line-breaking tags as line breaks
+    let mut s = String::new();
+    let mut rest = desc;
+    while let Some(i) = rest.find('<') {
+        s.push_str(&rest[..i]);
+        let Some(j) = rest[i..].find('>') else { s.push_str(&rest[i..]); rest = ""; break };
+        let tag = &rest[i..i + j + 1];
+        let name: String = tag
+            .trim_start_matches('<')
+            .trim_start_matches('/')
+            .chars()
+            .take_while(|c| c.is_ascii_alphabetic())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if name == "br" || name == "p" || name == "div" { s.push('\n') } else { s.push_str(tag) }
+        rest = &rest[i + j + 1..];
+    }
+    s.push_str(rest);
+    let html: Vec<String> = s.lines().map(String::from).collect();
+    find(&html)
+}
+
 fn update_instance_time(
     inst: &mut Event,
     previous_start: &str,
     new_start: &Value,
     new_end: &Value,
 ) -> bool {
+    // every date and time below is read in the series' zone
+    let series_tz = new_start["timeZone"].as_str();
     let date_of = |value: &str| {
         NaiveDate::parse_from_str(value, "%Y-%m-%d")
             .ok()
-            .or_else(|| wall_datetime(value).map(|dt| dt.date()))
+            .or_else(|| wall_in(value, series_tz).map(|dt| dt.date()))
     };
     let original = inst.raw.as_ref().and_then(|raw| {
         raw["originalStartTime"]["dateTime"]
@@ -209,8 +291,8 @@ fn update_instance_time(
         true
     } else {
         let (Some(master_start), Some(master_end)) = (
-            wall_datetime(new_value),
-            new_end["dateTime"].as_str().and_then(wall_datetime),
+            wall_in(new_value, series_tz),
+            new_end["dateTime"].as_str().and_then(|v| wall_in(v, series_tz)),
         ) else {
             return false;
         };
@@ -301,6 +383,9 @@ pub fn apply_locally(
             db.upsert_event(&inst)?;
         }
     }
+    if let Some(destination) = destination.filter(|d| *d != calendar_id) {
+        db.move_pending_ops(calendar_id, destination, master_id)?;
+    }
     Ok(())
 }
 
@@ -324,6 +409,9 @@ pub fn restore_locally(
     }
     for event in previous {
         db.upsert_event(event)?;
+    }
+    if let Some(destination) = destination.filter(|d| *d != calendar_id) {
+        db.move_pending_ops(destination, calendar_id, master_id)?;
     }
     Ok(())
 }
@@ -369,6 +457,21 @@ mod tests {
         let all_day = rule_until(&["RRULE:FREQ=DAILY;UNTIL=20261013".into()]).unwrap();
         assert_eq!(all_day.to_rfc3339(), "2026-10-13T23:59:59+00:00");
         assert!(rule_until(&["RRULE:FREQ=DAILY;COUNT=3".into()]).is_none());
+    }
+
+    #[test]
+    fn series_time_edit_from_another_zone_projects_the_sent_instant() {
+        // a 9 AM Los Angeles series moved to 1 PM New York time (10 AM PT)
+        // from a New York computer: the offset is the computer's
+        let db = series();
+        let patch = json!({
+            "start": { "dateTime": "2026-10-12T13:00:00-04:00", "timeZone": "America/Los_Angeles", "date": null },
+            "end": { "dateTime": "2026-10-12T14:00:00-04:00", "timeZone": "America/Los_Angeles", "date": null },
+        });
+        apply_locally(&db, "cal", "m", &patch, None, Some("2026-10-12T09:00:00-07:00")).unwrap();
+        let s = db.get_event("cal", "m_2").unwrap().unwrap().start;
+        let got = DateTime::parse_from_rfc3339(&s).unwrap().with_timezone(&chrono::Utc);
+        assert_eq!(got.to_rfc3339(), "2026-10-13T17:00:00+00:00", "projected {s}; Google shows 10 AM PT");
     }
 
     #[test]
@@ -575,5 +678,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rule, "RRULE:FREQ=DAILY;COUNT=4");
+    }
+
+    // A note saved on an occurrence whose description Google web stored as
+    // HTML (the shape the UI's splitDrill reads): an "All events" body edit
+    // keeps the note on that occurrence, as the mock does.
+    #[test]
+    fn series_body_edit_keeps_an_html_wrapped_occurrence_note() {
+        let db = Db::open_in_memory().unwrap();
+        let html = |id: &str, start: &str, description: &str| {
+            let mut e = instance(id, start);
+            e.description = Some(description.into());
+            e
+        };
+        db.upsert_event(&html("m_1", "2026-10-13T09:00:00-04:00", "<p>Agenda</p><p>[DRILL] skipped the warmup</p>")).unwrap();
+        db.upsert_event(&html("m_2", "2026-10-14T09:00:00-04:00", "Agenda<br>[DRILL] late again")).unwrap();
+        apply_locally(&db, "cal", "m", &json!({ "description": "New agenda" }), None, None).unwrap();
+        for (id, note) in [("m_1", "skipped the warmup"), ("m_2", "late again")] {
+            let got = db.get_event("cal", id).unwrap().unwrap().description.unwrap_or_default();
+            assert!(got.contains(note), "{id}: note erased by the series body edit; got {got:?}");
+        }
     }
 }

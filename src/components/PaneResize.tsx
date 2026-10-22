@@ -27,12 +27,22 @@ function clampTo(p: PaneSpec, w: number): number {
 export function usePaneWidth(p: PaneSpec): [number, (w: number) => void] {
   const [w, setW] = useState(() => {
     try {
+      // the chosen width, not today's window cap: clamped here, a launch at
+      // 800px wide lost anything over 480 for good (the return clamps)
       const v = Number(localStorage.getItem(p.key));
-      return v ? clampTo(p, v) : p.def;
+      return v ? Math.max(p.min, Math.min(p.max, v)) : p.def;
     } catch {
       return p.def;
     }
   });
+  // the window narrowed since: show the width within the cap (the chosen
+  // width comes back when it widens again)
+  const [, setViewport] = useState(0);
+  useEffect(() => {
+    const onResize = () => setViewport(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
   const set = useCallback(
     (next: number) => {
       const v = clampTo(p, next);
@@ -46,7 +56,7 @@ export function usePaneWidth(p: PaneSpec): [number, (w: number) => void] {
     },
     [p],
   );
-  return [w, set];
+  return [clampTo(p, w), set];
 }
 
 export function PaneResize(props: {

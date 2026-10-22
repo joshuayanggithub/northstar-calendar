@@ -190,6 +190,43 @@ fn dispatch(app: &AppHandle, req: &Value) -> Result<Value, String> {
             }
             Ok(json!({"path": path}))
         }
+        // the main window's place in logical points, and the monitors
+        "window_get" => {
+            let w = app.get_webview_window("main").ok_or("no main window")?;
+            let scale = w.scale_factor().map_err(|e| e.to_string())?;
+            let p = w.outer_position().map_err(|e| e.to_string())?.to_logical::<f64>(scale);
+            let z = w.inner_size().map_err(|e| e.to_string())?.to_logical::<f64>(scale);
+            let monitors: Vec<Value> = w
+                .available_monitors()
+                .map_err(|e| e.to_string())?
+                .iter()
+                .map(|m| {
+                    let s = m.scale_factor();
+                    let mp = m.position().to_logical::<f64>(s);
+                    let mz = m.size().to_logical::<f64>(s);
+                    json!({ "name": m.name(), "x": mp.x, "y": mp.y, "w": mz.width, "h": mz.height, "scale": s })
+                })
+                .collect();
+            Ok(json!({ "x": p.x, "y": p.y, "w": z.width, "h": z.height, "scale": scale, "monitors": monitors,
+                "saved": crate::winstate::place(app) }))
+        }
+        // move and resize it (logical points)
+        "window_set" => {
+            let w = app.get_webview_window("main").ok_or("no main window")?;
+            let f = |k: &str| req[k].as_f64().ok_or(format!("missing {k}"));
+            w.set_size(tauri::LogicalSize::new(f("w")?, f("h")?)).map_err(|e| e.to_string())?;
+            w.set_position(tauri::LogicalPosition::new(f("x")?, f("y")?)).map_err(|e| e.to_string())?;
+            Ok(json!({}))
+        }
+        // quit as the Quit menu does (after answering)
+        "quit" => {
+            let app = app.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                app.exit(0);
+            });
+            Ok(json!({}))
+        }
         // what the menu bar item shows: its title and dropdown rows
         "tray_state" => {
             let (title, rows) = crate::notify::TRAY_STATE.lock().unwrap().clone();

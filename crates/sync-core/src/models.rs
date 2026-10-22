@@ -103,4 +103,7 @@ pub struct SyncReport {
     pub pulled: usize,
     pub conflicts: usize,
     pub errors: Vec<String>,
+    /// titles of events whose local change Google refused for good; the
+    /// local copy went back to Google's (the UI says so)
+    pub reverted: Vec<String>,
 }

@@ -6,7 +6,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState, useMemo } from "react";
 import { eventDates, format, toDateOnly, toLocalISO, fmtTimeShort, now } from "../lib/dates";
-import { reconExempt, reconKey, reconState, setRecon, subscribeRecon } from "../lib/recon";
+import { isCanceled, reconExempt, reconKey, reconState, setRecon, subscribeRecon, toggleCanceled } from "../lib/recon";
 import { calendarEditable } from "../lib/types";
 import type { Backend, Calendar, CalendarEvent, EventInput } from "../lib/types";
 import type { DraftEvent } from "./WeekView";
@@ -17,6 +17,7 @@ import { geocodeOne, gmapsUrl, osmEmbedUrl, searchPlaces, type Place } from "../
 import { setStarGoal, starKey, starState, subscribeStars } from "../lib/stars";
 import { useGoals } from "../lib/goals";
 import { cleanDrill, joinDrill, splitDrill } from "../lib/drill";
+import { guestsOf, myRsvp, rsvpTally, type Guest, type Rsvp } from "../lib/rsvp";
 
 export type PanelState =
   | { mode: "closed" }
@@ -30,6 +31,14 @@ function tMin(t: string): number {
 function tStr(min: number): string {
   const m = ((min % 1440) + 1440) % 1440;
   return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+}
+
+/** the calendar day before (not 24h before: across a DST change that lands
+ *  on the wrong day, and an all-day event lost its last day on Save) */
+function dayBefore(d: Date): Date {
+  const x = new Date(d);
+  x.setDate(x.getDate() - 1);
+  return x;
 }
 
 function calendarDayOffset(start: Date, end: Date): number {
@@ -48,7 +57,8 @@ function durationLabel(startTime: string, endTime: string, endDayOffset: number,
   } else {
     mins = tMin(endTime) - tMin(startTime) + endDayOffset * 1440;
   }
-  if (mins <= 0) mins = 30;
+  // (zero-length events exist: Google allows them, a deadline say)
+  if (mins < 0) mins = 30;
   const h = Math.floor(mins / 60);
   const m = mins % 60;
   if (h === 0) return `${m}min`;
@@ -64,14 +74,77 @@ const REPEAT_PRESETS: [string, string | null][] = [
   ["Monthly", "RRULE:FREQ=MONTHLY"],
 ];
 
+/** the reminder select's "No reminder" (Google: useDefault false, no
+ *  overrides); null is the calendar's default */
+const NO_REMINDER = -1;
 const REMINDER_CHOICES: [string, number | null][] = [
   ["Default reminder", null],
+  ["No reminder", NO_REMINDER],
   ["At time of event", 0],
   ["10 min before", 10],
   ["30 min before", 30],
   ["1 hour before", 60],
   ["1 day before", 1440],
 ];
+
+/** the select's value for an event's reminders (its first override, none,
+ *  or the calendar's default) */
+function reminderOf(raw: any): number | null {
+  const r = raw?.reminders;
+  if (r?.useDefault !== false) return null;
+  const ov = r.overrides?.[0]?.minutes;
+  return typeof ov === "number" ? ov : NO_REMINDER;
+}
+/** what Save sends for the select's value */
+function reminderFields(m: number | null): Pick<EventInput, "reminder_minutes" | "reminders"> {
+  return m === NO_REMINDER
+    ? { reminders: { useDefault: false, overrides: [] }, reminder_minutes: undefined }
+    : { reminder_minutes: m };
+}
+
+const isEmail = (v: string) => /^[^@\s<>,;]+@[^@\s<>,;]+\.[^@\s<>,;]+$/.test(v);
+/** addresses compare without case: "ann@x.com" is the guest "Ann@X.com" */
+const sameEmail = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+const hasEmail = (list: string[], v: string) => list.some((x) => sameEmail(x, v));
+/** a typed or pasted guest list: "Ann Lee <ann@x.com>, bob@y.com" gives
+ *  the addresses (a name around an <address> is dropped) */
+function guestTokens(s: string): string[] {
+  const out: string[] = [];
+  for (const piece of s.split(/[,;]+/)) {
+    const bracketed = piece.match(/<([^<>\s]+@[^<>\s]+)>/);
+    if (bracketed) out.push(bracketed[1]);
+    else out.push(...piece.split(/\s+/).map((v) => v.trim()).filter(Boolean));
+  }
+  return out;
+}
+
+function reminderLabel(min: number): string {
+  if (min % 1440 === 0) return `${min / 1440} day${min === 1440 ? "" : "s"} before`;
+  if (min % 60 === 0) return `${min / 60} hour${min === 60 ? "" : "s"} before`;
+  return `${min} min before`;
+}
+
+/** Google web saves descriptions as HTML (links, line breaks): shown as text */
+export function htmlToText(s: string): string {
+  // only real markup: "Ann <ann@example.com>" in plain text is not a tag
+  if (!/<\/?(a|br|p|div|span|b|i|u|em|strong|ul|ol|li)\b[^>]*>/i.test(s)) return s;
+  return s
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li)>/gi, "\n")
+    .replace(/<a\s[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, (_m, href: string, text: string) => {
+      const t = text.replace(/<[^>]+>/g, "").trim();
+      return !t || t === href ? href : `${t} (${href})`;
+    })
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
 
 const Icon = {
   clock: (
@@ -99,10 +172,26 @@ const Icon = {
       <circle cx="12" cy="10" r="2.5" />
     </svg>
   ),
+  star: (
+    <svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round">
+      <path d="M12 3.6l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z" />
+    </svg>
+  ),
   bell: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M18 9a6 6 0 1 0-12 0c0 6-2.5 7-2.5 7h17S18 15 18 9" />
       <path d="M10 20a2.2 2.2 0 0 0 4 0" />
+    </svg>
+  ),
+  review: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="9" />
+      <path d="m8.5 12.4 2.4 2.4 4.6-5" />
+    </svg>
+  ),
+  tick: (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="m3.5 8.4 2.9 2.9 6-6.4" />
     </svg>
   ),
 };
@@ -115,7 +204,10 @@ function TimeField(props: {
   value: string;
   disabled?: boolean;
   relativeTo?: string; // start time: show durations and begin the list there
-  onPick: (v: string) => void;
+  /** the event's day: durations are elapsed time (a DST day's 1:30–3:30 is 1h) */
+  date?: string;
+  /** fromList: picked from the list, whose times run on past midnight */
+  onPick: (v: string, fromList?: boolean) => void;
   testid?: string;
 }) {
   const [open, setOpen] = useState(false);
@@ -129,19 +221,32 @@ function TimeField(props: {
       out.push({
         v: tStr(m),
         label: fmtTimeShort(d),
-        sub: props.relativeTo ? durationLabel(props.relativeTo, tStr(m), base + i * 15 >= 1440 ? 1 : 0) : undefined,
+        sub: props.relativeTo ? durationLabel(props.relativeTo, tStr(m), base + i * 15 >= 1440 ? 1 : 0, props.date) : undefined,
       });
     }
     return out;
-  }, [props.relativeTo]);
+  }, [props.relativeTo, props.date]);
   useEffect(() => {
     if (!open || !listRef.current) return;
-    const idx = opts.findIndex((o: { v: string }) => tMin(o.v) >= tMin(props.value));
+    // (the end list runs on past midnight: minutes relative to its base,
+    // or 11:15 PM matched before an overnight event's 7 AM)
+    const base = props.relativeTo ? tMin(props.relativeTo) : 0;
+    const rel = (t: string) => (((tMin(t) - base) % 1440) + 1440) % 1440;
+    const idx = opts.findIndex((o: { v: string }) => o.v === props.value || rel(o.v) >= rel(props.value));
     const el = listRef.current.children[Math.max(0, idx)] as HTMLElement | undefined;
     el?.scrollIntoView({ block: "center" });
   }, [open, opts, props.value]);
+  // WebKit draws the native field as "03 : 15  AM"; it's shown only while
+  // being typed in, under a plain "3:15 AM" otherwise
+  const label = (() => {
+    const m = tMin(props.value);
+    if (!Number.isFinite(m)) return "";
+    const h = Math.floor(m / 60) % 24;
+    return `${h % 12 || 12}:${String(m % 60).padStart(2, "0")} ${h < 12 ? "AM" : "PM"}`;
+  })();
   return (
     <span className="timefield">
+      <span className="timefield-label" aria-hidden="true">{label}</span>
       <input
         type="time"
         value={props.value}
@@ -158,14 +263,15 @@ function TimeField(props: {
         onChange={(e) => e.target.value && props.onPick(e.target.value)}
       />
       {open && !props.disabled && (
-        <div className="time-pop" ref={listRef} data-testid="time-pop">
+        <div className="time-pop" ref={listRef} data-testid="time-pop" tabIndex={-1}>
           {opts.map((o) => (
             <button
               key={o.v}
+              tabIndex={-1}
               className={"time-opt" + (o.v === props.value ? " active" : "")}
               onPointerDown={(e) => {
                 e.preventDefault();
-                props.onPick(o.v);
+                props.onPick(o.v, true);
                 setOpen(false);
               }}
             >
@@ -179,10 +285,35 @@ function TimeField(props: {
   );
 }
 
+const GUEST_ANSWER: Record<string, string> = {
+  accepted: "accepted", declined: "declined", tentative: "maybe", needsAction: "awaiting", new: "not invited yet",
+};
+const RSVP_BUTTON: Record<string, string> = { accepted: "Yes", declined: "No", tentative: "Maybe" };
+/** a steady hue per address, for its avatar */
+function hueOf(email: string): number {
+  let h = 0;
+  for (const ch of email.toLowerCase()) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return h;
+}
+const initialOf = (name: string) => (name.match(/[\p{L}\p{N}]/u)?.[0] ?? "?").toUpperCase();
+
 /** A textarea as tall as its text (never shorter than `rows`): a long
  *  description reads in full, the panel scrolls instead of the box. It
  *  re-fits when the panel is resized, since the lines re-wrap. */
-function GrowingTextarea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
+/** the first day from `date` (YYYY-MM-DD) that an RRULE's BYDAY lists;
+ *  `date` itself when the rule has none */
+function firstRepeatDay(date: string, rule: string): string {
+  const by = rule.match(/(?:^|;)BYDAY=([A-Z,]+)/)?.[1];
+  if (!by) return date;
+  const codes = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
+  const days = new Set(by.split(",").map((c) => codes.indexOf(c)).filter((n) => n >= 0));
+  if (!days.size) return date;
+  const d = new Date(`${date}T00:00:00`);
+  for (let i = 0; i < 7 && !days.has(d.getDay()); i++) d.setDate(d.getDate() + 1);
+  return toDateOnly(d);
+}
+
+export function GrowingTextarea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
   const ref = useRef<HTMLTextAreaElement | null>(null);
   const fit = () => {
     const el = ref.current;
@@ -215,6 +346,8 @@ export function EventPanel(props: {
   /** the open event as currently stored (fresher than state.event, which
    *  is the snapshot it was opened with); null when it isn't loaded */
   liveEvent?: CalendarEvent | null;
+  /** the calendar shown on its own (Isolate), if any */
+  isolated?: string | null;
 }) {
   const { state, calendars } = props;
   const [title, setTitle] = useState("");
@@ -245,6 +378,12 @@ export function EventPanel(props: {
   const [repeatRule, setRepeatRule] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Enter can arrive twice before the first save resolves (the button is
+  // disabled while busy, the key handler isn't): one save at a time.
+  const savingRef = useRef(false);
+  /** All-day switched off: its last day, and the times it left, to restore
+   *  the span if switched straight back on */
+  const allDayOffRef = useRef<{ allDayEnd: string; times: string } | null>(null);
   const [, starTick] = useState(0);
   useEffect(() => subscribeStars(() => starTick((n) => n + 1)), []);
   useEffect(() => subscribeRecon(() => starTick((n) => n + 1)), []);
@@ -252,7 +391,10 @@ export function EventPanel(props: {
   const goalOptions = useMemo(() => goals.file.goals.map((g) => g.text), [goals.file]);
   const [error, setError] = useState<string | null>(null);
   const dateRef = useRef<HTMLInputElement | null>(null);
-  const defaultCalendarId =
+  // an isolated calendar is where a new event goes (on the primary it
+  // vanished from the isolated view on Save)
+  const isolatedCal = props.isolated ? calendars.find((c) => c.id === props.isolated && calendarEditable(c)) : undefined;
+  const defaultCalendarId = isolatedCal?.id ??
     calendars.find((c) => c.is_primary && calendarEditable(c))?.id ?? calendars.find(calendarEditable)?.id ?? "";
   const [copyOpen, setCopyOpen] = useState(false);
   const openKey = state.mode === "view" ? `${state.event.calendar_id}/${state.event.id}` : state.mode;
@@ -263,6 +405,7 @@ export function EventPanel(props: {
     setError(null);
     setWithMeet(false);
     setMenuOpen(false);
+    allDayOffRef.current = null; // (an All-day switched off on the last event shaped this one's span)
     setCalendarMenuOpen(false);
     setDateEditing(false);
     setAttendeeInput("");
@@ -273,7 +416,7 @@ export function EventPanel(props: {
       setTitle(e.summary);
       setDate(toDateOnly(start));
       setAllDayEnd(
-        e.all_day ? toDateOnly(new Date(end.getTime() - 86400000)) : toDateOnly(start),
+        e.all_day ? toDateOnly(dayBefore(end)) : toDateOnly(start),
       );
       setStartTime(format(start, "HH:mm"));
       setEndTime(format(end, "HH:mm"));
@@ -285,7 +428,7 @@ export function EventPanel(props: {
       locPicked.current = e.location ?? null;
       {
         const parts = splitDrill(e.description);
-        setDescription(parts.body);
+        setDescription(htmlToText(parts.body));
         // as the margin shows it: without the model's stage directions
         setDrill(cleanDrill(parts.drill, e.summary));
       }
@@ -293,15 +436,14 @@ export function EventPanel(props: {
       setAttendees((raw.attendees ?? []).map((a: any) => a.email).filter(Boolean));
       setTransparency(raw.transparency ?? "opaque");
       setVisibility(raw.visibility ?? "default");
-      const ov = raw.reminders?.useDefault === false ? raw.reminders?.overrides?.[0]?.minutes : null;
-      setReminderMin(typeof ov === "number" ? ov : null);
+      setReminderMin(reminderOf(raw));
     } else if (state.mode === "new") {
       const d = state.draft;
       setTitle("");
       setEndDayOffset(d.allDay ? 0 : calendarDayOffset(d.start, d.end));
       setDate(toDateOnly(d.start));
       setAllDayEnd(
-        d.allDay ? toDateOnly(new Date(d.end.getTime() - 86400000)) : toDateOnly(d.start),
+        d.allDay ? toDateOnly(dayBefore(d.end)) : toDateOnly(d.start),
       );
       setStartTime(format(d.start, "HH:mm"));
       setEndTime(format(d.end, "HH:mm"));
@@ -313,14 +455,23 @@ export function EventPanel(props: {
       setDescription("");
       setDrill(null);
       setAttendees([]);
-      setTransparency("opaque");
+      // an all-day draft (the all-day lane, a month day) is Free, as Google
+      // does and as toggling All day sets
+      setTransparency(d.allDay ? "transparent" : "opaque");
       setVisibility("default");
       setReminderMin(null);
     }
   // Not `calendars`: every db change (a note saved, a sync pass) refetches
   // the list as a new array, and resetting on that put the opened snapshot
   // back into every field: the erased note reappeared and the panel flashed.
-  }, [state, defaultCalendarId]);
+  // Nor the default calendar: it changes when an isolated calendar is shown
+  // again (the pill's Show all), and that reset the open editor's edits.
+  }, [state]); // eslint-disable-line react-hooks/exhaustive-deps
+  // a new event opened before the calendars loaded takes the default once
+  // there is one
+  useEffect(() => {
+    if (state.mode === "new" && !calendarId && defaultCalendarId) setCalendarId(defaultCalendarId);
+  }, [state.mode, calendarId, defaultCalendarId]);
 
   // The note saves on its own (here, Delete on its margin note, or the
   // supervisor), unlike the other fields, which are a draft until Save. So
@@ -349,6 +500,15 @@ export function EventPanel(props: {
     document.addEventListener("pointerdown", closeOutside);
     return () => document.removeEventListener("pointerdown", closeOutside);
   }, [calendarMenuOpen]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!(event.target as Element | null)?.closest(".panel-menu, .panel-head-actions")) setMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    return () => document.removeEventListener("pointerdown", closeOutside);
+  }, [menuOpen]);
 
   // location autocomplete: debounce keystrokes; a picked/saved value geocodes
   // once for the map preview instead of re-querying.
@@ -398,14 +558,34 @@ export function EventPanel(props: {
 
   const toggleAllDay = (checked: boolean) => {
     setAllDay(checked);
+    const off = allDayOffRef.current;
+    allDayOffRef.current = null;
+    if (checked && off && off.times === `${startTime}|${endTime}|${endDayOffset}`) {
+      // straight back on (times untouched since): the span it had
+      setAllDayEnd(off.allDayEnd);
+    } else if (checked && date) {
+      // the days the timed event covers (its end may be a later day; an end
+      // at midnight doesn't cover that day): a stale last day was kept
+      const end = new Date(`${date}T${endTime}:00`);
+      end.setDate(end.getDate() + endDayOffset);
+      const last = toDateOnly(new Date(end.getTime() - 1));
+      setAllDayEnd(last > date ? last : date);
+    }
+    // a new all-day event is Free by default, as in Google Calendar
+    if (state.mode === "new") setTransparency(checked ? "transparent" : "opaque");
     if (!checked && startTime === "00:00" && endTime === "00:00") {
       setStartTime("09:00");
       setEndTime("10:00");
       setEndDayOffset(0);
+      allDayOffRef.current = { allDayEnd, times: "09:00|10:00|0" };
+    } else if (!checked) {
+      allDayOffRef.current = { allDayEnd, times: `${startTime}|${endTime}|${endDayOffset}` };
     }
   };
 
   const changeStartDate = (nextDate: string) => {
+    // a cleared date segment is not a date (it saved start: "")
+    if (!nextDate) return;
     if (allDay && date && nextDate) {
       // `allDayEnd` is the last covered day, inclusive. Move it by the same
       // calendar-day delta as the start so shifting a multi-day block keeps
@@ -416,31 +596,50 @@ export function EventPanel(props: {
       const nextLastDay = new Date(`${nextDate}T00:00:00`);
       nextLastDay.setDate(nextLastDay.getDate() + spanOffset);
       setAllDayEnd(toDateOnly(nextLastDay));
+    } else if (!allDay && date && allDayOffRef.current) {
+      // the span kept for "All-day back on" moves with the start too (a
+      // 3-day block switched off, moved a week earlier, switched back on
+      // kept its old last day: 7 days)
+      const off = allDayOffRef.current;
+      // (signed: calendarDayOffset is a span, never negative)
+      const delta = Math.round((Date.parse(`${nextDate}T00:00:00Z`) - Date.parse(`${date}T00:00:00Z`)) / 86_400_000);
+      const end = new Date(`${off.allDayEnd}T00:00:00`);
+      end.setDate(end.getDate() + delta);
+      allDayOffRef.current = { ...off, allDayEnd: toDateOnly(end) };
     }
     setDate(nextDate);
   };
 
   const addAttendee = () => {
-    const v = attendeeInput.trim().replace(/,$/, "");
-    if (/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v) && !attendees.includes(v)) {
-      setAttendees((a) => [...a, v]);
-    }
-    setAttendeeInput("");
+    // a pasted list adds every address; what isn't one stays to be fixed
+    const parts = guestTokens(attendeeInput);
+    const valid = parts.filter(isEmail);
+    const fresh = valid.filter((v, i) => !hasEmail(attendees, v) && valid.findIndex((x) => sameEmail(x, v)) === i);
+    if (fresh.length) setAttendees((a) => [...a, ...fresh]);
+    setAttendeeInput(parts.filter((v) => !valid.includes(v)).join(", "));
   };
 
   const buildInput = (): EventInput => {
-    const start = allDay ? date : toLocalISO(new Date(`${date}T${startTime}:00`));
+    // a new series starts on a day it repeats on: Weekdays picked on a
+    // Saturday gave Google a stray Saturday occurrence (DTSTART counts)
+    const day = state.mode === "new" && repeatRule ? firstRepeatDay(date, repeatRule) : date;
+    // a guest typed but not yet entered (⌘Enter, or Save) counts too
+    const typed = guestTokens(attendeeInput).filter(isEmail);
+    const withTyped = [...attendees, ...typed.filter((v, i) => !hasEmail(attendees, v) && typed.findIndex((x) => sameEmail(x, v)) === i)];
+    const start = allDay ? day : toLocalISO(new Date(`${day}T${startTime}:00`));
     let end: string;
     if (allDay) {
-      const last = allDayEnd && allDayEnd > date ? allDayEnd : date;
+      const last = allDayEnd && allDayEnd > day ? allDayEnd : day;
       const d = new Date(`${last}T00:00:00`);
       d.setDate(d.getDate() + 1);
       end = toDateOnly(d);
     } else {
-      let endD = new Date(`${date}T${endTime}:00`);
-      const startD = new Date(`${date}T${startTime}:00`);
+      let endD = new Date(`${day}T${endTime}:00`);
+      const startD = new Date(`${day}T${startTime}:00`);
       endD.setDate(endD.getDate() + endDayOffset);
-      if (endDayOffset === 0 && endD <= startD) {
+      // (an end before the start is a slip; one at the start is a
+      // zero-length event, kept as Google keeps it)
+      if (endDayOffset === 0 && endD < startD) {
         endD = new Date(startD.getTime() + 30 * 60000);
       }
       end = toLocalISO(endD);
@@ -455,42 +654,128 @@ export function EventPanel(props: {
       all_day: allDay,
       with_meet: withMeet || undefined,
       recurrence: state.mode === "new" && repeatRule ? [repeatRule] : undefined,
-      attendees: attendees.length > 0 ? attendees : state.mode === "view" ? [] : undefined,
+      attendees: withTyped.length > 0 ? withTyped : state.mode === "view" ? [] : undefined,
       transparency,
       visibility,
-      reminder_minutes: reminderMin,
+      ...reminderFields(reminderMin),
     };
   };
 
+  /** Save sends the whole form, so a field the user left alone takes the
+   *  stored event's current value: a sync pull, an undo or a note saved while
+   *  the panel was open must not be reverted by an unrelated edit. */
+  /** each field: whether the form still holds what the panel opened with
+   *  (the form keeps times to the minute; an imported event's seconds
+   *  stay as stored) */
+  const untouched = () => {
+    if (state.mode !== "view") return null;
+    const input = buildInput();
+    const opened = state.event;
+    const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+    const openedDates = eventDates(opened);
+    const minute = (d: Date) => { const x = new Date(d); x.setSeconds(0, 0); return x; };
+    const openedTimes = {
+      start: opened.all_day ? toDateOnly(openedDates.start) : toLocalISO(minute(openedDates.start)),
+      end: opened.all_day ? toDateOnly(openedDates.end) : toLocalISO(minute(openedDates.end)),
+      all_day: opened.all_day,
+    };
+    const oRaw = opened.raw ?? {};
+    const minutesOf = reminderOf;
+    const emailsOf = (raw: any): string[] => (raw.attendees ?? []).map((a: any) => a.email).filter(Boolean);
+    const parts = splitDrill(opened.description);
+    return {
+      input,
+      times: same({ start: input.start, end: input.end, all_day: input.all_day }, openedTimes),
+      title: title.trim() === opened.summary.trim(),
+      body: description === htmlToText(parts.body),
+      // (against the stored note: it saves on its own when typed, so after
+      // a note edit Save wrote the event again, and asked a series' scope)
+      note: drill === (liveDrill !== undefined ? liveDrill : cleanDrill(parts.drill, opened.summary)),
+      location: location === (opened.location ?? ""),
+      calendar: calendarId === opened.calendar_id,
+      transparency: transparency === (oRaw.transparency ?? "opaque"),
+      visibility: visibility === (oRaw.visibility ?? "default"),
+      reminder: reminderMin === minutesOf(oRaw),
+      guests: same(input.attendees ?? [], emailsOf(oRaw)),
+      meet: !withMeet,
+    };
+  };
+
+  const mergedInput = (): EventInput => {
+    const u = untouched();
+    const input = u?.input ?? buildInput();
+    const live = props.liveEvent;
+    if (state.mode !== "view" || !live || !u) return input;
+    const merged = { ...input };
+    if (u.times) {
+      const d = eventDates(live);
+      merged.start = live.all_day ? toDateOnly(d.start) : toLocalISO(d.start);
+      merged.end = live.all_day ? toDateOnly(d.end) : toLocalISO(d.end);
+      merged.all_day = live.all_day;
+    }
+    if (u.title) merged.summary = live.summary;
+    if (u.body) {
+      // the description as stored when neither its body nor the note was
+      // touched (rebuilt, it moved the note and lost a trailing newline)
+      merged.description = u.note ? live.description : joinDrill(splitDrill(live.description).body, drill) || null;
+    }
+    if (u.location) merged.location = live.location;
+    // and the Google-resource fields
+    const lRaw = live.raw ?? {};
+    if (u.transparency) merged.transparency = lRaw.transparency ?? "opaque";
+    if (u.visibility) merged.visibility = lRaw.visibility ?? "default";
+    if (u.reminder) Object.assign(merged, reminderFields(reminderOf(lRaw)));
+    const emailsOf = (raw: any): string[] => (raw.attendees ?? []).map((a: any) => a.email).filter(Boolean);
+    if (u.guests) {
+      const now = emailsOf(lRaw);
+      merged.attendees = now.length > 0 ? now : [];
+    }
+    return merged;
+  };
+
   const save = async () => {
-    if (!props.backend || readOnly) return;
+    if (!props.backend || readOnly || savingRef.current) return;
+    savingRef.current = true;
     setBusy(true);
     setError(null);
     try {
       if (state.mode === "new") {
         await props.actions.create(buildInput());
+        props.onClose();
       } else {
-        await props.actions.update(state.event, buildInput());
+        // Nothing edited: nothing to write (a recurring one asked for a
+        // scope, and "this and following" split the series over nothing)
+        const u = untouched();
+        if (u && u.times && u.title && u.body && u.note && u.location && u.calendar &&
+            u.transparency && u.visibility && u.reminder && u.guests && u.meet) {
+          props.onClose();
+          return;
+        }
+        // the stored event, not the opened snapshot: undo restores from it
+        const r = await props.actions.update(props.liveEvent ?? state.event, mergedInput());
+        if (r !== "deferred") props.onClose();
       }
-      props.onClose();
     } catch (e) {
       setError(String(e));
     } finally {
+      savingRef.current = false;
       setBusy(false);
     }
   };
 
   const remove = async () => {
-    if (!props.backend || state.mode !== "view") return;
+    if (!props.backend || state.mode !== "view" || savingRef.current) return;
+    savingRef.current = true; // (a double-click deleted twice: two undos, two copies)
     setBusy(true);
     try {
-      await props.actions.remove(state.event);
-      props.onClose();
+      const r = await props.actions.remove(props.liveEvent ?? state.event);
+      if (r !== "deferred") props.onClose();
     } catch (e) {
       setError(String(e));
     } finally {
       // the panel stays mounted between events: a busy flag left on here
       // disabled Save and Delete on every event opened after a delete
+      savingRef.current = false;
       setBusy(false);
     }
   };
@@ -502,23 +787,59 @@ export function EventPanel(props: {
   const isRecurring = state.mode === "view" && !!state.event.recurring_event_id;
   const tzName =
     Intl.DateTimeFormat().resolvedOptions().timeZone?.split("/").pop()?.replace("_", " ") ?? "local";
-  const rsvpOf = (email: string): string =>
-    state.mode === "view"
-      ? ((state.event.raw?.attendees ?? []).find((a: any) => a.email === email)?.responseStatus ?? "")
-      : "";
+  // guests as Google has them (the stored event, fresher than the opened
+  // snapshot: your own reply shows at once)
+  const liveEv = state.mode === "view" ? (props.liveEvent ?? state.event) : null;
+  const guestInfo = new Map<string, Guest>((liveEv ? guestsOf(liveEv) : []).map((g) => [g.email.toLowerCase(), g]));
+  const rooms = new Set<string>(
+    ((liveEv?.raw?.attendees ?? []) as any[]).filter((a) => a?.resource && a.email).map((a) => String(a.email).toLowerCase()),
+  );
+  const guestRows = attendees.filter((a) => !rooms.has(a.toLowerCase()));
+  // organizer, you, then the rest; guests not saved yet last
+  const order = (a: string) => {
+    const g = guestInfo.get(a.toLowerCase());
+    return g ? (g.organizer ? 0 : g.self ? 1 : 2) : 3;
+  };
+  guestRows.sort((a, b) => order(a) - order(b));
+  const tally = rsvpTally(guestRows.map((a) => guestInfo.get(a.toLowerCase())).filter((g): g is Guest => !!g));
+  // your answer to someone else's invitation (null: not an invitation)
+  // (on a shared, read-only calendar the "self" guest is its owner, not you)
+  const mine = liveEv && !readOnly ? myRsvp(liveEv) : null;
+  const canEditGuests = !readOnly && mine === null;
 
-  const prettyDate = date ? format(new Date(`${date}T00:00:00`), "EEE, MMM d") : "";
+  // (a multi-day all-day event shows its last day too: a Wed→Fri event read
+  // "Wed, Oct 14" alone)
+  const prettyDate = !date
+    ? ""
+    : allDay && allDayEnd && allDayEnd > date
+      ? `${format(new Date(`${date}T00:00:00`), "EEE, MMM d")} – ${format(new Date(`${allDayEnd}T00:00:00`), "EEE, MMM d")}`
+      : format(new Date(`${date}T00:00:00`), "EEE, MMM d");
 
   return (
     <aside
       className="event-panel"
       data-testid="event-panel"
       onKeyDown={(e) => {
+        // an IME's Enter / Escape belong to the conversion (Enter saved and
+        // closed a half-typed Japanese title)
+        if (e.nativeEvent.isComposing || e.keyCode === 229) {
+          e.stopPropagation();
+          return;
+        }
+        // Escape with the ⋯ menu open closes the menu, not the editor
+        if (e.key === "Escape" && menuOpen) {
+          e.stopPropagation();
+          setMenuOpen(false);
+          return;
+        }
         if (
           e.key === "Enter" &&
           (e.metaKey || e.ctrlKey || (e.target as HTMLElement).tagName !== "TEXTAREA")
         ) {
-          if ((e.target as HTMLElement).classList.contains("panel-attendee-input")) return;
+          // (in the guests field Enter adds the guest; ⌘Enter saves)
+          if ((e.target as HTMLElement).classList.contains("panel-attendee-input") && !(e.metaKey || e.ctrlKey)) return;
+          // Enter on a focused button presses that button (All-day, Delete…)
+          if (!(e.metaKey || e.ctrlKey) && (e.target as HTMLElement).closest("button")) return;
           e.preventDefault();
           save();
         }
@@ -553,7 +874,16 @@ export function EventPanel(props: {
             {conference && (
               <button onClick={() => window.open(conference, "_blank")}>Join meeting</button>
             )}
-            <button className="ctx-danger" onClick={remove}>
+            <button
+              data-testid="panel-cancel"
+              onClick={() => {
+                toggleCanceled(props.liveEvent ?? state.event);
+                setMenuOpen(false);
+              }}
+            >
+              {isCanceled(props.liveEvent ?? state.event) ? "Restore event" : "Cancel event"}
+            </button>
+            <button className="ctx-danger" onClick={remove} disabled={busy}>
               Delete
             </button>
           </div>
@@ -568,6 +898,13 @@ export function EventPanel(props: {
         autoFocus={state.mode === "new"}
         onChange={(e) => setTitle(e.target.value)}
       />
+
+      {state.mode === "view" && isCanceled(props.liveEvent ?? state.event) && (
+        <div className="panel-canceled" data-testid="panel-canceled">
+          <span>⊘ Canceled: kept on your calendar, struck through</span>
+          <button className="set-link" onClick={() => toggleCanceled(props.liveEvent ?? state.event)}>Restore</button>
+        </div>
+      )}
 
       {readOnly && state.mode === "view" && (
         <div className="panel-readonly" data-testid="panel-readonly">
@@ -632,8 +969,33 @@ export function EventPanel(props: {
                 value={endTime}
                 disabled={readOnly}
                 relativeTo={startTime}
+                date={date}
                 testid="time-end"
-                onPick={(v) => setEndTime(v)}
+                onPick={(v, fromList) => {
+                  setEndTime(v);
+                  // an end at or before the start is the next day's: picked
+                  // from the list (which runs on past midnight), already
+                  // overnight, or typed when that makes it 12h or less (10 PM
+                  // → a typed 12:30 AM saved as 10:30 PM); a longer typed
+                  // span (7 PM → 5 PM) is a slip, and clamps on save as
+                  // before. A typed end never drops a day it already had
+                  // (7 PM → 7 AM +1d retyped as 7:30 AM was saved 7:30 PM)
+                  // unless the event spanned a day or less (11 PM → 1 AM
+                  // retyped 11:30 PM). The list runs the 24h after the start,
+                  // so a pick says its day too, even on a 3-day event (a pick
+                  // there kept "+2d" and saved 51h for a "3h" row)
+                  const before = tMin(v) <= tMin(startTime);
+                  if (fromList) {
+                    setEndDayOffset(before ? 1 : 0);
+                    return;
+                  }
+                  if (endDayOffset > 1) return;
+                  if (before) {
+                    if (endDayOffset === 1 || tMin(v) + 1440 - tMin(startTime) <= 720) setEndDayOffset(1);
+                  } else if (tMin(endTime) + endDayOffset * 1440 - tMin(startTime) <= 1440) {
+                    setEndDayOffset(0);
+                  }
+                }}
               />
               <span className="panel-dur">
                 {endDayOffset > 0 && <span className="panel-nextday">+{endDayOffset}d</span>}
@@ -709,24 +1071,64 @@ export function EventPanel(props: {
       <div className="panel-section">
         <span className="panel-icon">{Icon.people}</span>
         <div className="panel-section-body">
-          {attendees.length > 0 && (
-            <div className="panel-attendees">
-              {attendees.map((a) => (
-                <span key={a} className={"panel-attendee rsvp-" + (rsvpOf(a) || "none")}>
-                  {a}
-                  {!readOnly && (
-                    <button
-                      aria-label={`Remove ${a}`}
-                      onClick={() => setAttendees((list) => list.filter((x) => x !== a))}
-                    >
-                      ✕
-                    </button>
-                  )}
+          {guestRows.length > 0 && (
+            <div className="panel-guests" data-testid="guests">
+              <div className="panel-guests-head">
+                <span className="panel-guests-count">
+                  {guestRows.length} guest{guestRows.length === 1 ? "" : "s"}
                 </span>
+                {tally && <span className="panel-guests-tally" data-testid="guests-tally">{tally}</span>}
+              </div>
+              {guestRows.map((a) => {
+                const g = guestInfo.get(a.toLowerCase());
+                const rsvp = g?.rsvp ?? "new";
+                const roles = [g?.organizer && "Organizer", g?.self && !readOnly && "You", g?.optional && "Optional"].filter(Boolean).join(" · ");
+                const name = g?.name ?? a;
+                return (
+                  <div key={a} className={"panel-guest rsvp-" + rsvp} data-testid="guest-row" data-rsvp={rsvp} title={a}>
+                    <span className="guest-avatar" style={{ "--guest-hue": hueOf(a) } as React.CSSProperties} aria-hidden="true">
+                      {initialOf(name)}
+                      {(rsvp === "accepted" || rsvp === "declined" || rsvp === "tentative") && (
+                        <span className="guest-badge">{rsvp === "accepted" ? "✓" : rsvp === "declined" ? "✕" : "?"}</span>
+                      )}
+                    </span>
+                    <span className="guest-text">
+                      <span className="guest-name">{name}</span>
+                      {(roles || (g?.name && a)) && (
+                        <span className="guest-sub">{[roles, g?.name ? a : ""].filter(Boolean).join(" · ")}</span>
+                      )}
+                    </span>
+                    <span className="sr-only">{GUEST_ANSWER[rsvp]}</span>
+                    {canEditGuests && (
+                      <button
+                        className="guest-remove"
+                        aria-label={`Remove ${a}`}
+                        onClick={() => setAttendees((list) => list.filter((x) => x !== a))}
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {mine !== null && liveEv && (
+            <div className="panel-rsvp" data-testid="rsvp">
+              <span className="panel-rsvp-label">Going?</span>
+              {(["accepted", "declined", "tentative"] as Rsvp[]).map((r) => (
+                <button
+                  key={r}
+                  className={"rsvp-btn rsvp-btn-" + r + (mine === r ? " on" : "")}
+                  aria-pressed={mine === r}
+                  onClick={() => void props.actions.respond(liveEv, r).catch(() => {})}
+                >
+                  {RSVP_BUTTON[r]}
+                </button>
               ))}
             </div>
           )}
-          {!readOnly && (
+          {canEditGuests && (
             <input
               className="panel-plain panel-attendee-input"
               placeholder="Add participants"
@@ -741,6 +1143,7 @@ export function EventPanel(props: {
               onBlur={addAttendee}
             />
           )}
+          {!canEditGuests && guestRows.length === 0 && <span className="panel-muted">No guests</span>}
         </div>
       </div>
 
@@ -773,54 +1176,64 @@ export function EventPanel(props: {
         eventDates(state.event).end.getTime() < now().getTime() &&
         !reconExempt(state.event, calendars) && (
           <div className="panel-section" data-testid="panel-recon">
-            <span className="panel-icon">✓</span>
+            <span className="panel-icon">{Icon.review}</span>
             <div className="panel-section-body panel-recon-body">
               {(() => {
                 const key = reconKey(state.event);
                 const st = reconState(state.event, calendars, now());
                 return (
                   <>
-                    <div className="recon-seg" role="group" aria-label="Did this happen?">
+                    <span className="recon-q" id="recon-q">Did it happen?</span>
+                    {/* one segmented control, like the app's others: the answer
+                        is the selected segment ("Didn't happen" deletes, so it
+                        never stays selected) */}
+                    <div className="recon-seg" role="radiogroup" aria-labelledby="recon-q">
                       <button
+                        role="radio"
+                        aria-checked={st === "done"}
                         className={"recon-seg-btn yes" + (st === "done" ? " active" : "")}
                         data-testid="panel-recon-yes"
+                        title={st === "done" ? "Marked as happened (click to undo)" : "It happened"}
                         onClick={() => setRecon(key, st === "done" ? null : "done")}
                       >
-                        <span className="recon-seg-ic">✓</span> Happened
+                        {st === "done" && Icon.tick}
+                        Happened
                       </button>
                       <button
+                        role="radio"
+                        aria-checked={st === "canceled"}
                         className={"recon-seg-btn canceled" + (st === "canceled" ? " active" : "")}
                         data-testid="panel-recon-canceled"
-                        title="Canceled: skipped, but stays on the calendar (struck through)"
-                        onClick={() => setRecon(key, st === "canceled" ? null : "canceled")}
+                        title="Canceled: stays on the calendar, struck through"
+                        onClick={() => setRecon(key, st === "canceled" ? null : "canceled", state.event)}
                       >
-                        <span className="recon-seg-ic">⊘</span> Canceled
+                        Canceled
                       </button>
                       <button
+                        role="radio"
+                        aria-checked={false}
                         className="recon-seg-btn no"
                         data-testid="panel-recon-no"
-                        title="Didn't happen: deletes the event (⌘Z to undo)"
+                        title="Didn't happen: removes the event (⌘Z undoes)"
                         onClick={() => void props.actions.removeOccurrence(state.event)}
                       >
-                        <span className="recon-seg-ic">✕</span> Didn't
-                      </button>
-                      <button
-                        className="recon-seg-btn"
-                        data-testid="panel-recon-move"
-                        title="It happened, but at a different time — adjust the times and save"
-                        aria-label="Happened at a different time"
-                        onClick={(ev) => {
-                          setRecon(key, "done");
-                          const panel = (ev.currentTarget as HTMLElement).closest(
-                            "[data-testid=event-panel]",
-                          );
-                          (panel?.querySelector("[data-testid=time-start]") as HTMLElement | null)?.focus();
-                        }}
-                      >
-                        <span className="recon-seg-ic">↷</span>
+                        Didn't happen
                       </button>
                     </div>
-                    {st === "unsettled" && <span className="recon-hint">unconfirmed</span>}
+                    <button
+                      className="recon-moved"
+                      data-testid="panel-recon-move"
+                      title="It happened, but at a different time: adjust the times and save"
+                      onClick={(ev) => {
+                        setRecon(key, "done");
+                        const panel = (ev.currentTarget as HTMLElement).closest(
+                          "[data-testid=event-panel]",
+                        );
+                        (panel?.querySelector("[data-testid=time-start]") as HTMLElement | null)?.focus();
+                      }}
+                    >
+                      At a different time? <b>Adjust the times</b>
+                    </button>
                   </>
                 );
               })()}
@@ -905,7 +1318,7 @@ export function EventPanel(props: {
 
       {state.mode === "view" && !readOnly && (
         <div className="panel-section">
-          <span className="panel-icon panel-star-icon">★</span>
+          <span className="panel-icon panel-star-icon">{Icon.star}</span>
           <div className="panel-section-body">
             <select
               className="panel-plain panel-goal"
@@ -914,7 +1327,9 @@ export function EventPanel(props: {
                 const st = starState(starKey(state.event));
                 if (!st) return "";
                 if (st.kind === "auto") return "__auto";
-                return st.goal ?? "__starred";
+                // a deleted goal's events are still starred: say so (it read
+                // "Not goal work" while the grid ringed them gold)
+                return st.goal && goalOptions.includes(st.goal) ? st.goal : "__starred";
               })()}
               onChange={(e) => {
                 const v = e.target.value;
@@ -942,7 +1357,8 @@ export function EventPanel(props: {
       )}
 
       <div className="panel-divider" />
-      {state.mode === "view" && (
+      {/* (all-day events have no margin to show a note in) */}
+      {state.mode === "view" && (!state.event.all_day || !!drill) && (
         <DrillNote
           key={`${state.event.calendar_id}/${state.event.id}`}
           note={drill}
@@ -991,7 +1407,7 @@ export function EventPanel(props: {
               }}
             >
               <span>{cal?.summary ?? "Choose calendar"}</span>
-              <span className="panel-cal-chevron" aria-hidden="true">⌄</span>
+              <svg className="panel-cal-chevron" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5l3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
             </button>
             {calendarMenuOpen && (
               <div
@@ -1079,25 +1495,29 @@ export function EventPanel(props: {
                 {label}
               </option>
             ))}
+            {/* a reminder set elsewhere (15 min, 2 days…) shows as itself */}
+            {reminderMin != null && !REMINDER_CHOICES.some(([, m]) => m === reminderMin) && (
+              <option value={String(reminderMin)}>{reminderLabel(reminderMin)}</option>
+            )}
           </select>
         </div>
       </div>
 
       {error && <div className="panel-error">{error}</div>}
 
+      {!readOnly && (
       <div className="panel-footer">
-        {state.mode === "view" && !readOnly && (
+        {state.mode === "view" && (
           <button className="btn btn-danger" onClick={remove} disabled={busy}>
             Delete
           </button>
         )}
         <span className="panel-spacer" />
-        {!readOnly && (
-          <button className="btn btn-accent" onClick={save} disabled={busy}>
-            {state.mode === "new" ? "Create" : "Save"} <kbd>↩</kbd>
-          </button>
-        )}
+        <button className="btn btn-accent" onClick={save} disabled={busy}>
+          {state.mode === "new" ? "Create" : "Save"} <kbd>↩</kbd>
+        </button>
       </div>
+      )}
     </aside>
   );
 }

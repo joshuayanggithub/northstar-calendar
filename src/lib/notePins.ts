@@ -31,17 +31,27 @@ function load(): Record<string, NotePin> {
   } catch {
     cache = {};
   }
+  // pins were kept by calendar/id: a calendar move (same id) lost them
+  for (const k of Object.keys(cache!)) {
+    if (!k.includes("/")) continue;
+    if (!cache![idOf(k)]) cache![idOf(k)] = cache![k];
+    delete cache![k];
+  }
   return cache!;
 }
 
+/** callers pass the event's calendar/id key; a pin belongs to the event id
+ *  (Google keeps it across a calendar move) */
+const idOf = (key: string) => key.slice(key.lastIndexOf("/") + 1);
+
 export function notePin(key: string): NotePin | null {
-  return load()[key] ?? null;
+  return load()[idOf(key)] ?? null;
 }
 
 export function setNotePin(key: string, pin: NotePin | null) {
   const m = load();
-  if (pin) m[key] = pin;
-  else delete m[key];
+  if (pin) m[idOf(key)] = pin;
+  else delete m[idOf(key)];
   try {
     localStorage.setItem(KEY, JSON.stringify(m));
   } catch {

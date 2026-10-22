@@ -16,11 +16,18 @@ import {
 
 export { addDays, addMonths, addWeeks, format, isSameDay, isSameMonth, startOfDay };
 
+/** the locale every label is written in: the UI is English, 12-hour, so
+ *  the few labels that followed the system locale read "14:30" beside
+ *  chips saying "2:30 PM" (and "Okt 1" under "October 2026") in de-DE */
+export const LOCALE = "en-US";
+
 let fixedNow: Date | null = null;
 {
   const p = typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("now");
   if (p) {
-    const d = new Date(p);
+    // (a bare date is local midnight: as UTC it was the evening before here)
+    const ymd = p.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    const d = ymd ? new Date(Number(ymd[1]), Number(ymd[2]) - 1, Number(ymd[3])) : new Date(p);
     if (!isNaN(d.getTime())) fixedNow = d;
   }
 }
@@ -52,7 +59,8 @@ export function monthGrid(d: Date): Date[][] {
 }
 
 /** a move measured on the wall clock: whole calendar days, then minutes */
-export type WallShift = { days: number; minutes: number };
+/** business: `days` counts weekdays (a move made with weekends hidden) */
+export type WallShift = { days: number; minutes: number; business?: boolean };
 
 /** the shift that takes `from` to `to`, on the wall clock */
 export function wallShiftBetween(from: Date, to: Date): WallShift {
@@ -65,7 +73,14 @@ export function wallShiftBetween(from: Date, to: Date): WallShift {
  *  off); minutes past midnight roll into the next day */
 export function shiftWallClock(d: Date, s: WallShift): Date {
   const x = startOfDay(d);
-  x.setDate(x.getDate() + s.days);
+  if (s.business) {
+    // with weekends hidden a column is a weekday: Fri + 1 is Mon, not Sat
+    const dir = s.days < 0 ? -1 : 1;
+    for (let moved = 0; moved < Math.abs(s.days);) {
+      x.setDate(x.getDate() + dir);
+      if (x.getDay() !== 0 && x.getDay() !== 6) moved++;
+    }
+  } else x.setDate(x.getDate() + s.days);
   x.setHours(0, minutesOfDay(d) + s.minutes, d.getSeconds(), d.getMilliseconds());
   return x;
 }
@@ -129,4 +144,41 @@ export function toLocalISO(d: Date): string {
 
 export function toDateOnly(d: Date): string {
   return format(d, "yyyy-MM-dd");
+}
+
+/** The wall clock of an instant in an IANA zone: its date and time there. */
+export function wallIn(d: Date, timeZone: string): { date: string; h: number; m: number; s: number } {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone, year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+    }).formatToParts(d).map((p) => [p.type, p.value]),
+  );
+  return { date: `${parts.year}-${parts.month}-${parts.day}`, h: Number(parts.hour) % 24, m: Number(parts.minute), s: Number(parts.second) };
+}
+
+/** An instant as RFC 3339 in a zone's wall clock and offset. */
+export function isoInZone(d: Date, timeZone: string): string {
+  const w = wallIn(d, timeZone);
+  const [Y, M, D] = w.date.split("-").map(Number);
+  const off = Math.round((Date.UTC(Y, M - 1, D, w.h, w.m, w.s) - Math.floor(d.getTime() / 1000) * 1000) / 60000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const a = Math.abs(off);
+  return `${w.date}T${pad(w.h)}:${pad(w.m)}:${pad(w.s)}${off < 0 ? "-" : "+"}${pad(Math.floor(a / 60))}:${pad(a % 60)}`;
+}
+
+/** The instant a wall clock in a zone names (YYYY-MM-DD, h:m:s there), as
+ *  RFC 3339 with that zone's offset: a series' times are its zone's, not
+ *  this computer's (a Tokyo series edited from New York across a DST
+ *  change kept its old time). */
+export function zonedISO(date: string, h: number, m: number, s: number, timeZone: string): string {
+  const [Y, M, D] = date.split("-").map(Number);
+  const want = Date.UTC(Y, M - 1, D, h, m, s);
+  let t = want;
+  for (let i = 0; i < 3; i++) {
+    const w = wallIn(new Date(t), timeZone);
+    const [y2, m2, d2] = w.date.split("-").map(Number);
+    t += want - Date.UTC(y2, m2 - 1, d2, w.h, w.m, w.s);
+  }
+  return isoInZone(new Date(t), timeZone);
 }

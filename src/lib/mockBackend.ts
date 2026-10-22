@@ -156,6 +156,14 @@ function mk(
     recurring_event_id: null,
     conference_url: conference,
     updated: null,
+    // as Google sends a Meet event: the conference resource behind the link
+    ...(conference ? {
+      raw: { conferenceData: {
+        conferenceId: conference.split("/").pop(),
+        conferenceSolution: { key: { type: "hangoutsMeet" } },
+        entryPoints: [{ entryPointType: "video", uri: conference }],
+      } },
+    } : {}),
   };
 }
 
@@ -303,6 +311,9 @@ export const mockBackend: Backend = {
       recurrence: insts[0].raw?.masterRecurrence ?? ["RRULE:FREQ=DAILY"],
       start: insts[0].all_day ? { date: insts[0].start } : { dateTime: insts[0].start },
       end: insts[0].all_day ? { date: insts[0].end } : { dateTime: insts[0].end },
+      // the guest list and organizer, as Google's master carries them
+      ...(insts[0].raw?.attendees ? { attendees: insts[0].raw.attendees } : {}),
+      ...(insts[0].raw?.organizer ? { organizer: insts[0].raw.organizer } : {}),
     };
   },
   async getSeriesInstances(_calendarId, masterId) {
@@ -320,7 +331,7 @@ export const mockBackend: Backend = {
       destinationId && destinationId !== calendarId ? destinationId : undefined,
     );
   },
-  async splitSeries(_calendarId, masterId, recurrence, input, countSplit?: CountSeriesSplit) {
+  async splitSeries(_calendarId, masterId, recurrence, input, countSplit?: CountSeriesSplit, firstNote?: string | null) {
     if (countSplit) {
       const timestamp = (value: string | undefined) => value?.length === 10
         ? Date.parse(`${value}T00:00:00Z`)
@@ -347,7 +358,9 @@ export const mockBackend: Backend = {
       };
     }
     await applySeriesPatch(masterId, { recurrence });
-    return mockBackend.createEvent(input);
+    // (the mock's new series is one row: its first occurrence)
+    const note = firstNote?.split(/\s+/).join(" ").trim();
+    return mockBackend.createEvent(note ? { ...input, description: joinDrill(splitDrill(input.description).body, note) || null } : input);
   },
   async setEventNote(calendarId, eventId, note) {
     const index = events.findIndex((e) => e.id === eventId && e.calendar_id === calendarId);
@@ -359,6 +372,19 @@ export const mockBackend: Backend = {
     if (description === (ev.description ?? null)) return previous;
     // a fresh snapshot, like the native store
     events.splice(index, 1, { ...ev, description });
+    notifyDb();
+    return previous;
+  },
+  async respondEvent(calendarId, eventId, status) {
+    const index = events.findIndex((e) => e.id === eventId && e.calendar_id === calendarId);
+    if (index < 0) throw new Error("event not found");
+    const ev = events[index];
+    const list: any[] = ev.raw?.attendees ?? [];
+    const me = list.find((a) => a?.self);
+    if (!me) throw new Error("you aren't a guest of this event");
+    const previous = me.responseStatus ?? "needsAction";
+    const attendees = list.map((a) => (a?.self ? { ...a, responseStatus: status } : a));
+    events.splice(index, 1, { ...ev, raw: { ...ev.raw, attendees } });
     notifyDb();
     return previous;
   },
@@ -401,6 +427,12 @@ export const mockBackend: Backend = {
         ? { useDefault: false, overrides: [{ method: "popup", minutes: input.reminder_minutes }] }
         : { useDefault: true }),
     };
+    // an existing conference carried over (as Google: hangoutLink from it)
+    const conf = input.conference_data as any;
+    if (conf && !input.with_meet) {
+      ev.raw.conferenceData = conf;
+      ev.conference_url = conf.entryPoints?.find((p: any) => p.entryPointType === "video")?.uri ?? null;
+    }
     events.push(ev);
     notifyDb();
     return ev.id;

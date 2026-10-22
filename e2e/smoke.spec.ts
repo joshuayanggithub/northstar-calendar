@@ -2,6 +2,8 @@ import { expect, test, type Page } from "@playwright/test";
 
 // Fixed clock so mock data and the grid are deterministic.
 const NOW = "2026-10-14T09:00:00";
+/** days WeekView renders beyond each edge of the view (PAN_OVERSCAN_DAYS) */
+const PAN_OVERSCAN = 14;
 
 async function panelDateValue(panel: import("@playwright/test").Locator): Promise<string> {
   await panel.locator(".panel-date-pretty").click();
@@ -158,7 +160,10 @@ test("parity: event editor docks full-height on the right (Notion)", async ({ pa
   const box = (await panel.boundingBox())!;
   const vp = page.viewportSize()!;
   expect(box.x + box.width).toBeGreaterThanOrEqual(vp.width - 2); // flush right
-  expect(box.height).toBeGreaterThanOrEqual(vp.height - 2); // full height
+  // full height below the top bar (Today, ‹ ›, the view menu stay reachable)
+  const bar = (await page.locator(".topbar").boundingBox())!;
+  expect(box.y).toBeGreaterThanOrEqual(bar.y + bar.height - 1);
+  expect(box.y + box.height).toBeGreaterThanOrEqual(vp.height - 2);
   await expect(panel.locator(".panel-dur")).toContainText("1h"); // duration label
 });
 
@@ -704,7 +709,7 @@ test("gesture: changing visible days clears a partial horizontal pan", async ({ 
   await expect(page.locator(".day-head")).toHaveCount(5);
   const first = (await page.locator(".day-head").first().boundingBox())!;
   const body = (await page.getByTestId("day-col-0").boundingBox())!;
-  const base = await page.locator(".day-clip").evaluate((el) => 2 * el.clientWidth / 5);
+  const base = await page.locator(".day-clip").evaluate((el, overscan) => overscan * el.clientWidth / 5, PAN_OVERSCAN);
   const scrollLeft = await grid.evaluate((el) => el.scrollLeft);
   expect(Math.abs(first.x - body.x)).toBeLessThan(1);
   expect(Math.abs(scrollLeft - base)).toBeLessThan(1);
@@ -971,7 +976,8 @@ test("navigation: a stale event-range response cannot replace the latest week", 
 test("gesture: a swipe never paints the old days pulled back a column", async ({ page }) => {
   // At every day boundary the offset used to drop by a whole column before
   // React rendered the shifted days, so one frame showed the previous days
-  // jumped back under the pointer: the swipe's jitter.
+  // jumped back under the pointer: the swipe's jitter. The synchronous day
+  // commit also makes this fail if pan.pending is recorded after onPan.
   await open(page);
   await page.evaluate(() => {
     const w = window as any;
@@ -981,7 +987,7 @@ test("gesture: a swipe never paints the old days pulled back a column", async ({
       document.querySelectorAll(".day-head").length;
     const pos = () => {
       const dnum = Number(document.querySelector(".day-head .dnum")!.textContent);
-      return dnum + (grid.scrollLeft - 2 * colW()) / colW();
+      return dnum + (grid.scrollLeft - 14 * colW() /* PAN_OVERSCAN */) / colW();
     };
     w.__swipe.push(pos());
     grid.addEventListener("scroll", () => w.__swipe.push(pos()), { passive: true });
@@ -1820,7 +1826,7 @@ test("recurring: 'all events' saves guests, busy, visibility, and reminders", as
     await expect(panel.locator(".panel-section .panel-cal").last()).toHaveValue("30");
     await expect(panel.locator(".panel-inline-select").nth(0)).toHaveValue("transparent");
     await expect(panel.locator(".panel-inline-select").nth(1)).toHaveValue("private");
-    await expect(panel.locator(".panel-attendee")).toContainText("qa-test@example.invalid");
+    await expect(panel.getByTestId("guest-row")).toContainText("qa-test@example.invalid");
     await page.keyboard.press("Escape");
   }
 });
@@ -2714,8 +2720,10 @@ test("multiselect: shift-click again removes from the selection", async ({ page 
 test("multiselect: cmd+A selects all visible events", async ({ page }) => {
   await open(page);
   await page.keyboard.press("ControlOrMeta+a");
-  const chips = await page.locator(".chip-timed").count();
-  const selected = await page.locator(".chip-timed.selected").count();
+  // the days on screen (not the runway columns rendered beyond them)
+  const chips = await page.locator("[data-testid^=day-col-] .chip-timed").count();
+  const selected = await page.locator("[data-testid^=day-col-] .chip-timed.selected").count();
+  expect(chips).toBeGreaterThan(0);
   expect(selected).toBe(chips);
   await expect(page.getByTestId("toast")).toContainText("Selected");
 });
@@ -2772,7 +2780,8 @@ test("multiselect: bulk delete skips read-only events with a note", async ({ pag
 
 // --- calendar colors: exactly what Google Calendar shows, tinted by the chip ---
 
-test("colors: calendars wear the exact color Google Calendar shows, tinted translucent", async ({ page }) => {
+test("colors: in Google's exact mode calendars wear the color Google Calendar shows, tinted translucent", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("prefs", JSON.stringify({ colorMode: "google" })));
   await open(page);
   const chip = (title: string) => page.locator(".chip-timed", { hasText: title });
   const calOf = (title: string) => chip(title).evaluate((el) => getComputedStyle(el).getPropertyValue("--cal").trim());
@@ -3142,8 +3151,15 @@ test("cluster: a cascade of 3+ tiny overlapping events merges into one block of 
   await expect(block.locator(".cluster-row").first()).toContainText("Distraction: shopping");
   const shoppingRow = block.locator(".cluster-row", { hasText: "Distraction: shopping" });
   await expect(shoppingRow.locator(".cluster-dot")).toHaveCount(0);
-  expect(await shoppingRow.evaluate((row) => getComputedStyle(row, "::before").backgroundColor))
-    .toBe("rgb(121, 85, 72)");
+  // the dot is its calendar's color
+  expect(await shoppingRow.evaluate((row) => {
+    const probe = document.createElement("span");
+    probe.style.background = getComputedStyle(row).getPropertyValue("--cluster-dot-color");
+    document.body.append(probe);
+    const want = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return getComputedStyle(row, "::before").backgroundColor === want && want !== "rgba(0, 0, 0, 0)";
+  })).toBe(true);
   // the individual sliver chips are gone
   await expect(page.locator(".chip-timed", { hasText: "Browsing furniture" }).locator(".chip-title")).toHaveCount(0);
   // the block spans the full column: no indents, one rectangle
@@ -3198,7 +3214,8 @@ test("recon: the event panel carries reconcile buttons, including happened-at", 
   await run.click();
   const panel = page.getByTestId("event-panel");
   const row = panel.getByTestId("panel-recon");
-  await expect(row).toContainText("unconfirmed");
+  await expect(row).toContainText("Did it happen?");
+  await expect(row.getByRole("radio", { checked: true })).toHaveCount(0); // not answered yet
   await row.getByTestId("panel-recon-yes").click();
   await expect(run).toHaveClass(/past/);
   await expect(row.getByTestId("panel-recon-yes")).toHaveClass(/active/);
@@ -3415,7 +3432,7 @@ test("recon: R triage mode walks the queue with Y/X and the sweep banner bulk-co
   await page.keyboard.press("r");
   const pill = page.getByTestId("recon-pill");
   await expect(pill).toBeVisible();
-  await expect(pill).toContainText("Reconcile:");
+  await expect(pill).toContainText("Did this happen?");
   await page.keyboard.press("y"); // happened -> advances or exits
   // mark everything else via keyboard until the pill closes (queue is small)
   for (let i = 0; i < 48 && (await pill.count()) > 0; i++) await page.keyboard.press("y");
@@ -3685,7 +3702,7 @@ test("gesture: horizontal pan keeps dx when later trackpad packets contain verti
     const colWidth = dayClip.clientWidth / document.querySelectorAll(".day-head").length;
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     const currentDay = Number(document.querySelector(".day-head .dnum")!.textContent);
-    return (currentDay - startDay) * colWidth + grid.scrollLeft - 2 * colWidth;
+    return (currentDay - startDay) * colWidth + grid.scrollLeft - 14 * colWidth /* PAN_OVERSCAN */;
   }, startDay);
   expect(Math.abs(moved - 120), "all horizontal deltas from the locked swipe should reach the viewport").toBeLessThan(1);
 });
@@ -3705,7 +3722,7 @@ test("gesture: horizontal pan retains its leading dx before axis lock", async ({
     const colWidth = dayClip.clientWidth / document.querySelectorAll(".day-head").length;
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     const currentDay = Number(document.querySelector(".day-head .dnum")!.textContent);
-    return (currentDay - startDay) * colWidth + grid.scrollLeft - 2 * colWidth;
+    return (currentDay - startDay) * colWidth + grid.scrollLeft - 14 * colWidth /* PAN_OVERSCAN */;
   }, startDay);
   expect(Math.abs(moved - 240), "the leading x component should join the swipe after its axis locks").toBeLessThan(1);
 });
@@ -3724,7 +3741,7 @@ test("gesture: ambiguous X movement expires when its wheel stream idles", async 
     const colWidth = dayClip.clientWidth / document.querySelectorAll(".day-head").length;
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     const currentDay = Number(document.querySelector(".day-head .dnum")!.textContent);
-    return (currentDay - startDay) * colWidth + grid.scrollLeft - 2 * colWidth;
+    return (currentDay - startDay) * colWidth + grid.scrollLeft - 14 * colWidth /* PAN_OVERSCAN */;
   }, startDay);
   expect(Math.abs(moved - 8), "a new swipe must not inherit an expired X candidate").toBeLessThan(1);
 });
@@ -3751,7 +3768,7 @@ test("gesture: sustained vertical trackpad noise does not accumulate into a late
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     const currentDay = Number(document.querySelector(".day-head .dnum")!.textContent);
     return {
-      horizontal: (currentDay - startDay) * colWidth + grid.scrollLeft - 2 * colWidth,
+      horizontal: (currentDay - startDay) * colWidth + grid.scrollLeft - 14 * colWidth /* PAN_OVERSCAN */,
       vertical: grid.scrollTop,
     };
   }, startDay);
@@ -3813,7 +3830,7 @@ test("gesture: nine-day pan keeps every four-pixel step across day boundaries", 
     for (let i = 0; i < 40; i++) {
       grid.dispatchEvent(new WheelEvent("wheel", { deltaX: 4, deltaY: 0, bubbles: true, cancelable: true }));
       await new Promise((resolve) => requestAnimationFrame(resolve));
-      const base = 2 * (document.querySelector(".day-clip") as HTMLElement).clientWidth / 9;
+      const base = 14 /* PAN_OVERSCAN */ * (document.querySelector(".day-clip") as HTMLElement).clientWidth / 9;
       result.push((firstDay() - startDay) * dayWidth + grid.scrollLeft - base);
     }
     return result;
@@ -4084,29 +4101,33 @@ test("cshape: a fully-covered slab is still clickable via its title band", async
 
 // --- insights (all 10, dense one-liners) ---
 
-test("insights: renders all ten stat rows with real numbers", async ({ page }) => {
+test("insights: renders every card and chart with real numbers", async ({ page }) => {
   await open(page);
   await page.keyboard.press("i");
   const v = page.getByTestId("insights-view");
   await expect(v).toBeVisible();
   for (const id of [
+    "ins-report",
+    "ins-deepwork",
     "ins-sleep",
     "ins-distraction",
-    "ins-deepwork",
     "ins-score",
     "ins-alloc",
-    "ins-goals",
-    "ins-routines",
+    "ins-sleep-chart",
+    "ins-score-cal",
     "ins-fragmentation",
+    "ins-distraction-chart",
+    "ins-routines",
+    "ins-goals",
     "ins-forecast",
-    "ins-report",
   ]) {
     await expect(v.getByTestId(id)).toBeVisible();
   }
   await expect(v.getByTestId("ins-sleep").locator(".ins-big")).toContainText("h");
   await expect(v.getByTestId("ins-distraction")).toContainText("top: YouTube");
   await expect(v.getByTestId("ins-goals").locator(".ins-big")).toHaveText("2/6");
-  await expect(v.getByTestId("ins-routines")).toContainText("LUNCH 2/2");
+  await expect(v.getByTestId("ins-routines")).toContainText("Lunch");
+  await expect(v.getByTestId("ins-routines")).toContainText("on time");
 });
 
 test("no Obsidian link: no journal view, nothing reads or writes a notes vault", async ({ page }) => {
